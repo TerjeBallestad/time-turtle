@@ -1,0 +1,27 @@
+.toast {
+  background: var(--surface-toast);
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius);
+  padding: 8px 16px;
+  font-size: 12.5px;
+  color: var(--text);
+  box-shadow: var(--shadow-toast);
+  font-family: var(--sans);
+  display: inline-block;
+  animation: toast-in 0.18s ease;
+}
+.error {
+  border-color: rgba(229, 72, 77, 0.5);
+  color: #f4a6a8;
+}
+.stack {
+  position: fixed;
+  bottom: 18px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 400;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: center;
+}

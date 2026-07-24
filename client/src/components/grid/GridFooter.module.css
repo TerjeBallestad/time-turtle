@@ -1,0 +1,18 @@
+.footer {
+  display: flex;
+  gap: 18px;
+  padding: 8px 9px 0;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--text-3);
+}
+.right {
+  margin-left: auto;
+}
+.value2 {
+  color: var(--text-2);
+}
+.value {
+  color: var(--text);
+  font-weight: 600;
+}

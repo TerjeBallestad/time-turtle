@@ -1,0 +1,55 @@
+/* PM Board — color tokens (extracted verbatim from dashboard/style.css) */
+:root {
+  /* Backgrounds */
+  --bg: #0f1014;
+  --bg-side: #121318;
+  --bg-rail: #111218;
+  --panel: #15161b;
+  --panel-dim: #13141a;
+  --panel-hover: #1b1d24;
+  --input: #191b21;
+  --input-border: #22252f;
+  --border: #1f222b;
+  --border-2: #262933;
+  /* Text ramp */
+  --text: #e6e7ec;
+  --text-2: #9b9fad;
+  --text-3: #62667a;
+  --text-4: #4a4e5e;
+  /* Accents */
+  --accent: #7b83eb;
+  --accent-deep: #4c56c0;
+  --blue: #52a9ff;
+  --green: #46c288;
+  --orange: #f0883e;
+  --purple: #c084fc;
+  --yellow: #e2c541;
+  --danger: #e5484d;
+  --gold: #d3b078;
+  /* Semantic aliases */
+  --surface-app: var(--bg);
+  --surface-sidebar: var(--bg-side);
+  --surface-rail: var(--bg-rail);
+  --surface-card: var(--panel);
+  --surface-card-hover: var(--panel-hover);
+  --surface-input: var(--input);
+  --surface-overlay: #131419;
+  --surface-modal: #16171d;
+  --surface-code: #0d0e12;
+  --surface-toast: #1d1f27;
+  --border-card-hover: #2e3342;
+  --text-body: var(--text);
+  --text-secondary: var(--text-2);
+  --text-muted: var(--text-3);
+  --text-faint: var(--text-4);
+  --text-prose: #c9cbd4;
+  --on-accent: #0f1014;
+  /* Tinted fills (color at low alpha over dark) */
+  --tint-accent: rgba(123, 131, 235, 0.1);
+  --tint-blue: rgba(82, 169, 255, 0.08);
+  --tint-green: rgba(70, 194, 136, 0.1);
+  --tint-orange: rgba(240, 136, 62, 0.09);
+  --tint-danger: rgba(229, 72, 77, 0.12);
+  --tint-yellow: rgba(226, 197, 65, 0.1);
+  --scrim: rgba(5, 6, 9, 0.55);
+}

@@ -1,0 +1,10 @@
+.hint {
+  margin-top: 14px;
+  font-size: 11px;
+  color: var(--text-3);
+  line-height: 2;
+}
+/* The inline-key helper — a 2px breathing gap around the format-example keys. */
+.k {
+  margin: 0 2px;
+}

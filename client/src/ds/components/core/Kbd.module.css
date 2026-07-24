@@ -1,0 +1,8 @@
+.kbd {
+  font-family: var(--mono);
+  font-size: 10px;
+  background: var(--input-border);
+  padding: 1px 5px;
+  border-radius: var(--radius-kbd);
+  color: var(--text-2);
+}

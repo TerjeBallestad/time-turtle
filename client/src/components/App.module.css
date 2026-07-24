@@ -1,0 +1,17 @@
+.app {
+  display: flex;
+  height: 100vh;
+  background: var(--bg);
+  font-family: var(--sans);
+}
+.content {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+.main {
+  flex: 1;
+  overflow-y: auto;
+  min-height: 0;
+}

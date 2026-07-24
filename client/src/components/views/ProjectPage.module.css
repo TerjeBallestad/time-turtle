@@ -1,0 +1,9 @@
+.cols {
+  grid-template-columns: 110px 130px 170px 1fr 60px 70px;
+}
+/* bill cell — tighter vertical padding than the standard 8px table cell. */
+.billCell {
+  font-size: 12.5px;
+  color: var(--text);
+  padding: 4px 12px;
+}

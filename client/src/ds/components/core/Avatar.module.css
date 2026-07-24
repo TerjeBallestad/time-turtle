@@ -1,0 +1,25 @@
+.avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  font-family: var(--sans);
+  font-weight: 700;
+}
+
+.gold {
+  background: rgba(211, 176, 120, 0.18);
+  color: var(--gold);
+}
+.accent {
+  background: rgba(123, 131, 235, 0.18);
+  color: var(--accent);
+}
+.green {
+  background: rgba(70, 194, 136, 0.18);
+  color: var(--green);
+}
+.neutral {
+  background: var(--input-border);
+  color: var(--text-2);
+}

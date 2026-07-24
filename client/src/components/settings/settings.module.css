@@ -1,0 +1,179 @@
+/* Settings section idioms (formerly settingsStyles.ts). Input/Select size overrides use
+   a doubled class selector so they out-specify the ds .input/.select base regardless of
+   CSS bundle order. */
+.section {
+  margin-bottom: 32px;
+}
+.row {
+  display: grid;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 0;
+}
+.rowHead {
+  padding-top: 0;
+  padding-bottom: 0;
+}
+.th {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--text-3);
+}
+.label {
+  font-size: 12.5px;
+  color: var(--text-2);
+}
+.empty {
+  font-size: 12.5px;
+  color: var(--text-3);
+  padding: 8px 0;
+}
+.hint {
+  font-size: 11px;
+  color: var(--text-3);
+  margin-top: 6px;
+}
+.delBtn {
+  border: none;
+  background: transparent;
+  color: var(--text-4);
+  cursor: pointer;
+  font-size: 14px;
+}
+.small.small {
+  padding: 5px 9px;
+  font-size: 12px;
+}
+.smallMono.smallMono {
+  padding: 5px 9px;
+  font-size: 11.5px;
+  font-family: var(--mono);
+}
+
+/* section column tracks */
+.colsClients {
+  grid-template-columns: 1fr 130px 110px 26px;
+}
+.colsProjects {
+  grid-template-columns: 110px 1fr 150px 100px 84px 26px;
+}
+.colsTasks {
+  grid-template-columns: 1fr 150px 26px;
+}
+.colsArchive {
+  grid-template-columns: 130px 1fr 70px auto;
+}
+.colsUsers {
+  grid-template-columns: 1fr 1fr 110px 76px 26px;
+}
+
+/* users — inline password-reset row + new-user form card */
+.resetRow {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 8px;
+  align-items: center;
+  padding: 0 0 8px;
+}
+.userForm {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px;
+  margin-top: 8px;
+  display: grid;
+  grid-template-columns: 1fr 1fr 130px 110px auto;
+  gap: 8px;
+  align-items: center;
+}
+.userName {
+  font-size: 12.5px;
+}
+.userEmail {
+  font-size: 12px;
+  color: var(--text-2);
+  font-family: var(--mono);
+}
+
+/* password section */
+.pwGrid {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr auto;
+  gap: 8px;
+  align-items: center;
+}
+.errLine {
+  font-size: 11.5px;
+  color: var(--danger);
+  margin-top: 6px;
+}
+
+/* general */
+.general {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+.currencyInput.currencyInput {
+  width: 70px;
+  font-family: var(--mono);
+}
+.langSelect.langSelect {
+  width: 120px;
+}
+.codeInput.codeInput {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+/* markdown backend */
+.mdIntro {
+  font-size: 12.5px;
+  color: var(--text-2);
+  line-height: 1.6;
+  margin: 0 0 10px;
+}
+.mdActions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+.mdDot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--green);
+  display: inline-block;
+}
+.mdArea.mdArea {
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.7;
+  min-height: 220px;
+  resize: vertical;
+}
+
+/* mirror-dir row */
+.mirror {
+  margin: 0 0 12px;
+}
+.mirrorRow {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+}
+.mirrorLabel {
+  flex-shrink: 0;
+}
+.mirrorInput.mirrorInput {
+  flex: 1;
+  font-family: var(--mono);
+  font-size: 11px;
+}
+.mirrorHint {
+  font-size: 11px;
+  color: var(--text-3);
+  margin-top: 5px;
+}

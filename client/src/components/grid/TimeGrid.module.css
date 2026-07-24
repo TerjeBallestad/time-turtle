@@ -1,0 +1,46 @@
+/* The grid container defines the shared column tracks as a custom property that
+   the header row, EntryRow and NewRow all consume. Employees have no bill column
+   (SB-022), so their track set is one column shorter. */
+.grid {
+  --tt-cols: 148px 224px 1fr 58px 76px 26px;
+  font-family: var(--sans);
+}
+.grid.employee {
+  --tt-cols: 148px 224px 1fr 76px 26px;
+}
+.header {
+  display: grid;
+  grid-template-columns: var(--tt-cols);
+  gap: 0;
+  padding: 0 0 5px;
+  border-bottom: 1px solid var(--border);
+}
+.headerCell {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--text-3);
+  padding: 0 9px;
+}
+.headerHours {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--text-3);
+  padding: 0 9px;
+  text-align: right;
+  font-family: var(--mono);
+}
+/* SDD-002 ruling 4/5: the committed-and-read-only banner above a locked day's rows. */
+.lockedBanner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 9px 4px;
+}
+.lockedHint {
+  font-size: 10.5px;
+  color: var(--text-4);
+}

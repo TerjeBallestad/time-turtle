@@ -1,0 +1,48 @@
+.screen {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--sans);
+  background:
+    radial-gradient(
+      130% 100% at 50% 38%,
+      rgba(15, 16, 20, 0.28),
+      rgba(15, 16, 20, 0.72) 62%,
+      rgba(15, 16, 20, 0.94) 100%
+    ),
+    url(/turtle-bg.jpg) center / cover no-repeat;
+  background-color: var(--bg);
+}
+.card {
+  width: min(360px, 92vw);
+  background: rgba(19, 20, 26, 0.55);
+  backdrop-filter: blur(16px) saturate(1.15);
+  -webkit-backdrop-filter: blur(16px) saturate(1.15);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: var(--radius-xl);
+  padding: 30px 26px;
+  box-shadow: 0 28px 64px -22px rgba(0, 0, 0, 0.75);
+}
+.brand {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 24px;
+}
+.brandName {
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--text);
+  text-shadow: 0 1px 10px rgba(0, 0, 0, 0.55);
+}
+.err {
+  font-size: 11.5px;
+  color: var(--danger);
+  margin: 2px 0 8px;
+}
+.submit {
+  width: 100%;
+  margin-top: 6px;
+}

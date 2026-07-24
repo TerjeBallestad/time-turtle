@@ -1,0 +1,24 @@
+/* PM Board — type tokens. UI is dense: 13px body base, mono for ids/counts/timestamps. */
+:root {
+  --sans: 'Schibsted Grotesk', system-ui, sans-serif; /* @kind font */
+  --mono: 'JetBrains Mono', ui-monospace, monospace; /* @kind font */
+  --font-sans: var(--sans);
+  --font-mono: var(--mono);
+  /* Size ramp (exact values from source) */
+  --fs-micro: 9.5px; /* kind/priority labels, chips */
+  --fs-tiny: 10.5px; /* mono ids, counts, section titles */
+  --fs-caption: 11.5px; /* meta rows, activity lines */
+  --fs-body: 12.5px; /* card titles, rows, inputs */
+  --fs-base: 13px; /* body default */
+  --fs-prose: 13.5px; /* document body */
+  --fs-title: 15px; /* modal/featured headings */
+  --fs-doc: 21px; /* slide-over document title */
+  /* Weights */
+  --fw-regular: 400; /* @kind font */
+  --fw-medium: 500; /* @kind font */
+  --fw-semibold: 600; /* @kind font */
+  --fw-bold: 700; /* @kind font */
+  /* Letterspacing */
+  --ls-heading: -0.01em;
+  --ls-label: 0.08em; /* uppercase section labels */
+}

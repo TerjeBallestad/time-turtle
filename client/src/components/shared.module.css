@@ -1,0 +1,17 @@
+/* Cross-directory visual idioms shared by shell + views + settings (SDD-001: a shared
+   module for idioms used in more than one place). Grid co-located its own copies. */
+
+/* Single-line truncation with an ellipsis. */
+.ellipsis {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Chrome-less text button — the sidebar "sign out" and the settings row "×". */
+.ghostBtn {
+  border: none;
+  background: transparent;
+  color: var(--text-4);
+  cursor: pointer;
+}

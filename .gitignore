@@ -1,0 +1,15 @@
+node_modules/
+client/dist/
+server/data/
+.DS_Store
+*.log
+
+# pm system lives in its own nested git repo (SB-015) — kept locally, untracked here
+.pm/
+pm.config.json
+
+# agent config kept locally, untracked here
+.claude/
+
+# stripped from public tree per DD-005 (kept locally, untracked)
+design-import/

@@ -1,0 +1,222 @@
+/* Shared page + table idioms for the views and Settings (formerly viewStyles.ts). */
+.page {
+  max-width: 880px;
+  margin: 0 auto;
+  padding: 28px 32px 80px;
+}
+.settingsPage {
+  max-width: 760px;
+}
+.mb24 {
+  margin-bottom: 24px;
+}
+.h1 {
+  font-size: 21px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--text);
+  margin: 0;
+}
+.headerRow {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 20px;
+}
+.baseline {
+  align-items: baseline;
+}
+.table {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+  background: var(--panel-dim);
+}
+.th {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--text-3);
+  padding: 8px 12px;
+}
+.right {
+  text-align: right;
+}
+.td {
+  font-size: 12.5px;
+  color: var(--text);
+  padding: 8px 12px;
+}
+.mono {
+  font-family: var(--mono);
+  font-size: 11.5px;
+}
+.empty {
+  font-size: 12.5px;
+  color: var(--text-3);
+  padding: 14px 12px;
+}
+.code {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+/* table grid rows — the column tracks are supplied inline (role-dependent / per-view). */
+.headRow {
+  display: grid;
+  border-bottom: 1px solid var(--border);
+}
+.bodyRow {
+  display: grid;
+  align-items: center;
+  border-bottom: 1px solid var(--border);
+}
+.totalRow {
+  display: grid;
+  background: var(--panel);
+}
+/* a flex label cell (project code + name + sub) inside a table body row. */
+.tdFlex {
+  font-size: 12.5px;
+  color: var(--text);
+  padding: 8px 12px;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+/* colour + weight helpers (tokens only) for per-cell overrides. */
+.cBody {
+  color: var(--text);
+}
+.cSecondary {
+  color: var(--text-2);
+}
+.cMuted {
+  color: var(--text-3);
+}
+.bold {
+  font-weight: 600;
+}
+.fs12 {
+  font-size: 12px;
+}
+.subtle {
+  font-size: 12.5px;
+  color: var(--text-3);
+}
+.sub {
+  font-size: 10.5px;
+  color: var(--text-3);
+  flex-shrink: 0;
+}
+.barCell {
+  padding: 0 12px;
+}
+.note {
+  margin-top: 10px;
+  font-size: 11px;
+  color: var(--text-3);
+}
+.noteTight {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--text-3);
+}
+.errLine {
+  margin-bottom: 12px;
+  font-size: 12px;
+  color: var(--danger);
+}
+/* header control clusters */
+.controls {
+  margin-left: auto;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.controlsCenter {
+  margin-left: auto;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.chipRight {
+  margin-left: auto;
+}
+/* WeekView */
+.weekNav {
+  margin-left: auto;
+  display: flex;
+  gap: 6px;
+}
+.day {
+  margin-bottom: 22px;
+}
+.dayHead {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.dayHours {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: 10.5px;
+}
+/* ProjectPage header */
+.projHead {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 6px;
+}
+.projCode {
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 600;
+}
+.chipRow {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 20px;
+}
+/* SDD-002 ruling 4 (SB-024): the per-(week∩month)-segment commit chips in the Week header. */
+.segChipRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: -6px 0 18px;
+}
+.segChip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 5px 3px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-chip);
+  background: var(--panel, transparent);
+}
+.segChip[data-committed='true'] {
+  border-color: color-mix(in srgb, var(--green) 40%, var(--border));
+}
+.segChip[data-locked='true'] {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+}
+.segRange {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-2);
+}
+.segLockedNote {
+  font-size: 10.5px;
+  color: var(--text-3);
+  padding-right: 5px;
+}
+.notFound {
+  color: var(--text-3);
+  font-size: 12.5px;
+}

@@ -1,0 +1,17 @@
+.select {
+  width: 100%;
+  background: var(--input);
+  border: 1px solid var(--input-border);
+  border-radius: var(--radius-btn);
+  color: var(--text);
+  font-size: 12.5px;
+  padding: 8px 10px;
+  outline: none;
+  font-family: var(--sans);
+}
+.select:focus {
+  border-color: var(--accent-deep);
+}
+.opt {
+  background: var(--panel);
+}

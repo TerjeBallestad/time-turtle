@@ -1,0 +1,83 @@
+.sidebar {
+  width: 226px;
+  flex-shrink: 0;
+  background: var(--bg-side);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  padding: 14px 10px 12px;
+}
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 0 10px;
+  margin-bottom: 16px;
+}
+.logo {
+  width: 20px;
+  height: 20px;
+  border-radius: var(--radius-chip);
+  background: url(/turtle-face-128.png) center / cover no-repeat;
+  flex-shrink: 0;
+}
+.brandName {
+  font-size: 13.5px;
+  font-weight: 700;
+  letter-spacing: -0.005em;
+  color: var(--text);
+}
+.nav {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.projects {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  overflow-y: auto;
+  min-height: 0;
+}
+.bottom {
+  margin-top: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.syncRow {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 10px 2px;
+}
+.syncDot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
+.syncLabel {
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--text-4);
+}
+.userRow {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 10px 0;
+}
+.userName {
+  font-size: 11px;
+  color: var(--text-3);
+  flex: 1;
+}
+.chip {
+  flex-shrink: 0;
+}
+.signOut {
+  font-family: var(--mono);
+  font-size: 10px;
+  padding: 0;
+  flex-shrink: 0;
+}

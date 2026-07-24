@@ -1,0 +1,198 @@
+/* SDD-002 rulings 5 & 6 (SB-025): the admin review surface — user rail + panel, dense,
+   1px borders, mono metadata, matching the rest of the app's grammar. */
+.layout {
+  display: flex;
+  gap: 18px;
+  align-items: flex-start;
+}
+.rail {
+  flex: none;
+  width: 200px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border-right: 1px solid var(--border);
+  padding-right: 12px;
+}
+.railEmpty {
+  color: var(--text-4);
+  font-size: 12px;
+  padding: 8px 6px;
+}
+.railRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-chip);
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  width: 100%;
+}
+.railRow:hover {
+  background: var(--panel-2, color-mix(in srgb, var(--accent) 6%, transparent));
+}
+.railActive {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+.railName {
+  flex: 1;
+  font-size: 12.5px;
+  color: var(--text-2);
+}
+
+.panel {
+  flex: 1;
+  min-width: 0;
+}
+.panelHead {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+.panelName {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-1);
+}
+
+.monthBlock {
+  margin-bottom: 16px;
+}
+.monthHead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 7px;
+}
+.monthLabel {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-3);
+}
+.pillRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.pill {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px 4px 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-chip);
+  background: transparent;
+  cursor: pointer;
+}
+.pill:hover {
+  border-color: color-mix(in srgb, var(--accent) 30%, var(--border));
+}
+.pill[data-committed='true'] {
+  border-color: color-mix(in srgb, var(--green) 40%, var(--border));
+}
+.pill[data-locked='true'] {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+}
+.pillActive {
+  outline: 2px solid color-mix(in srgb, var(--accent) 55%, transparent);
+  outline-offset: 1px;
+}
+.pillRange {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-2);
+}
+
+.weekPanel {
+  margin-top: 18px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 14px 14px;
+  background: var(--panel, transparent);
+}
+.weekHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+.weekTitle {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  color: var(--text-1);
+  font-weight: 600;
+}
+.weekActions {
+  display: flex;
+  gap: 6px;
+}
+
+.editTable {
+  display: flex;
+  flex-direction: column;
+}
+.editRow {
+  display: grid;
+  grid-template-columns: 56px 96px minmax(140px, 1fr) minmax(140px, 1fr) 90px;
+  gap: 8px;
+  align-items: center;
+  padding: 3px 0;
+  border-bottom: 1px solid var(--border-2, color-mix(in srgb, var(--border) 55%, transparent));
+}
+.editHead {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-4);
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 5px;
+}
+.editHead > span {
+  padding: 0 2px;
+}
+.cell {
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  padding: 3px 5px;
+  font-size: 12px;
+  color: var(--text-1);
+  font-family: inherit;
+  min-width: 0;
+}
+.cell:hover {
+  border-color: var(--border);
+}
+.cell:focus {
+  border-color: var(--accent);
+  outline: none;
+  background: var(--panel-2, color-mix(in srgb, var(--accent) 5%, transparent));
+}
+.cellGrow {
+  width: 100%;
+}
+.taskCell {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.editedMark {
+  flex: none;
+  font-size: 10px;
+  color: var(--accent);
+  font-family: var(--mono);
+}
+.weekNote {
+  margin-top: 10px;
+  font-size: 11px;
+  color: var(--text-4);
+  line-height: 1.5;
+}

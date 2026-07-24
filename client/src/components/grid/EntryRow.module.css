@@ -1,0 +1,114 @@
+.row {
+  display: grid;
+  grid-template-columns: var(--tt-cols);
+  align-items: center;
+  border-bottom: 1px solid var(--border);
+  background: transparent;
+  padding: 2px 0;
+}
+.row:hover {
+  background: #16181f;
+}
+.hoursCell {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  padding: 0 9px;
+}
+.hours {
+  font-family: var(--mono);
+  font-size: 11.5px;
+}
+/* Stop button replaces the hours readout only while a running entry is hovered. */
+.stop {
+  border: none;
+  background: var(--tint-danger);
+  color: var(--danger);
+  font-family: var(--mono);
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: var(--radius-kbd);
+  cursor: pointer;
+  display: none;
+}
+.row.running:hover .hours {
+  display: none;
+}
+.row.running:hover .stop {
+  display: inline;
+}
+/* SDD-002 ruling 5: a committed segment is read-only for the employee. The row is
+   dimmed and static — no inputs, no delete, nothing focusable. */
+.row.locked {
+  opacity: 0.72;
+  background: repeating-linear-gradient(
+    -45deg,
+    transparent,
+    transparent 6px,
+    rgba(255, 255, 255, 0.014) 6px,
+    rgba(255, 255, 255, 0.014) 12px
+  );
+}
+.row.locked:hover {
+  background: repeating-linear-gradient(
+    -45deg,
+    transparent,
+    transparent 6px,
+    rgba(255, 255, 255, 0.014) 6px,
+    rgba(255, 255, 255, 0.014) 12px
+  );
+}
+.lockedCell {
+  padding: 6px 9px;
+  font-size: 12.5px;
+  color: var(--text-3);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.lockedCell:first-child {
+  font-family: var(--mono);
+  font-size: 11.5px;
+}
+.lockedTask {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+.lockedCode {
+  font-family: var(--mono);
+  font-size: 10.5px;
+  flex: none;
+}
+.lockedLabel {
+  color: var(--text-2);
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* SDD-002 ruling 6 (SB-025): the 'edited by admin' marker on a corrected line. */
+.editedMark {
+  flex: none;
+  font-size: 10px;
+  color: var(--accent);
+  font-family: var(--mono);
+}
+.lockedNote {
+  color: var(--text-3);
+}
+
+/* Chrome-less delete "×" — hidden until the row is hovered. */
+.del {
+  border: none;
+  background: transparent;
+  color: var(--text-4);
+  cursor: pointer;
+  font-size: 13px;
+  padding: 0;
+  visibility: hidden;
+}
+.row:hover .del {
+  visibility: visible;
+}

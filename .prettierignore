@@ -1,0 +1,13 @@
+# build output + data
+client/dist/
+server/data/
+node_modules/
+
+# PM dashboard data — machine-written markdown, auto-committed by the pm server
+.pm/
+
+# vendored design bundle source — not ours to format
+design-import/
+
+# agent worktrees
+.claude/

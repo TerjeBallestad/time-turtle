@@ -1,0 +1,13 @@
+.row {
+  display: grid;
+  grid-template-columns: var(--tt-cols);
+  align-items: center;
+  padding: 2px 0;
+  border-bottom: 1px solid var(--border);
+}
+.err {
+  grid-column: 2 / -1;
+  font-size: 11px;
+  color: var(--text-4);
+  padding: 0 9px;
+}

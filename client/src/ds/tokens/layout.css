@@ -1,0 +1,21 @@
+/* PM Board — radii, shadows, structure */
+:root {
+  --radius: 8px;
+  --radius-lg: 10px;
+  --radius-xl: 12px;
+  --radius-btn: 7px;
+  --radius-chip: 5px;
+  --radius-kbd: 4px;
+  --shadow-modal: 0 24px 60px rgba(0, 0, 0, 0.5);
+  --shadow-overlay: -24px 0 60px rgba(0, 0, 0, 0.55);
+  --shadow-toast: 0 8px 24px rgba(0, 0, 0, 0.4);
+  --glow-accent: 0 0 0 1px rgba(123, 131, 235, 0.12);
+  --glow-green: 0 0 6px rgba(70, 194, 136, 0.7);
+  --sidebar-w: 226px;
+  --rail-w: 290px;
+  --topbar-h: 48px;
+  --ease: ease; /* @kind other */
+  --dur-fast: 0.1s; /* @kind other */
+  --dur: 0.12s; /* @kind other */
+  --dur-slow: 0.18s; /* @kind other */
+}

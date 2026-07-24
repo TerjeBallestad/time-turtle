@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Time Turtle</title>
+    <link rel="icon" type="image/png" sizes="32x32" href="/turtle-32.png" />
+    <link rel="icon" type="image/png" sizes="64x64" href="/turtle-64.png" />
+    <link rel="apple-touch-icon" href="/turtle-180.png" />
+    <style>
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: #0f1014;
+        color: #e6e8ee;
+      }
+      a {
+        color: var(--accent);
+        text-decoration: none;
+      }
+      a:hover {
+        color: #9aa1f0;
+      }
+      input::placeholder,
+      textarea::placeholder {
+        color: var(--text-4);
+      }
+      * {
+        box-sizing: border-box;
+      }
+      ::-webkit-scrollbar {
+        width: 10px;
+        height: 10px;
+      }
+      ::-webkit-scrollbar-thumb {
+        background: #262933;
+        border-radius: 5px;
+        border: 2px solid var(--bg);
+      }
+      ::-webkit-scrollbar-track {
+        background: transparent;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="tt-root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
