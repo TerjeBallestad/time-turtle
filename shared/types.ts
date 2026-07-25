@@ -353,6 +353,11 @@ export interface TTModule {
   encodeCell(s: string): string;
   encodeNoteCell(note: string): string;
   decodeCell(s: string): string;
+  // SB-045: the vault `Task` column holds `label<br>- note` in ONE cell. `<br>` is a
+  // structural delimiter and `- ` is presentation — both escaped/stripped here so they
+  // survive as content. Composes on top of encodeCell; consumed by SB-055.
+  encodeTaskCell(v: { label?: string; note?: string }): string;
+  decodeTaskCell(cell: string): { label: string; note: string };
   serializeMd(state: Catalog): string;
   newId(): string;
   parseMd(md: string): Catalog;

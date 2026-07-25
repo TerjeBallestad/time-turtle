@@ -23,6 +23,11 @@
 // SB-041 (PLAN-008): delimiter safety — `|`, `\` and a trailing [nb]/[ea] are ESCAPED, so
 // content that looks like structure stops being read as structure. Goldens unchanged.
 // ## Verified red-green: 2026-07-25
+// SB-045 (PLAN-008 task 2): the vault `Task`-cell codec — `<br>` is a structural delimiter
+// and `- ` a presentation prefix, so both are escaped/stripped to survive as content.
+// Measured in the real vault: `\<br>` renders as literal text with zero <br> elements in
+// BOTH Live Preview and Reading view; a genuine `<br>` yields exactly one.
+// ## Verified red-green: 2026-07-25
 import { describe, it, expect } from 'vitest';
 import TT from '../shared/core.js';
 
@@ -518,5 +523,82 @@ describe('markdown V2 delimiter safety (SB-041)', () => {
       expect(TT.serializeMd(TT.parseMd(golden))).not.toContain('\\');
     }
     expect(TT.serializeMd(TT.parseMd(TT.seedMd()))).not.toContain('\\');
+  });
+});
+
+// ---- SB-045 / PLAN-008 task 2: the vault `Task` cell codec ----
+// SB-045 froze the vault's Task column as `label<br>- note` in ONE cell. That makes
+// `<br>` a structural delimiter and `- ` a presentation prefix — both are things a user
+// can legitimately type. This is the codec SB-055's table serializer will call; the
+// vault parser/serializer itself (heading anchors, totals row, `revision: N`) is NOT here.
+//
+// Every case is asserted over TWO cycles: the `- ` accretion (`- - note`) and the
+// label/note swap only appear on the second one, so a single pass is blind to the exact
+// bugs this codec exists to prevent.
+describe('vault Task-cell codec (SB-045)', () => {
+  /** @param {{label: string, note: string}} v */
+  const cycle = (v) => TT.decodeTaskCell(TT.encodeTaskCell(v));
+
+  const CASES = [
+    { name: 'label + note (the ordinary shape)', v: { label: 'Checkout flow', note: 'wireframes' } },
+    { name: 'label only', v: { label: 'Checkout flow', note: '' } },
+    { name: 'note only — no label', v: { label: '', note: 'freeform hour' } },
+    { name: 'both empty', v: { label: '', note: '' } },
+    { name: 'a literal <br> in the note', v: { label: 'Docs', note: 'use <br> for line breaks' } },
+    { name: 'a literal <br> in the label', v: { label: 'The <br> tag', note: 'explained' } },
+    { name: 'a note that begins with "- "', v: { label: 'Checkout flow', note: '- a bulleted thought' } },
+    { name: 'a note that begins with "- " and NO label', v: { label: '', note: '- a bulleted thought' } },
+    { name: 'a label that begins with "- "', v: { label: '- weird label', note: 'note here' } },
+    { name: 'a label that begins with "- " and no note', v: { label: '- weird label', note: '' } },
+    { name: 'a pipe in both fields', v: { label: 'a|b', note: 'c|d' } },
+    { name: 'a backslash in both fields', v: { label: 'C:\\work', note: 'path\\to\\thing' } },
+    { name: 'an escaped-looking literal \\<br>', v: { label: 'x', note: 'literally \\<br> typed' } },
+    { name: 'everything at once', v: { label: '- a|b <br>', note: '- c\\d <br> e' } },
+  ];
+
+  for (const { name, v } of CASES) {
+    it(`round-trips ${name}`, () => {
+      expect(cycle(v)).toEqual(v); // cycle 1
+      expect(cycle(cycle(v))).toEqual(v); // cycle 2 — where accretion/swap would show
+      // …and the ENCODED bytes are a fixed point, so repeated writes don't drift
+      expect(TT.encodeTaskCell(cycle(v))).toBe(TT.encodeTaskCell(v));
+    });
+  }
+
+  it('emits SB-045’s exact shape: label<br>- note, label alone, and a bare `- note`', () => {
+    expect(TT.encodeTaskCell({ label: 'Checkout flow', note: 'wireframes' })).toBe('Checkout flow<br>- wireframes');
+    expect(TT.encodeTaskCell({ label: 'Checkout flow', note: '' })).toBe('Checkout flow');
+    // note-only carries NO leading <br> (ruling: a bare `- note`)
+    expect(TT.encodeTaskCell({ label: '', note: 'freeform hour' })).toBe('- freeform hour');
+    expect(TT.encodeTaskCell({ label: '', note: '' })).toBe('');
+  });
+
+  it('a genuine <br> delimiter and an escaped literal are distinguishable in the bytes', () => {
+    const cell = TT.encodeTaskCell({ label: 'Docs', note: 'use <br> here' });
+    expect(cell).toBe('Docs<br>- use \\<br> here'); // one structural, one escaped
+    expect(TT.decodeTaskCell(cell)).toEqual({ label: 'Docs', note: 'use <br> here' });
+  });
+
+  it('a label beginning with "- " does NOT decode as a note-only cell', () => {
+    // the subtle one: `- foo` as a LABEL is otherwise indistinguishable from `foo` as a NOTE
+    const asLabel = TT.encodeTaskCell({ label: '- foo', note: '' });
+    const asNote = TT.encodeTaskCell({ label: '', note: 'foo' });
+    expect(asLabel).not.toBe(asNote);
+    expect(TT.decodeTaskCell(asLabel)).toEqual({ label: '- foo', note: '' });
+    expect(TT.decodeTaskCell(asNote)).toEqual({ label: '', note: 'foo' });
+  });
+
+  it('composes with the cell escaping — a piped Task cell is still ONE cell', () => {
+    const cell = TT.encodeTaskCell({ label: 'a|b', note: 'c|d' });
+    expect(cell).toBe('a\\|b<br>- c\\|d');
+    // SB-045 measured that `\|` renders as a literal `|` inside a two-line <br> cell, so a
+    // vault row splitting on UNESCAPED pipes sees exactly one Task cell here.
+    expect(cell.split(/(?<!\\)\|/)).toHaveLength(1);
+  });
+
+  it('emit-when-needed: ordinary content gains no escape at all', () => {
+    expect(TT.encodeTaskCell({ label: 'Ops & maintenance', note: 'cert renewal + patching' })).toBe(
+      'Ops & maintenance<br>- cert renewal + patching',
+    );
   });
 });

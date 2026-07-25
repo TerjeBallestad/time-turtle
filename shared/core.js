@@ -379,6 +379,69 @@ function stripMarkers(raw) {
   }
   return { note: TT.decodeCell(note), billable, editedByAdmin };
 }
+
+// ---- vault `Task` cell codec (SB-045) ----
+// SB-045 froze the vault's Task column as label on line 1 and `- note` on line 2, both
+// inside ONE table cell: `label<br>- note`. Two consequences the codec has to own:
+//   • `<br>` is a STRUCTURAL delimiter, so a note that mentions `<br>` has to escape it.
+//   • `- ` is PRESENTATION, so it is stripped on decode and re-added on encode. Carry it
+//     into the value and it accretes a hyphen per write cycle (`- - note`).
+// The subtle case: a LABEL that itself begins with `- ` is otherwise indistinguishable
+// from a note-only cell, so that one gets escaped too. A note beginning with `- ` needs
+// no escape — decode strips exactly one prefix, so the second survives.
+//
+// This is only the codec. The vault table parser/serializer around it — heading anchors,
+// header-row-as-schema, the totals row, the `revision: N` line — is SB-055.
+const BR = '<br>';
+/** @param {string} s @returns {string} */
+const escapeBr = (s) => (s.indexOf(BR) < 0 ? s : s.split(BR).join('\\' + BR));
+// Split on UNESCAPED `<br>` only.
+/** @param {string} s @returns {string[]} */
+function splitOnBr(s) {
+  const out = [];
+  let last = 0;
+  for (let i = s.indexOf(BR); i >= 0; i = s.indexOf(BR, i + 1)) {
+    if (isEscapedAt(s, i)) continue;
+    out.push(s.slice(last, i));
+    last = i + BR.length;
+  }
+  out.push(s.slice(last));
+  return out;
+}
+/** @param {string} s @returns {string} */
+const stripNotePrefix = (s) => (s.startsWith('- ') ? s.slice(2) : s);
+/**
+ * Encode a label/note pair into one vault Task cell. Fields are escaped FIRST (so the
+ * `|` layer composes), then joined with the structural `<br>`.
+ * @param {{ label?: string, note?: string }} v @returns {string}
+ */
+TT.encodeTaskCell = function (v) {
+  let label = escapeBr(TT.encodeCell(v.label || ''));
+  const note = escapeBr(TT.encodeCell(v.note || ''));
+  // a label starting with `- ` would decode as a note-only cell — escape the hyphen
+  if (label.startsWith('- ')) label = '\\' + label;
+  if (!note) return label;
+  return label ? label + BR + '- ' + note : '- ' + note;
+};
+/**
+ * Reverse of encodeTaskCell. A cell with no `<br>` is a label, UNLESS it opens with an
+ * unescaped `- ` — that is the note-only shape (`- note`, deliberately no leading `<br>`).
+ * @param {string} cell @returns {{ label: string, note: string }}
+ */
+TT.decodeTaskCell = function (cell) {
+  const parts = splitOnBr(cell == null ? '' : String(cell));
+  if (parts.length > 1) {
+    // only the FIRST unescaped <br> is the delimiter; any further one is content a hand
+    // edit left raw, and decodes to a literal <br> (re-escaped on the next encode)
+    return {
+      label: TT.decodeCell(parts[0]),
+      note: TT.decodeCell(stripNotePrefix(parts.slice(1).join(BR))),
+    };
+  }
+  const only = parts[0];
+  if (only.startsWith('- ')) return { label: '', note: TT.decodeCell(stripNotePrefix(only)) };
+  return { label: TT.decodeCell(only), note: '' };
+};
 TT.serializeMd = function (state) {
   const lines = [
     '# timesheet',
