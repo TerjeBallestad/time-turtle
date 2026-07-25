@@ -526,6 +526,84 @@ describe('markdown V2 delimiter safety (SB-041)', () => {
   });
 });
 
+// ---- SB-071 / PLAN-009 task 1: the READ half of the codec is public ----
+// `TT.splitUnescaped` / `TT.splitCells` split a row on UNESCAPED delimiters and hand back
+// the pieces STILL escaped. They were module-private; SB-055's vault parser needs them, and
+// the alternative was a second hand-maintained copy of the exact invariant PLAN-008 unified.
+//
+// So the property under test is not "the export exists" — it is that ONE implementation of
+// the unescaped-split rule serves BOTH formats. The second test drives the same corpus
+// through the production v2 mirror parser and asserts it lands on the same boundaries, so
+// the rule cannot drift between the mirror and the vault.
+// ## Verified red-green: 2026-07-25
+describe('unescaped-split primitives are public and shared (SB-071)', () => {
+  // Each entry is the ENCODED cell (what appears in a row) and the value it decodes to.
+  const ESCAPE_CORPUS = [
+    { name: 'a plain cell', cell: 'plain', value: 'plain' },
+    { name: 'an escaped pipe', cell: 'a\\|b', value: 'a|b' },
+    { name: 'a doubled backslash', cell: 'C:\\\\work', value: 'C:\\work' },
+    { name: 'a trailing backslash', cell: 'ends with \\\\', value: 'ends with \\' },
+    { name: 'an empty cell', cell: '', value: '' },
+    { name: 'a cell that is only a pipe', cell: '\\|', value: '|' },
+  ];
+
+  it('splits the corpus into exactly one cell per entry, payloads still escaped', () => {
+    const row = ESCAPE_CORPUS.map((c) => c.cell).join(' | ');
+    const cells = TT.splitCells(row);
+    expect(cells).toHaveLength(ESCAPE_CORPUS.length); // an escaped `|` never opens a new cell
+    expect(cells).toEqual(ESCAPE_CORPUS.map((c) => c.cell)); // STILL escaped — decode is the caller's
+    expect(cells.map(TT.decodeCell)).toEqual(ESCAPE_CORPUS.map((c) => c.value));
+  });
+
+  it('counts backslashes odd/even: `\\|` is content, `\\\\|` is a live delimiter', () => {
+    // the sharp edge — no space to hide behind, the delimiter sits right on the backslashes
+    expect(TT.splitCells('a\\|b')).toEqual(['a\\|b']); // odd → escaped → one cell
+    expect(TT.splitCells('a\\\\|b')).toEqual(['a\\\\', 'b']); // even → live → two cells
+  });
+
+  it('TT.splitUnescaped works for the vault `<br>` delimiter too (one rule, both delimiters)', () => {
+    expect(TT.splitUnescaped('label<br>- note', '<br>')).toEqual(['label', '- note']);
+    expect(TT.splitUnescaped('a \\<br> b', '<br>')).toEqual(['a \\<br> b']); // escaped → not a delimiter
+  });
+
+  it('the vault row splitter and the v2 mirror parser resolve the corpus to the SAME boundaries', () => {
+    const values = ESCAPE_CORPUS.map((c) => c.value);
+    /** @type {any} */
+    const state = {
+      settings: { currency: 'kr', language: 'en' },
+      clients: [],
+      projects: [],
+      tasks: [],
+      entries: values.map((v, i) => ({
+        id: 'e' + i,
+        date: '2026-01-05',
+        start: null,
+        end: null,
+        durMin: 30,
+        project: null,
+        label: v,
+        note: v,
+        billable: true,
+      })),
+      commits: [],
+    };
+    const md = TT.serializeMd(state);
+    const rows = md.split('\n').filter((l) => l.startsWith('- 30m |'));
+    expect(rows).toHaveLength(values.length);
+    // the vault-side reader: split the SAME emitted rows with the newly public primitive
+    rows.forEach((row, i) => {
+      const cells = TT.splitCells(row.slice(2));
+      expect(cells).toHaveLength(4); // time | project | label | note — never more, never fewer
+      expect(TT.decodeCell(cells[2])).toBe(values[i]);
+      expect(TT.decodeCell(cells[3])).toBe(values[i]);
+    });
+    // …and the production mirror parser lands on exactly the same values
+    const back = TT.parseMd(md);
+    expect(back.entries.map((e) => e.label)).toEqual(values);
+    expect(back.entries.map((e) => e.note)).toEqual(values);
+  });
+});
+
 // ---- SB-045 / PLAN-008 task 2: the vault `Task` cell codec ----
 // SB-045 froze the vault's Task column as `label<br>- note` in ONE cell. That makes
 // `<br>` a structural delimiter and `- ` a presentation prefix — both are things a user

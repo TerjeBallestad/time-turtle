@@ -353,6 +353,16 @@ export interface TTModule {
   encodeCell(s: string): string;
   encodeNoteCell(note: string): string;
   decodeCell(s: string): string;
+  /**
+   * SB-071 (PLAN-009 task 1): the READ half of the codec. Splits on UNESCAPED
+   * occurrences of `delim` only and returns the pieces STILL escaped — the caller
+   * reads structure out of them (rule tokens, flag markers) and decodes last, or a
+   * `\[nb]` gets eaten. Public so the vault table parser (SB-055) shares the one
+   * implementation of the escape rule with the v2 mirror instead of copying it.
+   */
+  splitUnescaped(s: string, delim: string, trim?: boolean): string[];
+  /** Split a `|`-delimited row body into its trimmed, still-escaped cells. */
+  splitCells(s: string): string[];
   // SB-045: the vault `Task` column holds `label<br>- note` in ONE cell. `<br>` is a
   // structural delimiter and `- ` is presentation — both escaped/stripped here so they
   // survive as content. Composes on top of encodeCell; consumed by SB-055.

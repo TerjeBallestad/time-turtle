@@ -314,6 +314,20 @@ function applyParsed(entry, parsed) {
 // header line of all five goldens and TT.seedMd() to protect nothing. Note this rules on
 // the v2 mirror ONLY; it sets no precedent for the vault block format, where there is no
 // authoritative copy and the trade-off comes out differently.
+//
+// WHICH HALF OF THE CODEC IS PUBLIC, AND WHY (SB-071, ruled in PLAN-009 task 1).
+// PLAN-008 exported an encode-shaped boundary. SB-055's vault parser reads the table BACK,
+// so the READ half it genuinely needs is now public too:
+//   • `TT.splitUnescaped` / `TT.splitCells` — EXPORTED. Parsing a vault row means splitting
+//     on unescaped `|`, and a second hand-maintained copy of that rule is exactly the drift
+//     PLAN-008 unified away. One implementation serves the v2 mirror and the vault table.
+//   • `decodeNoteCell` — deliberately NOT exported. Its premise does not hold for the vault:
+//     the trailing `[nb]`/`[ea]` flag run is the v2 mirror's convention, and SB-045 gave the
+//     vault a dedicated `Bill` column instead. The vault Task cell's inverse pair is
+//     `TT.encodeTaskCell` / `TT.decodeTaskCell` — already public, already symmetric, and a
+//     note ending in `[nb]` round-trips through them untouched (no flag peel, no spurious
+//     backslash). Exporting it would widen the public API for a consumer that does not exist.
+// Do not re-ask this without a consumer in hand.
 /** Escape a value for use as one `|`-delimited cell. @param {string} s @returns {string} */
 TT.encodeCell = function (s) {
   s = s == null ? '' : String(s);
@@ -335,10 +349,10 @@ TT.decodeCell = function (s) {
 };
 // Split on UNESCAPED occurrences of `delim` only, returning the pieces STILL escaped —
 // callers read structure out of them (rule tokens, flag markers) and decode last, or
-// `\[nb]` gets eaten. One implementation for both delimiters this format uses, so the
+// `\[nb]` gets eaten. One implementation for every delimiter these formats use, so the
 // escape rule cannot drift between them.
 /** @param {string} s @param {string} delim @param {boolean} [trim] @returns {string[]} */
-function splitUnescaped(s, delim, trim) {
+TT.splitUnescaped = function (s, delim, trim) {
   const out = [];
   let last = 0;
   for (let i = s.indexOf(delim); i >= 0; i = s.indexOf(delim, i + 1)) {
@@ -348,9 +362,9 @@ function splitUnescaped(s, delim, trim) {
   }
   out.push(s.slice(last));
   return trim ? out.map((x) => x.trim()) : out;
-}
+};
 /** Split a `|`-delimited row body into its cells. @param {string} s @returns {string[]} */
-const splitCells = (s) => splitUnescaped(s, '|', true);
+TT.splitCells = (s) => TT.splitUnescaped(s, '|', true);
 // Is the character at `i` in `s` escaped? True when an ODD number of backslashes
 // immediately precedes it (`\[` is escaped; `\\[` is a literal backslash then a live `[`).
 /** @param {string} s @param {number} i @returns {boolean} */
@@ -431,7 +445,7 @@ TT.encodeTaskCell = function (v) {
  * @param {string} cell @returns {{ label: string, note: string }}
  */
 TT.decodeTaskCell = function (cell) {
-  const parts = splitUnescaped(cell == null ? '' : String(cell), BR);
+  const parts = TT.splitUnescaped(cell == null ? '' : String(cell), BR);
   if (parts.length > 1) {
     // only the FIRST unescaped <br> is the delimiter; any further one is content a hand
     // edit left raw, and decodes to a literal <br> (re-escaped on the next encode)
@@ -666,7 +680,7 @@ TT.parseMd = function (md) {
     if (!trimmed.startsWith('- ')) continue;
     // SB-041: split on UNESCAPED `|` only; cells stay escaped until each branch has
     // read the structure out of them (rule tokens, flag markers), then decode.
-    const parts = splitCells(trimmed.slice(2));
+    const parts = TT.splitCells(trimmed.slice(2));
     if (section === 'clients') {
       /** @type {Client} */
       const client = {
