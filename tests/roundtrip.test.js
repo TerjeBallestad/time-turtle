@@ -20,6 +20,14 @@
 // SDD-002 rulings 5 & 6 (SB-025, PLAN-007): additive approved:/released: segment tokens
 // + the [ea] edited-by-admin entry marker round-trip exactly; existing goldens unchanged.
 // ## Verified red-green: 2026-07-24
+// SB-041 (PLAN-008): delimiter safety — `|`, `\` and a trailing [nb]/[ea] are ESCAPED, so
+// content that looks like structure stops being read as structure. Goldens unchanged.
+// ## Verified red-green: 2026-07-25
+// SB-045 (PLAN-008 task 2): the vault `Task`-cell codec — `<br>` is a structural delimiter
+// and `- ` a presentation prefix, so both are escaped/stripped to survive as content.
+// Measured in the real vault: `\<br>` renders as literal text with zero <br> elements in
+// BOTH Live Preview and Reading view; a genuine `<br>` yields exactly one.
+// ## Verified red-green: 2026-07-25
 import { describe, it, expect } from 'vitest';
 import TT from '../shared/core.js';
 
@@ -349,5 +357,281 @@ describe('markdown V1 migration on read', () => {
 
   it('re-serializing a migrated V1 sheet emits V2 (the format marker appears)', () => {
     expect(TT.serializeMd(state)).toContain('format: 2');
+  });
+});
+
+// ---- SB-041 / PLAN-008: content that LOOKS like structure ----
+// Three reproduced failures, one per hazard:
+//   1. `|` anywhere in a field truncated the value at the pipe.
+//   2. A note ending in `[nb]`/`[ea]` lost the text AND falsely set the flag.
+//   3. A project's positional clientId was scanned as a rule token (`nb`, `archived`).
+// The fixture below is the ESCAPED canonical shape — `\|`, `\\`, `\[nb]`. Byte equality
+// alone would prove nothing (both sides can agree on a corrupted reading), so every
+// block here asserts the PARSED VALUES, and asserts them over TWO cycles: accretion and
+// flag-eating only surface on the second pass.
+const V2_HOSTILE_FIXTURE = [
+  '# timesheet',
+  '',
+  'currency: kr',
+  'language: en',
+  'format: 2',
+  '',
+  '## clients',
+  '- acme | Acme \\| Co | round exact', // pipe in a client NAME
+  '- nb | Client Whose Id Looks Like A Flag | round exact', // client id === a project rule token
+  '- archived | Client Whose Id Looks Archived | round exact | rate 500', // ditto
+  '- back\\\\slash | Back\\\\slash Ltd | round exact', // literal backslash in id + name
+  '',
+  '## projects',
+  '- A\\|B | Pipe \\| Project | acme', // pipe in a project CODE and name
+  '- P-NB | Flaglike client | nb', // clientId `nb` sits at parts[2] (failure 3)
+  '- P-ARCH | Archived-looking client | archived | nb', // clientId `archived` + a REAL nb token
+  '- P-BS | Backslash client | back\\\\slash',
+  '',
+  '## tasks',
+  '- t\\|1 | Task \\| One | A\\|B',
+  '',
+  '## 2026-01-05',
+  '- 5h | A\\|B | Task \\| One | refactored the \\[nb]', // trailing [nb] as TEXT, still billable
+  '- 45m | A\\|B | Task \\| One | done \\[ea] [nb]', // escaped [ea] as text + a REAL [nb] flag
+  '- 1h30m | P-NB | Flaglike client | path C:\\\\work', // literal backslash in a note
+  '',
+].join('\n');
+
+describe('markdown V2 delimiter safety (SB-041)', () => {
+  it('serializeMd(parseMd(md)) === md for the hostile fixture', () => {
+    expect(TT.serializeMd(TT.parseMd(V2_HOSTILE_FIXTURE))).toBe(V2_HOSTILE_FIXTURE);
+  });
+
+  it('is a fixed point under a SECOND cycle (a single pass hides accretion)', () => {
+    const once = TT.serializeMd(TT.parseMd(V2_HOSTILE_FIXTURE));
+    expect(TT.serializeMd(TT.parseMd(once))).toBe(once);
+  });
+
+  it('failure 1 — a pipe survives in every field it can appear in', () => {
+    const state = TT.parseMd(V2_HOSTILE_FIXTURE);
+    expect(state.clients.find((c) => c.id === 'acme').name).toBe('Acme | Co');
+    const proj = state.projects.find((p) => p.code === 'A|B');
+    expect(proj).toBeTruthy();
+    expect(proj.name).toBe('Pipe | Project');
+    expect(proj.clientId).toBe('acme');
+    expect(state.tasks[0]).toEqual({ id: 't|1', label: 'Task | One', project: 'A|B' });
+    const e = state.entries[0];
+    expect(e.project).toBe('A|B');
+    expect(e.label).toBe('Task | One');
+  });
+
+  it('failure 2 — a note ending in [nb]/[ea] keeps its text and does NOT set the flag', () => {
+    const state = TT.parseMd(V2_HOSTILE_FIXTURE);
+    // the reproduction from the ticket, asserted as VALUES
+    expect(state.entries[0].note).toBe('refactored the [nb]');
+    expect(state.entries[0].billable).toBe(true);
+    expect('editedByAdmin' in state.entries[0]).toBe(false);
+    // an escaped [ea] is text; the unescaped [nb] beside it is still a genuine flag
+    expect(state.entries[1].note).toBe('done [ea]');
+    expect(state.entries[1].billable).toBe(false);
+    expect('editedByAdmin' in state.entries[1]).toBe(false);
+  });
+
+  it('failure 3 — a clientId that collides with a rule token is not read as a flag', () => {
+    const state = TT.parseMd(V2_HOSTILE_FIXTURE);
+    // `- P-NB | Flaglike client | nb` — parts[2] is the POSITIONAL clientId, never a token
+    const pnb = state.projects.find((p) => p.code === 'P-NB');
+    expect(pnb.clientId).toBe('nb');
+    expect(pnb.billable).toBe(true);
+    expect(pnb.archived).toBe(false);
+    const parch = state.projects.find((p) => p.code === 'P-ARCH');
+    expect(parch.clientId).toBe('archived');
+    expect(parch.archived).toBe(false); // ditto
+    expect(parch.billable).toBe(false); // …but a genuine `nb` token AFTER the clientId still lands
+  });
+
+  it('a literal backslash round-trips in ids, names and notes', () => {
+    const state = TT.parseMd(V2_HOSTILE_FIXTURE);
+    expect(state.clients.find((c) => c.id === 'back\\slash').name).toBe('Back\\slash Ltd');
+    expect(state.projects.find((p) => p.code === 'P-BS').clientId).toBe('back\\slash');
+    expect(state.entries[2].note).toBe('path C:\\work');
+  });
+
+  // The hazards above, driven from STATE rather than from markdown: this is the direction
+  // the app actually writes (user types → serialize → mirror), so it catches an escape
+  // that parses fine but is never emitted.
+  it('hostile values entered as state survive serialize→parse→serialize→parse', () => {
+    /** @type {any} */
+    const state = {
+      settings: { currency: 'kr', language: 'en' },
+      clients: [
+        { id: 'acme', name: 'Acme | Co', rounding: 'exact', rate: null, archived: false },
+        { id: 'nb', name: 'Flaglike Client', rounding: 'exact', rate: null, archived: false },
+      ],
+      projects: [
+        { code: 'A|B', name: 'Pipe | Project', clientId: 'acme', rate: null, billable: true, archived: false },
+        // a billable project whose CLIENT id is `nb` — the old scan flipped it off and then
+        // re-emitted the flag, so the corruption grew a token per write cycle
+        { code: 'P-NB', name: 'Flaglike', clientId: 'nb', rate: null, billable: true, archived: false },
+      ],
+      tasks: [{ id: 'nb', label: 'Weird | template', project: 'A|B' }],
+      entries: [
+        {
+          id: 'e1',
+          date: '2026-01-05',
+          start: null,
+          end: null,
+          durMin: 300,
+          project: 'A|B',
+          label: 'Task | One',
+          note: 'refactored the [nb]',
+          billable: true,
+        },
+        {
+          id: 'e2',
+          date: '2026-01-05',
+          start: null,
+          end: null,
+          durMin: 45,
+          project: 'A|B',
+          label: 'back\\slash',
+          note: 'trailing [nb] [ea]', // BOTH markers as text — the old strip loop ate both
+          billable: false,
+          editedByAdmin: true,
+        },
+      ],
+      commits: [],
+    };
+    const once = TT.serializeMd(state);
+    const back = TT.parseMd(once);
+    expect(back.clients[0].name).toBe('Acme | Co');
+    expect(back.projects[0]).toMatchObject({ code: 'A|B', name: 'Pipe | Project', billable: true, archived: false });
+    expect(back.projects[1]).toMatchObject({ code: 'P-NB', clientId: 'nb', billable: true, archived: false });
+    expect(back.tasks[0]).toEqual({ id: 'nb', label: 'Weird | template', project: 'A|B' });
+    expect(back.entries[0]).toMatchObject({ note: 'refactored the [nb]', billable: true, label: 'Task | One' });
+    expect(back.entries[1]).toMatchObject({
+      note: 'trailing [nb] [ea]',
+      billable: false,
+      editedByAdmin: true,
+      label: 'back\\slash',
+    });
+    // second cycle — the fixed point, where accretion would show
+    const twice = TT.serializeMd(back);
+    expect(twice).toBe(once);
+    expect(TT.parseMd(twice).entries[1].note).toBe('trailing [nb] [ea]');
+  });
+
+  it('emit-when-needed: content with no reserved character gains no escape', () => {
+    // the guard on every existing golden — an escape must never appear unbidden
+    for (const golden of [V1_FIXTURE, V2_FIXTURE, V2_COMMITS_FIXTURE, V2_ADMIN_FIXTURE, V2_ARCHIVED_FIXTURE]) {
+      expect(TT.serializeMd(TT.parseMd(golden))).not.toContain('\\');
+    }
+    expect(TT.serializeMd(TT.parseMd(TT.seedMd()))).not.toContain('\\');
+  });
+});
+
+// ---- SB-045 / PLAN-008 task 2: the vault `Task` cell codec ----
+// SB-045 froze the vault's Task column as `label<br>- note` in ONE cell. That makes
+// `<br>` a structural delimiter and `- ` a presentation prefix — both are things a user
+// can legitimately type. This is the codec SB-055's table serializer will call; the
+// vault parser/serializer itself (heading anchors, totals row, `revision: N`) is NOT here.
+//
+// Every case is asserted over TWO cycles: the `- ` accretion (`- - note`) and the
+// label/note swap only appear on the second one, so a single pass is blind to the exact
+// bugs this codec exists to prevent.
+describe('vault Task-cell codec (SB-045)', () => {
+  /** @param {{label: string, note: string}} v */
+  const cycle = (v) => TT.decodeTaskCell(TT.encodeTaskCell(v));
+
+  const CASES = [
+    { name: 'label + note (the ordinary shape)', v: { label: 'Checkout flow', note: 'wireframes' } },
+    { name: 'label only', v: { label: 'Checkout flow', note: '' } },
+    { name: 'note only — no label', v: { label: '', note: 'freeform hour' } },
+    { name: 'both empty', v: { label: '', note: '' } },
+    { name: 'a literal <br> in the note', v: { label: 'Docs', note: 'use <br> for line breaks' } },
+    { name: 'a literal <br> in the label', v: { label: 'The <br> tag', note: 'explained' } },
+    { name: 'a note that begins with "- "', v: { label: 'Checkout flow', note: '- a bulleted thought' } },
+    { name: 'a note that begins with "- " and NO label', v: { label: '', note: '- a bulleted thought' } },
+    { name: 'a label that begins with "- "', v: { label: '- weird label', note: 'note here' } },
+    { name: 'a label that begins with "- " and no note', v: { label: '- weird label', note: '' } },
+    { name: 'a pipe in both fields', v: { label: 'a|b', note: 'c|d' } },
+    { name: 'a backslash in both fields', v: { label: 'C:\\work', note: 'path\\to\\thing' } },
+    { name: 'an escaped-looking literal \\<br>', v: { label: 'x', note: 'literally \\<br> typed' } },
+    { name: 'everything at once', v: { label: '- a|b <br>', note: '- c\\d <br> e' } },
+  ];
+
+  for (const { name, v } of CASES) {
+    it(`round-trips ${name}`, () => {
+      expect(cycle(v)).toEqual(v);
+    });
+  }
+
+  // The value round-trip above is only half the story, and repeating it (`cycle(cycle(v))`)
+  // adds nothing: `cycle` is pure, so `cycle(v) === v` implies every further pass. The
+  // property it does NOT imply is the one that matters for repeated writes — the fixed
+  // point of the ENCODED form, seeded from cell shapes a HAND EDIT can produce rather than
+  // from the encoder's own output. That is where `- ` accretion and the label/note swap
+  // would actually surface, and nothing above reaches these shapes.
+  const HAND_EDITED = [
+    'Checkout flow<br>- wireframes', // the canonical shape
+    'Checkout flow', // label only
+    '- freeform hour', // note only
+    '', // empty cell
+    'a<br>b', // note without the `- ` presentation prefix
+    'a<br>- b<br>c', // a second, raw <br> the user typed
+    '<br>- n', // stray leading delimiter, empty label
+    'a<br>', // trailing delimiter, empty note
+    '- - doubled', // a note that itself begins with `- `
+    '\\- escaped label', // a label that begins with `- `
+    'a\\|b<br>- c\\|d', // pipes escaped by the SB-041 layer
+    'x<br>- literally \\<br> typed', // an escaped literal <br>
+  ];
+  for (const cell of HAND_EDITED) {
+    it(`normalises then holds steady for a hand-edited cell: ${JSON.stringify(cell)}`, () => {
+      const once = TT.encodeTaskCell(TT.decodeTaskCell(cell));
+      const twice = TT.encodeTaskCell(TT.decodeTaskCell(once));
+      expect(twice).toBe(once); // a second write must not drift — no accretion, no swap
+      expect(TT.decodeTaskCell(twice)).toEqual(TT.decodeTaskCell(once)); // …and the values hold
+    });
+  }
+
+  it('a cell the encoder produced is ALREADY normalised (no drift on first re-write)', () => {
+    for (const { v } of CASES) {
+      const encoded = TT.encodeTaskCell(v);
+      expect(TT.encodeTaskCell(TT.decodeTaskCell(encoded))).toBe(encoded);
+    }
+  });
+
+  it('emits SB-045’s exact shape: label<br>- note, label alone, and a bare `- note`', () => {
+    expect(TT.encodeTaskCell({ label: 'Checkout flow', note: 'wireframes' })).toBe('Checkout flow<br>- wireframes');
+    expect(TT.encodeTaskCell({ label: 'Checkout flow', note: '' })).toBe('Checkout flow');
+    // note-only carries NO leading <br> (ruling: a bare `- note`)
+    expect(TT.encodeTaskCell({ label: '', note: 'freeform hour' })).toBe('- freeform hour');
+    expect(TT.encodeTaskCell({ label: '', note: '' })).toBe('');
+  });
+
+  it('a genuine <br> delimiter and an escaped literal are distinguishable in the bytes', () => {
+    const cell = TT.encodeTaskCell({ label: 'Docs', note: 'use <br> here' });
+    expect(cell).toBe('Docs<br>- use \\<br> here'); // one structural, one escaped
+    expect(TT.decodeTaskCell(cell)).toEqual({ label: 'Docs', note: 'use <br> here' });
+  });
+
+  it('a label beginning with "- " does NOT decode as a note-only cell', () => {
+    // the subtle one: `- foo` as a LABEL is otherwise indistinguishable from `foo` as a NOTE
+    const asLabel = TT.encodeTaskCell({ label: '- foo', note: '' });
+    const asNote = TT.encodeTaskCell({ label: '', note: 'foo' });
+    expect(asLabel).not.toBe(asNote);
+    expect(TT.decodeTaskCell(asLabel)).toEqual({ label: '- foo', note: '' });
+    expect(TT.decodeTaskCell(asNote)).toEqual({ label: '', note: 'foo' });
+  });
+
+  it('composes with the cell escaping — a piped Task cell is still ONE cell', () => {
+    const cell = TT.encodeTaskCell({ label: 'a|b', note: 'c|d' });
+    expect(cell).toBe('a\\|b<br>- c\\|d');
+    // SB-045 measured that `\|` renders as a literal `|` inside a two-line <br> cell, so a
+    // vault row splitting on UNESCAPED pipes sees exactly one Task cell here.
+    expect(cell.split(/(?<!\\)\|/)).toHaveLength(1);
+  });
+
+  it('emit-when-needed: ordinary content gains no escape at all', () => {
+    expect(TT.encodeTaskCell({ label: 'Ops & maintenance', note: 'cert renewal + patching' })).toBe(
+      'Ops & maintenance<br>- cert renewal + patching',
+    );
   });
 });

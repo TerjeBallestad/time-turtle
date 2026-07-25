@@ -223,6 +223,78 @@ describe('auth + roles', () => {
     const files = readdirSync(mdDir).filter((f) => f.endsWith('.md'));
     expect(files.length).toBeGreaterThan(0);
   });
+
+  // SB-041 (PLAN-008): the pure escaping round-trip is pinned in roundtrip.test.js. This
+  // proves the RESTORE PATH end to end — hostile content goes in over HTTP, and the bytes
+  // the server actually wrote to disk parse back to the values that went in. A 200 from
+  // PUT and the file merely existing prove neither; the assertions below read the file.
+  //
+  // ## Verified red-green: 2026-07-25
+  it('a server-written mirror round-trips a piped client name and a note ending in [nb]', async () => {
+    const admin = session();
+    await admin('POST', '/api/auth/login', { email: 'admin@timeturtle.local', password: 'testpw' });
+    const before = await admin('GET', '/api/state');
+
+    const put = await admin('PUT', '/api/state', {
+      clients: [
+        ...before.json.clients,
+        { id: 'hostile', name: 'Acme | Co', rounding: 'exact', rate: 700, archived: false },
+      ],
+      projects: [
+        ...before.json.projects,
+        { code: 'PIPE|X', name: 'Pipe | Project', clientId: 'hostile', rate: null, billable: true, archived: false },
+      ],
+      entries: [
+        ...before.json.entries,
+        {
+          id: 'hostile1',
+          date: '2026-02-02',
+          start: null,
+          end: null,
+          durMin: 60,
+          project: 'PIPE|X',
+          label: 'Label | With Pipe',
+          note: 'refactored the [nb]', // trailing marker is TEXT — the entry stays billable
+          billable: true,
+        },
+      ],
+    });
+    expect(put.status).toBe(200);
+
+    // read the BYTES on disk (not the in-memory state — that would prove nothing)
+    const mdDir = join(DATA_DIR, 'markdown');
+    const md = readdirSync(mdDir)
+      .filter((f) => f.endsWith('.md'))
+      .map((f) => readFileSync(join(mdDir, f), 'utf8'))
+      .find((m) => m.includes('2026-02-02'));
+    expect(md).toBeTruthy();
+    expect(md).toContain('Acme \\| Co'); // escaped on disk…
+
+    const state = TT.parseMd(md);
+    expect(state.clients.find((c) => c.id === 'hostile').name).toBe('Acme | Co'); // …decoded back
+    expect(state.projects.find((p) => p.code === 'PIPE|X').name).toBe('Pipe | Project');
+    const entry = state.entries.find((e) => e.date === '2026-02-02');
+    expect(entry.note).toBe('refactored the [nb]');
+    expect(entry.billable).toBe(true);
+    expect(entry.label).toBe('Label | With Pipe');
+    expect(entry.project).toBe('PIPE|X');
+
+    // Restore the catalog: this file runs ONE server against ONE data dir, so leaving a
+    // piped project code behind would silently ride along into every later test here.
+    // Teardown has to unwind in reference order — SDD-002 ruling 7's hard-delete guard
+    // (409) checks each drop against the STORED rows, so entry → project → client, one
+    // PUT each. Collapsing them trips the guard, which is it working as designed.
+    for (const body of [
+      { entries: before.json.entries },
+      { projects: before.json.projects },
+      { clients: before.json.clients },
+    ]) {
+      expect((await admin('PUT', '/api/state', body)).status).toBe(200);
+    }
+    const after = await admin('GET', '/api/state');
+    expect(after.json.projects.some((p) => p.code === 'PIPE|X')).toBe(false);
+    expect(after.json.clients.some((c) => c.id === 'hostile')).toBe(false);
+  });
 });
 
 // SDD-002 (DD-003): billable is admin-owned, derived from the PROJECT, and the
