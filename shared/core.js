@@ -871,6 +871,136 @@ TT.writeVaultBlock = function (md, entries, opts) {
   return { md: out.join('\n'), quarantine: false, reason: null };
 };
 
+// ---- canonical row string (DD-008 spec obligation — nothing computes this in phase 1) ----
+// Phase 1 computes and stores nothing. Committing is off for `backend=vault` under phase 1+2, so the
+// derived persistence key has no consumer yet and no code in PLAN-009 produces one. What phase 1 owes is
+// this spec, because it is cheap now and expensive to retrofit: phase 3 computes the key from it, and if
+// the string is undefined until then, phase 3 has to invent it against a year of already-written notes.
+//
+// DD-008's two identity layers stand: the runtime id (`nid()`) is EPHEMERAL — a per-parse in-memory
+// handle for the React key and the mutation match — and must never reach disk. The persistence
+// identity is a digest over the canonical row string defined below, plus an ordinal when two rows on one
+// day are identical.
+//
+// Every rule is stated in terms of what `TT.serializeVaultBlock` / `TT.parseVaultBlock` actually do as of
+// PLAN-009, not aspirationally.
+//
+// --- 1. The digest is over PARSED VALUES, not over the cell bytes
+//
+// Two consequences, both load-bearing:
+//
+// - SB-041's escaping drops out. A field holding `a|b` digests identically whether it reached disk as
+//   `a\|b` or was hand-typed some other way, so the key does not depend on escaping choices.
+// - The emitted separator drops out. SB-063 will make the `→`/`->`/`-` separator a setting; a
+//   separator-dependent digest would re-key every row in the vault the day that setting flips.
+//
+// --- 2. Fixed field order, independent of the block's header order
+//
+// ```
+// 1  date
+// 2  time
+// 3  mode
+// 4  project
+// 5  label
+// 6  note
+// 7  billable
+// 8+ any FURTHER vocabulary columns, in the vocabulary's canonical order
+// ```
+//
+// This mirrors SB-045's column order (`Time · Mode · Project · Task · Bill`) with the date prepended and
+// `Task` expanded into its two fields. It is the vocabulary's order, never the block's header order —
+// reordering the header row must not re-key a single row, and TT already parses any subset in any order.
+//
+// --- 3. The join
+//
+// Fields are joined with U+001F (UNIT SEPARATOR) and the digest is taken over the UTF-8 bytes of the
+// result. A markdown table cell cannot carry U+001F through TT's parser, so the join stays unambiguous
+// even with empty fields present — which is precisely why rule 5 needs no placeholder.
+//
+// --- 4. Time normalization — the three legal shapes, plus the empty cell
+//
+// ```
+// range     → range:<startMin>-<endMin>      e.g. range:540-930
+// running   → running:<startMin>             e.g. running:1054
+// duration  → duration:<min>                 e.g. duration:30
+// empty     → none
+// ```
+//
+// Minutes since midnight, as decimal integers. The separator is not part of it. `09:00-15:30`,
+// `09:00→15:30` and `09:00->15:30` are the same row — `TT.parseTimeCell` already accepts all three — so
+// the digest must not be able to tell them apart.
+//
+// *Consequence, recorded not decided:* stopping a running timer changes the row's key
+// (`running:1054` → `range:1054-1080`). A content-derived identity is not stable under edit. See rule 11.
+//
+// --- 5. Empty cells are the empty string — no placeholder
+//
+// The vault emits `''` for a null project, `''` for an empty `Task` and `''` for a non-billable `Bill`.
+// `—` is explicitly not part of this format (SB-045: `Bill` is `✓` or blank, not `—`), unlike the v2
+// mirror where `—` marks an absent project. Rule 3's separator makes an empty field unambiguous, so a
+// placeholder would only invent a token a user could also type.
+//
+// --- 6. `- ` and `<br>` never appear in the string
+//
+// Both are presentation (SB-045 consequence 7): `<br>` is the structural delimiter between label and note,
+// `- ` is the note's bullet prefix, and `TT.decodeTaskCell` strips both on import. The digest sees `label`
+// and `note` as two separate fields, so there is nothing to strip at digest time — this falls out of the
+// field order rather than being a normalization step.
+//
+// --- 7. Billable is `1` or `0`
+//
+// Note the asymmetry TT already implements: a block with no `Bill` column at all parses to
+// `billable = true` (billable unless something says otherwise), so it digests as `1`, not as absent.
+//
+// --- 8. Passthrough columns
+//
+// A vocabulary column TT has no model field for is carried raw on `entry.vaultCells` and re-emitted
+// verbatim. In the canonical string it is decoded, and it occupies its fixed slot — `mode` is
+// field 3 whether it arrives from the passthrough (phase 1) or from `Entry.tags` (SB-059). Pinning the
+// slot today is the whole point: SB-059 giving `Mode` a model field must not move it in the string.
+//
+// A column the block does not declare contributes the empty string, so a pre-`Mode` 4-column block and a
+// 5-column block with a blank `Mode` key identically. Any column SB-044 adds beyond the frozen five
+// appends at field 8+ in vocabulary order as `<key>=<value>`, so adding a column never re-keys the rows
+// written before it.
+//
+// --- 9. Ordinal on collision
+//
+// Two rows on one day can be identical — two 30m entries, same project, same label, no note. (PLAN-009's
+// Family D golden contains exactly that pair, and asserts nothing collapses them.) The key is:
+//
+// ```
+// <digest>      first occurrence
+// <digest>#2    second
+// <digest>#3    third …
+// ```
+//
+// counting top to bottom in row order. Only duplicates are order-dependent: reordering distinct rows
+// changes nothing, and swapping two identical rows is a no-op by construction.
+//
+// --- 10. The hash function is phase 3's
+//
+// This spec pins the string. Which hash and how far it is truncated is phase 3's to choose — and to
+// record in exactly one place when it does.
+//
+// --- 11. The date comes from the note, not the block
+//
+// SB-045's format has no date column; the filename carries it, and `TT.parseVaultBlock`'s `opts.date`
+// supplies it. A key is therefore day-scoped by construction, which is also what makes rule 9's ordinal
+// well defined.
+//
+// --- 12. Known re-key hazards — recorded, not decided
+//
+// Each of these would change the digest of rows already on disk, so each is a migration if it lands after
+// notes exist:
+//
+// - SB-059 gives `Project` a wikilink↔code mapping. Field 4 currently holds `[[Planning]]` verbatim
+//   and would later hold a resolved code.
+// - SB-076, if ruled "normalise `<br>` lookalikes", changes note values.
+// - Rule 4's consequence — editing a row changes its key, so a committed entry that is later edited
+//   loses its `commitSnapshot` link. Filed as SB-079 rather than decided here, because whether
+//   phase 3 needs identity to survive an edit is SB-057's arbitration question, not this spec's.
+
 TT.serializeMd = function (state) {
   const lines = [
     '# timesheet',
