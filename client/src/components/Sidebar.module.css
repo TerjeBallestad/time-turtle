@@ -18,7 +18,7 @@
   width: 20px;
   height: 20px;
   border-radius: var(--radius-chip);
-  background: url(/turtle-face-128.png) center / cover no-repeat;
+  background: url(/turtle-64.png) center / cover no-repeat;
   flex-shrink: 0;
 }
 .brandName {
