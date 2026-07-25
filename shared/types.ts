@@ -94,6 +94,16 @@ export interface Entry {
    * additively (emit-when-true `[ea]` token, the ` [nb]` discipline).
    */
   editedByAdmin?: boolean;
+  /**
+   * SB-055 phase 1: vault-block columns TT parsed but has no model field for, keyed by
+   * the lowercased header label and holding the RAW (still-escaped) cell, so they are
+   * re-emitted verbatim. Today that is `Mode` — `Entry.tags` does not exist yet (SB-059
+   * adds it and is blockedBy SB-055), and dropping the cell would lose a hand-typed
+   * `#deep` on the next write. Present only when the block declared such a column, and
+   * never produced by the sqlite/mirror path. SB-059's seam: adding `tags` removes
+   * `mode` from here.
+   */
+  vaultCells?: Record<string, string>;
 }
 
 export interface Settings {
@@ -213,6 +223,22 @@ export interface VaultBlockRegion {
 }
 
 export type VaultBlockLocation = VaultBlockRegion | VaultQuarantine;
+
+/**
+ * A parsed vault block. `headers` is the block's OWN declared header labels, in its own
+ * order and spelling — the serializer re-emits exactly these, which is what makes a
+ * block written before a column existed keep round-tripping. Entries carry runtime ids
+ * that are ephemeral by DD-008 and must never reach disk.
+ */
+export interface VaultBlockParse {
+  quarantine: false;
+  heading: string;
+  revision: number;
+  headers: string[];
+  entries: Entry[];
+}
+
+export type VaultBlockParseResult = VaultBlockParse | VaultQuarantine;
 
 // ---- parsed time cell (discriminated union) ----
 export type ParsedTime =
@@ -410,6 +436,13 @@ export interface TTModule {
    * unsure of: this is what stops a write from running into the rest of the note.
    */
   locateVaultBlock(md: string, opts?: { heading?: string }): VaultBlockLocation;
+  /**
+   * SB-055: parse the located block into entries. The header row is the schema; any
+   * SUBSET of the canonical-English vocabulary (`Time`, `Mode`, `Project`, `Task`,
+   * `Bill`) in any ORDER parses, anything outside it quarantines. `opts.date` supplies
+   * the note's date — SB-045's format has no date column.
+   */
+  parseVaultBlock(md: string, opts?: { heading?: string; date?: string }): VaultBlockParseResult;
   serializeMd(state: Catalog): string;
   newId(): string;
   parseMd(md: string): Catalog;

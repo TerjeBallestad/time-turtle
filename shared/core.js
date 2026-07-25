@@ -619,6 +619,124 @@ TT.locateVaultBlock = function (md, opts) {
   };
 };
 
+// ---- vault block parse (SB-055) ----
+// THE HEADER ROW IS THE SCHEMA (SB-045). Keys are the lowercased header labels
+// (`Task` → `task`); there is no `cols=` attribute anywhere. Headers are canonical
+// ENGLISH and never routed through client/src/i18n.ts (DD-007) — the file on disk is
+// not a UI surface.
+//
+// THE VOCABULARY RULE resolves what reads as a contradiction between two settled
+// rulings. SB-045 ruling 2: an unrecognised header quarantines, never guesses a
+// remapping. The `cols=` rationale: a block written before a column existed must keep
+// parsing. Both hold under ONE rule — TT knows a fixed vocabulary of canonical-English
+// labels, any SUBSET of it in any ORDER parses (that is the migration-free property),
+// and any label OUTSIDE it quarantines (that is ruling 2). SB-044 later extends the
+// vocabulary from settings; nothing else changes. Membership is case-insensitive
+// because the key IS the lowercased label — that is a definition, not a guess — and the
+// block's own label spelling is preserved for re-emission, so bytes still round-trip.
+//
+// THE PASSTHROUGH. `Entry.tags` does not exist yet (SB-059 adds it and is blockedBy
+// SB-055), so the `Mode` cell has no field to map to. Any vocabulary column TT has no
+// model mapping for is carried RAW (still escaped) on `entry.vaultCells` and re-emitted
+// verbatim — re-emitting exactly the bytes it read is the only lossless option for a
+// value TT cannot interpret. SB-059's seam: adding `Entry.tags` removes `mode` from here.
+//
+// PROJECT IS VERBATIM IN PHASE 1. `Project.vaultNote` is SB-059's, so `[[Planning]]` and
+// bare `FAG` are both carried literally into `entry.project`. Nothing consumes a
+// vault-parsed project before SB-056/SB-057 wire it, so the literal value is inert.
+//
+// ROW-LEVEL QUARANTINE. A row that parses as neither an entry nor the generated totals
+// row quarantines the whole block. It is not dropped and not guessed — that is what
+// stops a corrupted Time cell from silently vanishing an hour of Terje's day.
+const VAULT_COLUMNS = ['Time', 'Mode', 'Project', 'Task', 'Bill'];
+const VAULT_KEYS = VAULT_COLUMNS.map((label) => label.toLowerCase());
+const BILL_YES = '✓'; // U+2713. SB-045: `✓` or blank — never `—`, and nothing else parses.
+/**
+ * Parse the vault block into entries, or propagate the locator's quarantine verdict.
+ * `opts.date` is the note's date: SB-045's format has NO date column (the filename
+ * carries it), so SB-056/SB-057 supply it here. It defaults to '' rather than today, so
+ * a caller that forgets it produces a visibly dateless entry instead of a silently
+ * misdated one.
+ * @param {string} md @param {{ heading?: string, date?: string }} [opts]
+ * @returns {import('./types.ts').VaultBlockParseResult}
+ */
+TT.parseVaultBlock = function (md, opts) {
+  const loc = TT.locateVaultBlock(md, opts);
+  if (loc.quarantine) return loc; // propagated UNCHANGED — the locator owns its reasons
+  const lines = String(md == null ? '' : md).split('\n');
+  const date = (opts && opts.date) || '';
+
+  // the header row IS the schema
+  const headers = vaultRowCells(lines[loc.headerLine]);
+  /** @type {string[]} */
+  const keys = [];
+  for (const label of headers) {
+    const key = label.toLowerCase();
+    if (!VAULT_KEYS.includes(key)) return vaultQuarantine('unknown-header');
+    if (keys.includes(key)) return vaultQuarantine('duplicate-header');
+    keys.push(key);
+  }
+
+  /** @type {Entry[]} */
+  const entries = [];
+  for (const ln of loc.rowLines) {
+    if (ln === loc.totalsLine) continue; // generated, never round-tripped as an entry
+    const cells = vaultRowCells(lines[ln]);
+    if (cells.length !== keys.length) return vaultQuarantine('row-cell-count');
+    /** @type {Entry} */
+    const entry = {
+      // DD-008: the runtime id is EPHEMERAL — minted here only because the React key and
+      // the mutation handle need one. It must NEVER be written back to disk; phase 3
+      // derives the persistence key from the row's own content (see the canonical row
+      // string spec beside the serializer).
+      id: nid(),
+      date,
+      start: null,
+      end: null,
+      durMin: null,
+      project: null,
+      label: '',
+      note: '',
+      // no Bill column at all (a pre-Bill block) → billable, matching TT.projectBillable's
+      // "billable unless something says otherwise"
+      billable: true,
+    };
+    /** @type {Record<string, string> | null} */
+    let vaultCells = null;
+    for (let c = 0; c < keys.length; c++) {
+      const raw = cells[c];
+      if (keys[c] === 'time') {
+        // an EMPTY Time cell is legal — that is an entry with no time yet, which the app
+        // can hold (TT.newEntry with no parsed time). A non-empty cell that will not parse
+        // is the dangerous one, and it quarantines rather than dropping the hour.
+        if (raw !== '') {
+          const parsed = TT.parseTimeCell(raw);
+          if (!parsed) return vaultQuarantine('unparseable-time');
+          applyParsed(entry, parsed);
+        }
+      } else if (keys[c] === 'project') {
+        entry.project = raw === '' ? null : TT.decodeCell(raw);
+      } else if (keys[c] === 'task') {
+        const { label, note } = TT.decodeTaskCell(raw);
+        entry.label = label;
+        entry.note = note;
+      } else if (keys[c] === 'bill') {
+        // exactly `✓` or exactly blank. Anything else is a hand edit whose intent TT
+        // cannot know, and this cell decides money — so it refuses instead of guessing.
+        if (raw === BILL_YES) entry.billable = true;
+        else if (raw === '') entry.billable = false;
+        else return vaultQuarantine('bad-bill-cell');
+      } else {
+        (vaultCells || (vaultCells = {}))[keys[c]] = raw;
+      }
+    }
+    if (vaultCells) entry.vaultCells = vaultCells;
+    entries.push(entry);
+  }
+
+  return { quarantine: false, heading: loc.heading, revision: loc.revision, headers, entries };
+};
+
 TT.serializeMd = function (state) {
   const lines = [
     '# timesheet',

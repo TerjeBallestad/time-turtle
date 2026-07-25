@@ -897,3 +897,172 @@ describe('vault block locator (SB-055)', () => {
     }
   });
 });
+
+// ---- SB-055 / PLAN-009 task 3: parse the table into entries ----
+// Everything here asserts RESOLVED VALUES, never bytes. DD-008 already recorded why: a
+// byte-equality golden is structurally blind to a severed semantic link — the existing
+// mirror round-trip passes byte-exact while commitSnapshot(entry) returns null, because ids
+// never appear in the bytes. Byte goldens are task 5's job and they are a DIFFERENT claim.
+// ## Verified red-green: 2026-07-25
+describe('vault block parse (SB-055)', () => {
+  /** Build a note with TT's block between two of Terje's sections. */
+  const noteWith = (rows, header = '| Time | Mode | Project | Task | Bill |', delim = '|---|---|---|---|---|') =>
+    ['# 2026-01-05', '', '## Intentions', '', '- ship it', '', '## Time Log', '', header, delim, ...rows, '', '`revision: 3`', '', '## Captures', ''].join('\n'); // prettier-ignore
+
+  const FULL = noteWith([
+    '| 09:00→15:30 | #admin | [[Planning]] | Daily planning ritual | ✓ |',
+    '| 17:34→ | #deep | FAG | Search & facets<br>- Narrow the facet query | |',
+    '| 30m | #rest | [[Home]] | | |',
+    '| **8.5h** | | | | **6.5h billable** |',
+  ]);
+
+  it('resolves the three legal time shapes onto start/end/durMin', () => {
+    const parsed = TT.parseVaultBlock(FULL, { date: '2026-01-05' });
+    expect(parsed.quarantine).toBe(false);
+    expect(parsed.entries).toHaveLength(3); // the totals row is NOT an entry
+    expect(parsed.entries[0]).toMatchObject({ start: 540, end: 930, durMin: null }); // range
+    expect(parsed.entries[1]).toMatchObject({ start: 1054, end: null, durMin: null }); // running
+    expect(parsed.entries[2]).toMatchObject({ start: null, end: null, durMin: 30 }); // bare duration
+    expect(TT.entryMinutes(parsed.entries[0])).toBe(390);
+    expect(TT.isRunning(parsed.entries[1])).toBe(true);
+    expect(parsed.entries.every((e) => e.date === '2026-01-05')).toBe(true);
+  });
+
+  it('splits the Task cell into label + note, and carries an empty one', () => {
+    const [planning, facets, home] = TT.parseVaultBlock(FULL).entries;
+    expect(planning).toMatchObject({ label: 'Daily planning ritual', note: '' });
+    expect(facets).toMatchObject({ label: 'Search & facets', note: 'Narrow the facet query' });
+    expect(home).toMatchObject({ label: '', note: '' }); // empty Task cell
+  });
+
+  it('reads billable from the Bill column: a check is true, blank is false', () => {
+    const entries = TT.parseVaultBlock(FULL).entries;
+    expect(entries.map((e) => e.billable)).toEqual([true, false, false]);
+  });
+
+  it('carries a vocabulary column with no model field through verbatim (Mode → passthrough)', () => {
+    // Entry.tags does not exist yet (SB-059); dropping the cell would lose a typed `#deep`
+    const entries = TT.parseVaultBlock(FULL).entries;
+    expect(entries.map((e) => e.vaultCells)).toEqual([{ mode: '#admin' }, { mode: '#deep' }, { mode: '#rest' }]);
+  });
+
+  it('carries the Project cell verbatim — `[[Planning]]` and bare `FAG` alike (SB-059 owns the mapping)', () => {
+    const entries = TT.parseVaultBlock(FULL).entries;
+    expect(entries.map((e) => e.project)).toEqual(['[[Planning]]', 'FAG', '[[Home]]']);
+  });
+
+  it('a pre-Mode 4-column block still parses — any SUBSET of the vocabulary', () => {
+    const md = noteWith(
+      ['| 09:00→15:30 | [[Planning]] | Daily planning ritual | ✓ |'],
+      '| Time | Project | Task | Bill |',
+      '|---|---|---|---|',
+    );
+    const parsed = TT.parseVaultBlock(md);
+    expect(parsed.quarantine).toBe(false);
+    expect(parsed.headers).toEqual(['Time', 'Project', 'Task', 'Bill']);
+    expect(parsed.entries[0]).toMatchObject({ start: 540, end: 930, project: '[[Planning]]', billable: true });
+    expect('vaultCells' in parsed.entries[0]).toBe(false);
+  });
+
+  it('a REORDERED header set parses, and each cell follows the HEADER, not its position', () => {
+    const md = noteWith(
+      ['| ✓ | Daily planning ritual | [[Planning]] | 09:00→15:30 |'],
+      '| Bill | Task | Project | Time |',
+      '|---|---|---|---|',
+    );
+    const parsed = TT.parseVaultBlock(md);
+    expect(parsed.entries[0]).toMatchObject({
+      billable: true,
+      label: 'Daily planning ritual',
+      project: '[[Planning]]',
+      start: 540,
+      end: 930,
+    });
+  });
+
+  it('a block with NO Bill column defaults to billable (nothing said otherwise)', () => {
+    const md = noteWith(['| 30m | [[Home]] | Tidying |'], '| Time | Project | Task |', '|---|---|---|');
+    expect(TT.parseVaultBlock(md).entries[0].billable).toBe(true);
+  });
+
+  it('an empty Time cell is legal — an entry with no time yet, not a corrupted one', () => {
+    const md = noteWith(['|  | [[Home]] | Tidying |'], '| Time | Project | Task |', '|---|---|---|');
+    expect(TT.parseVaultBlock(md).entries[0]).toMatchObject({ start: null, end: null, durMin: null });
+  });
+
+  it('propagates the locator’s verdict UNCHANGED', () => {
+    expect(TT.parseVaultBlock('# just a note\n')).toEqual({ quarantine: true, reason: 'no-heading' });
+  });
+
+  // ---- the refusals: quarantine, never guess ----
+  // Each asserts the WHOLE verdict object and then that no entries came back, so a
+  // quarantine that also handed out a partial parse would fail. "The flag came back true"
+  // is not the claim being made.
+  const REFUSALS = [
+    {
+      name: 'a header label outside the vocabulary',
+      reason: 'unknown-header',
+      md: noteWith(['| 30m | #rest | [[Home]] | Tidying | |'], '| Time | Mood | Project | Task | Bill |'),
+    },
+    {
+      name: 'the same column declared twice',
+      reason: 'duplicate-header',
+      md: noteWith(['| 30m | 1h | [[Home]] | Tidying | |'], '| Time | Time | Project | Task | Bill |'),
+    },
+    {
+      name: 'a row with fewer cells than the header declares',
+      reason: 'row-cell-count',
+      md: noteWith(['| 30m | #rest | [[Home]] |']),
+    },
+    {
+      name: 'a row with more cells than the header declares',
+      reason: 'row-cell-count',
+      md: noteWith(['| 30m | #rest | [[Home]] | Tidying | | extra |']),
+    },
+    {
+      name: 'a Time cell that will not parse — the hour must never silently vanish',
+      reason: 'unparseable-time',
+      md: noteWith(['| 09:00 to lunch | #rest | [[Home]] | Tidying | |']),
+    },
+    {
+      name: 'a Bill cell that is neither a check nor blank',
+      reason: 'bad-bill-cell',
+      md: noteWith(['| 30m | #rest | [[Home]] | Tidying | yes |']),
+    },
+  ];
+
+  for (const { name, reason, md } of REFUSALS) {
+    it(`quarantines: ${name}`, () => {
+      expect(TT.parseVaultBlock(md)).toEqual({ quarantine: true, reason });
+      expect(TT.parseVaultBlock(md).entries).toBeUndefined(); // not a partial parse
+    });
+  }
+
+  it('an entry row is never mistaken for the generated totals row', () => {
+    // same table with the totals row deleted: all three rows are entries, none is swallowed
+    const noTotals = noteWith([
+      '| 09:00→15:30 | #admin | [[Planning]] | Daily planning ritual | ✓ |',
+      '| 17:34→ | #deep | FAG | Search & facets | |',
+      '| 30m | #rest | [[Home]] | | |',
+    ]);
+    expect(TT.parseVaultBlock(noTotals).entries).toHaveLength(3);
+    // …and with it present exactly one row is excluded — the entry count is 3 either way
+    expect(TT.parseVaultBlock(FULL).entries).toHaveLength(3);
+  });
+
+  it('mints an ephemeral runtime id per entry (DD-008)', () => {
+    const entries = TT.parseVaultBlock(FULL).entries;
+    expect(new Set(entries.map((e) => e.id)).size).toBe(3);
+    // a second parse of the SAME bytes mints DIFFERENT ids — the id is not derived from
+    // content, which is exactly why it must never be written back to disk
+    expect(TT.parseVaultBlock(FULL).entries.map((e) => e.id)).not.toEqual(entries.map((e) => e.id));
+  });
+
+  it('a pipe and a literal <br> inside cells resolve to content, not structure', () => {
+    const md = noteWith(['| 30m | #rest | A\\|B | Docs<br>- use \\<br> here | ✓ |']);
+    const entry = TT.parseVaultBlock(md).entries[0];
+    expect(entry.project).toBe('A|B');
+    expect(entry.label).toBe('Docs');
+    expect(entry.note).toBe('use <br> here');
+  });
+});
