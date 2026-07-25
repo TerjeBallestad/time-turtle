@@ -296,17 +296,25 @@ function applyParsed(entry, parsed) {
 //   `[`  — but ONLY when it opens a `[nb]`/`[ea]` token in the trailing run of a note,
 //          which is the only position parseMd reads as a flag (see escapeMarkerTail).
 // EMIT-WHEN-NEEDED: a field holding none of these serializes to exactly its own bytes,
-// so every existing golden and TT.seedMd() stay byte-identical. No `format: 3` bump —
-// a v2 mirror without a backslash in it reads identically under both old and new code.
-const RESERVED = /[\\|]/;
+// so every existing golden and TT.seedMd() stay byte-identical, and no `format: 3` bump
+// was needed for that.
+//
+// KNOWN READ-PATH CAVEAT (SB-041 review): `format: 2` does not distinguish a mirror
+// written before this change from one written after, and the marker is the only thing
+// that could. In a PRE-change mirror a backslash is a literal, so `see C:\work` now reads
+// back as `see C:work`. Live mirrors self-heal — the server rewrites them from the DB on
+// the next PUT — so this bites only when restoring from a STALE file, which is exactly
+// the disaster-recovery path. Tracked separately; do not "fix" it by making decodeCell
+// conditional without settling the format question first.
 /** Escape a value for use as one `|`-delimited cell. @param {string} s @returns {string} */
 TT.encodeCell = function (s) {
   s = s == null ? '' : String(s);
-  return RESERVED.test(s) ? s.replace(/[\\|]/g, (c) => '\\' + c) : s;
+  return s.replace(/[\\|]/g, (c) => '\\' + c);
 };
 /** Reverse of encodeCell: `\X` → `X` for any X. @param {string} s @returns {string} */
 TT.decodeCell = function (s) {
-  if (s.indexOf('\\') < 0) return s;
+  s = s == null ? '' : String(s);
+  if (s.indexOf('\\') < 0) return s; // the overwhelmingly common case — skip the scan
   let out = '';
   for (let i = 0; i < s.length; i++) {
     if (s[i] === '\\' && i + 1 < s.length) {
@@ -317,27 +325,24 @@ TT.decodeCell = function (s) {
   }
   return out;
 };
-// Split a row body on UNESCAPED `|` only. Returns cells still in their escaped form —
-// the caller strips flag markers first and decodes last, or `\[nb]` gets eaten.
-/** @param {string} s @returns {string[]} */
-function splitCells(s) {
+// Split on UNESCAPED occurrences of `delim` only, returning the pieces STILL escaped —
+// callers read structure out of them (rule tokens, flag markers) and decode last, or
+// `\[nb]` gets eaten. One implementation for both delimiters this format uses, so the
+// escape rule cannot drift between them.
+/** @param {string} s @param {string} delim @param {boolean} [trim] @returns {string[]} */
+function splitUnescaped(s, delim, trim) {
   const out = [];
-  let cur = '';
-  for (let i = 0; i < s.length; i++) {
-    if (s[i] === '\\' && i + 1 < s.length) {
-      cur += s[i] + s[++i];
-      continue;
-    }
-    if (s[i] === '|') {
-      out.push(cur.trim());
-      cur = '';
-      continue;
-    }
-    cur += s[i];
+  let last = 0;
+  for (let i = s.indexOf(delim); i >= 0; i = s.indexOf(delim, i + 1)) {
+    if (isEscapedAt(s, i)) continue;
+    out.push(s.slice(last, i));
+    last = i + delim.length;
   }
-  out.push(cur.trim());
-  return out;
+  out.push(s.slice(last));
+  return trim ? out.map((x) => x.trim()) : out;
 }
+/** Split a `|`-delimited row body into its cells. @param {string} s @returns {string[]} */
+const splitCells = (s) => splitUnescaped(s, '|', true);
 // Is the character at `i` in `s` escaped? True when an ODD number of backslashes
 // immediately precedes it (`\[` is escaped; `\\[` is a literal backslash then a live `[`).
 /** @param {string} s @param {number} i @returns {boolean} */
@@ -367,7 +372,7 @@ TT.encodeNoteCell = function (/** @type {string} */ note) {
 // Peel the trailing flag markers off a still-escaped note. Mirror of encodeNoteCell:
 // an escaped `\[nb]` is content and STOPS the peel, an unescaped one is a flag.
 /** @param {string} raw @returns {{ note: string, billable: boolean, editedByAdmin: boolean }} */
-function stripMarkers(raw) {
+function decodeNoteCell(raw) {
   let note = raw,
     billable = true,
     editedByAdmin = false,
@@ -395,19 +400,6 @@ function stripMarkers(raw) {
 const BR = '<br>';
 /** @param {string} s @returns {string} */
 const escapeBr = (s) => (s.indexOf(BR) < 0 ? s : s.split(BR).join('\\' + BR));
-// Split on UNESCAPED `<br>` only.
-/** @param {string} s @returns {string[]} */
-function splitOnBr(s) {
-  const out = [];
-  let last = 0;
-  for (let i = s.indexOf(BR); i >= 0; i = s.indexOf(BR, i + 1)) {
-    if (isEscapedAt(s, i)) continue;
-    out.push(s.slice(last, i));
-    last = i + BR.length;
-  }
-  out.push(s.slice(last));
-  return out;
-}
 /** @param {string} s @returns {string} */
 const stripNotePrefix = (s) => (s.startsWith('- ') ? s.slice(2) : s);
 /**
@@ -424,12 +416,14 @@ TT.encodeTaskCell = function (v) {
   return label ? label + BR + '- ' + note : '- ' + note;
 };
 /**
- * Reverse of encodeTaskCell. A cell with no `<br>` is a label, UNLESS it opens with an
- * unescaped `- ` — that is the note-only shape (`- note`, deliberately no leading `<br>`).
+ * Reverse of encodeTaskCell. A cell with no `<br>` is a label, UNLESS it opens with a
+ * literal `- ` — that is the note-only shape (`- note`, deliberately no leading `<br>`).
+ * No escape check is needed on that prefix: an escaped label is emitted as `\- …`, which
+ * does not start with `- ` at all.
  * @param {string} cell @returns {{ label: string, note: string }}
  */
 TT.decodeTaskCell = function (cell) {
-  const parts = splitOnBr(cell == null ? '' : String(cell));
+  const parts = splitUnescaped(cell == null ? '' : String(cell), BR);
   if (parts.length > 1) {
     // only the FIRST unescaped <br> is the delimiter; any further one is content a hand
     // edit left raw, and decodes to a literal <br> (re-escaped on the next encode)
@@ -525,6 +519,14 @@ TT.serializeMd = function (state) {
   // no-commit v2 mirrors stay byte-identical. Each segment is a `- <key> | <committedAt>`
   // header followed by one indented `  - <entryId> | <rate> | <billMin> | <amount>` row
   // per frozen entry (the snapshot); an absent section parses back to `commits: []`.
+  //
+  // SB-041: this section is deliberately NOT routed through encodeCell/decodeCell — every
+  // field in it is machine-generated (segment keys from TT.segmentKey, ISO timestamps,
+  // entry ids, numbers), so no user content reaches it and emit-when-needed would be a
+  // no-op. Both sides agree: nothing is escaped and nothing is unescaped. The consequence,
+  // unchanged from before SB-041 and NOT introduced by it: an entry id that itself
+  // contains a `|` still splits the snapshot row (tracked separately). SB-055 must not
+  // assume the escaping is universal across sections.
   const commits = state.commits;
   if (commits && commits.length) {
     lines.push('', '## commits');
@@ -712,7 +714,7 @@ TT.parseMd = function (md) {
         // trailing [nb]/[ea] markers in any order (order-independent so a future emit
         // order never breaks the round-trip). SB-041: the peel runs on the STILL-ESCAPED
         // note and stops at a `\[nb]`, so a note whose text ends in a marker keeps it.
-        const { note, billable, editedByAdmin } = stripMarkers(parts[3] || '');
+        const { note, billable, editedByAdmin } = decodeNoteCell(parts[3] || '');
         const project = parts[1] && parts[1] !== '—' ? TT.decodeCell(parts[1]) : null;
         /** @type {Entry} */
         const entry = {

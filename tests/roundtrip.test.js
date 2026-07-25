@@ -558,12 +558,45 @@ describe('vault Task-cell codec (SB-045)', () => {
 
   for (const { name, v } of CASES) {
     it(`round-trips ${name}`, () => {
-      expect(cycle(v)).toEqual(v); // cycle 1
-      expect(cycle(cycle(v))).toEqual(v); // cycle 2 — where accretion/swap would show
-      // …and the ENCODED bytes are a fixed point, so repeated writes don't drift
-      expect(TT.encodeTaskCell(cycle(v))).toBe(TT.encodeTaskCell(v));
+      expect(cycle(v)).toEqual(v);
     });
   }
+
+  // The value round-trip above is only half the story, and repeating it (`cycle(cycle(v))`)
+  // adds nothing: `cycle` is pure, so `cycle(v) === v` implies every further pass. The
+  // property it does NOT imply is the one that matters for repeated writes — the fixed
+  // point of the ENCODED form, seeded from cell shapes a HAND EDIT can produce rather than
+  // from the encoder's own output. That is where `- ` accretion and the label/note swap
+  // would actually surface, and nothing above reaches these shapes.
+  const HAND_EDITED = [
+    'Checkout flow<br>- wireframes', // the canonical shape
+    'Checkout flow', // label only
+    '- freeform hour', // note only
+    '', // empty cell
+    'a<br>b', // note without the `- ` presentation prefix
+    'a<br>- b<br>c', // a second, raw <br> the user typed
+    '<br>- n', // stray leading delimiter, empty label
+    'a<br>', // trailing delimiter, empty note
+    '- - doubled', // a note that itself begins with `- `
+    '\\- escaped label', // a label that begins with `- `
+    'a\\|b<br>- c\\|d', // pipes escaped by the SB-041 layer
+    'x<br>- literally \\<br> typed', // an escaped literal <br>
+  ];
+  for (const cell of HAND_EDITED) {
+    it(`normalises then holds steady for a hand-edited cell: ${JSON.stringify(cell)}`, () => {
+      const once = TT.encodeTaskCell(TT.decodeTaskCell(cell));
+      const twice = TT.encodeTaskCell(TT.decodeTaskCell(once));
+      expect(twice).toBe(once); // a second write must not drift — no accretion, no swap
+      expect(TT.decodeTaskCell(twice)).toEqual(TT.decodeTaskCell(once)); // …and the values hold
+    });
+  }
+
+  it('a cell the encoder produced is ALREADY normalised (no drift on first re-write)', () => {
+    for (const { v } of CASES) {
+      const encoded = TT.encodeTaskCell(v);
+      expect(TT.encodeTaskCell(TT.decodeTaskCell(encoded))).toBe(encoded);
+    }
+  });
 
   it('emits SB-045’s exact shape: label<br>- note, label alone, and a bare `- note`', () => {
     expect(TT.encodeTaskCell({ label: 'Checkout flow', note: 'wireframes' })).toBe('Checkout flow<br>- wireframes');

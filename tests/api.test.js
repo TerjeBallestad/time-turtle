@@ -278,6 +278,22 @@ describe('auth + roles', () => {
     expect(entry.billable).toBe(true);
     expect(entry.label).toBe('Label | With Pipe');
     expect(entry.project).toBe('PIPE|X');
+
+    // Restore the catalog: this file runs ONE server against ONE data dir, so leaving a
+    // piped project code behind would silently ride along into every later test here.
+    // Teardown has to unwind in reference order — SDD-002 ruling 7's hard-delete guard
+    // (409) checks each drop against the STORED rows, so entry → project → client, one
+    // PUT each. Collapsing them trips the guard, which is it working as designed.
+    for (const body of [
+      { entries: before.json.entries },
+      { projects: before.json.projects },
+      { clients: before.json.clients },
+    ]) {
+      expect((await admin('PUT', '/api/state', body)).status).toBe(200);
+    }
+    const after = await admin('GET', '/api/state');
+    expect(after.json.projects.some((p) => p.code === 'PIPE|X')).toBe(false);
+    expect(after.json.clients.some((c) => c.id === 'hostile')).toBe(false);
   });
 });
 
