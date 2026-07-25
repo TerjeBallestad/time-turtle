@@ -346,7 +346,13 @@ export interface TTModule {
   monthSegments(state: Catalog, month: string): { key: string; committed: boolean; approved: boolean }[];
   monthGood(state: Catalog, month: string): boolean;
   projColor(state: Catalog, code: string | null): string;
-  // markdown
+  // markdown — cell escaping (SB-041). A shared primitive, not a parseMd internal:
+  // the vault table serializer (SB-055) escapes its own cells with the same pair.
+  // encodeCell handles `\` and `|`; encodeNoteCell adds the trailing [nb]/[ea] run,
+  // which only the note field can collide with. decodeCell reverses all three.
+  encodeCell(s: string): string;
+  encodeNoteCell(note: string): string;
+  decodeCell(s: string): string;
   serializeMd(state: Catalog): string;
   newId(): string;
   parseMd(md: string): Catalog;
