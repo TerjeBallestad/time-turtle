@@ -3,10 +3,10 @@ import express from 'express';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
-import { PORT, MD_DIR, MD_DIR_LOCKED } from './config.js';
+import { PORT, MD_DIR_LOCKED } from './config.js';
 import { verifyPassword, makeToken, readSessionCookie, sessionCookie, clearCookie } from './auth.js';
 import * as db from './db.js';
-import { writeMirror } from './markdown.js';
+import { writeMirror, mirrorTarget } from './markdown.js';
 import { teamReport } from './reports.js';
 import TT from '../../shared/core.js';
 
@@ -710,6 +710,23 @@ if (existsSync(clientDist)) {
   app.get(/^\/(?!api\/).*/, (req, res) => res.sendFile(join(clientDist, 'index.html')));
 }
 
+// The banner must name the directory mirrors actually land in — mirrorTarget(), not the
+// env path — and say which source won, so a wrong-looking mirror is diagnosable from the
+// first line of the log instead of from four stale files (SB-073).
+const MIRROR_SOURCE = {
+  'env-locked': 'TT_MD_DIR, frozen by TT_MD_DIR_LOCK',
+  setting: 'mdDir setting',
+  env: 'TT_MD_DIR',
+  default: 'default',
+};
+
 app.listen(PORT, () => {
-  console.log(`[time-turtle] api on http://localhost:${PORT}  ·  markdown mirror → ${MD_DIR}`);
+  const target = mirrorTarget();
+  console.log(
+    `[time-turtle] api on http://localhost:${PORT}  ·  markdown mirror → ${target.dir}  (${MIRROR_SOURCE[target.source]})`,
+  );
+  if (target.shadowed)
+    console.log(
+      `[time-turtle] the stored mdDir setting overrides TT_MD_DIR ${target.shadowed} — nothing is written there`,
+    );
 });

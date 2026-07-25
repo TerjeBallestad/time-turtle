@@ -9,6 +9,10 @@ export const DATA_DIR = process.env.TT_DATA_DIR ? resolve(process.env.TT_DATA_DI
 export const DB_PATH = join(DATA_DIR, 'timeturtle.db');
 // Markdown mirror directory — point this at a folder in your Obsidian vault if you like.
 export const MD_DIR = process.env.TT_MD_DIR ? resolve(process.env.TT_MD_DIR) : join(DATA_DIR, 'markdown');
+// Whether MD_DIR came from TT_MD_DIR or is just the default — the startup banner names
+// the source of the effective mirror path, and "your TT_MD_DIR lost" is worth saying out
+// loud (SB-073).
+export const MD_DIR_FROM_ENV = !!process.env.TT_MD_DIR;
 // DC-002: Settings → Mirror folder makes the server mkdir/write at an arbitrary path, which
 // is fine when admin == machine owner but a footgun on a shared box. Set TT_MD_DIR_LOCK to
 // freeze the mirror at MD_DIR: the stored setting is then ignored and rejected on write.

@@ -3,18 +3,30 @@ import { writeFileSync, mkdirSync, renameSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import TT from '../../shared/core.js';
-import { MD_DIR, MD_DIR_LOCKED } from './config.js';
+import { MD_DIR, MD_DIR_LOCKED, MD_DIR_FROM_ENV } from './config.js';
 import { getSettings, getClients, getProjects, getTasks, getEntries, getCommits } from './db.js';
 
-// Where mirrors go: the mdDir setting (editable in Settings → Markdown backend,
-// e.g. a cloud-synced Obsidian folder) wins over TT_MD_DIR / the default — unless
-// TT_MD_DIR_LOCK froze it, in which case any stored setting is ignored (DC-002).
+/** @typedef {{ dir: string, source: 'env-locked' | 'setting' | 'env' | 'default', shadowed: string | null }} MirrorTarget */
+
+// Where mirrors go, and which source won. Four ways to end up somewhere, and the loser
+// is worth naming: a banner that printed MD_DIR while the stored setting quietly pointed
+// at an Obsidian vault sent a census against four stale files (SB-073, from SB-069).
+// `shadowed` is the non-default TT_MD_DIR the stored setting beat, when there was one.
+/** @returns {MirrorTarget} */
+export function mirrorTarget() {
+  if (MD_DIR_LOCKED) return { dir: MD_DIR, source: 'env-locked', shadowed: null };
+  const configuredDir = getSettings().mdDir?.trim();
+  if (!configuredDir) return { dir: MD_DIR, source: MD_DIR_FROM_ENV ? 'env' : 'default', shadowed: null };
+  const dir = resolve(configuredDir.startsWith('~') ? join(homedir(), configuredDir.slice(1)) : configuredDir);
+  return { dir, source: 'setting', shadowed: MD_DIR_FROM_ENV && dir !== MD_DIR ? MD_DIR : null };
+}
+
+// The mdDir setting (editable in Settings → Markdown backend, e.g. a cloud-synced
+// Obsidian folder) wins over TT_MD_DIR / the default — unless TT_MD_DIR_LOCK froze it,
+// in which case any stored setting is ignored (DC-002).
 /** @returns {string} */
 export function mirrorDir() {
-  if (MD_DIR_LOCKED) return MD_DIR;
-  const configuredDir = getSettings().mdDir?.trim();
-  if (!configuredDir) return MD_DIR;
-  return resolve(configuredDir.startsWith('~') ? join(homedir(), configuredDir.slice(1)) : configuredDir);
+  return mirrorTarget().dir;
 }
 
 // Mirror one user's timesheet (full catalog + their entries) to a markdown file.
