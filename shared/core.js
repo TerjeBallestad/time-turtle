@@ -282,8 +282,12 @@ function applyParsed(entry, parsed) {
 // ---- cell escaping (SB-041) ----
 // Without this, content that LOOKS like structure IS structure: a client named
 // `Acme | Co` came back as `Acme`, and a note reading `refactored the [nb]` came back
-// as `refactored the` with billable falsely flipped off. Under the vault backend
-// (DD-006) the mirror is the only copy, so a corrupting round-trip is data loss.
+// as `refactored the` with billable falsely flipped off. These primitives are shared: SB-055's
+// vault block format calls them on its table cells (SB-045), and THERE no authoritative DB sits
+// behind the file, so a corrupting round-trip is data loss rather than a recoverable rewrite.
+// The v2 `|`-mirror below is not that file — it is written by the `backend=sqlite` path
+// (server/src/markdown.js) and always has the DB behind it. Getting these right matters for
+// the mirror; it matters more for what SB-055 builds on top of them.
 //
 // Scheme: backslash escapes the following character, the same convention the vault's
 // own table syntax uses (SB-045 measured that `\|` renders as a literal `|` inside an
@@ -299,13 +303,17 @@ function applyParsed(entry, parsed) {
 // so every existing golden and TT.seedMd() stay byte-identical, and no `format: 3` bump
 // was needed for that.
 //
-// KNOWN READ-PATH CAVEAT (SB-041 review): `format: 2` does not distinguish a mirror
-// written before this change from one written after, and the marker is the only thing
-// that could. In a PRE-change mirror a backslash is a literal, so `see C:\work` now reads
-// back as `see C:work`. Live mirrors self-heal — the server rewrites them from the DB on
-// the next PUT — so this bites only when restoring from a STALE file, which is exactly
-// the disaster-recovery path. Tracked separately; do not "fix" it by making decodeCell
-// conditional without settling the format question first.
+// KNOWN READ-PATH CAVEAT — SETTLED, do not "fix" (SB-069, ruled 2026-07-25): `format: 2`
+// does not distinguish a mirror written before this change from one written after, and the
+// marker is the only thing that could. In a PRE-change mirror a backslash is a literal, so
+// `see C:\work` now reads back as `see C:work`. Ruled ACCEPT AS IS — an accepted one-way
+// migration, and `decodeCell` stays UNCONDITIONAL. Measured at the time: zero backslashes
+// across all four live mirrors, and zero in the vault's git history, so the affected
+// population was empty; live mirrors also self-heal, the server rewriting them from the DB
+// on the next PUT. A `format: 3` bump was the alternative and lost — it would rewrite the
+// header line of all five goldens and TT.seedMd() to protect nothing. Note this rules on
+// the v2 mirror ONLY; it sets no precedent for the vault block format, where there is no
+// authoritative copy and the trade-off comes out differently.
 /** Escape a value for use as one `|`-delimited cell. @param {string} s @returns {string} */
 TT.encodeCell = function (s) {
   s = s == null ? '' : String(s);
