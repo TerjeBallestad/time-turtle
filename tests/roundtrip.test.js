@@ -1066,3 +1066,224 @@ describe('vault block parse (SB-055)', () => {
     expect(entry.note).toBe('use <br> here');
   });
 });
+
+// ---- SB-055 / PLAN-009 task 4: serialize the block and splice it in ----
+// The expected bytes below are written from SB-045's ruling table and SB-055's own example
+// block — NOT pasted from the implementation's output. Pasting would test the code against
+// itself and would happily enshrine a wrong separator or a doubled `- ` prefix.
+//
+// The byte-preservation test compares the exact slices before and after the region. A
+// `toContain('## Captures')` would pass even if the splice ate a blank line, and a fixture
+// with nothing after the block would test only the easy half — so the fixture has four of
+// Terje's sections around TT's, and the assertion is string equality on both slices.
+// ## Verified red-green: 2026-07-25
+describe('vault block serialize + splice (SB-055)', () => {
+  /** @param {Partial<import('../shared/types.ts').Entry>} o */
+  const E = (o) => ({
+    id: 'runtime-id',
+    date: '2026-01-05',
+    start: null,
+    end: null,
+    durMin: null,
+    project: null,
+    label: '',
+    note: '',
+    billable: false,
+    ...o,
+  });
+
+  const DAY = [
+    E({
+      start: 540,
+      end: 555,
+      project: '[[Planning]]',
+      label: 'Daily planning ritual',
+      vaultCells: { mode: '#admin' },
+    }),
+    E({
+      start: 660,
+      end: 765,
+      project: 'FAG',
+      label: 'Search & facets',
+      note: 'Narrow the facet query',
+      billable: true,
+      vaultCells: { mode: '#deep' },
+    }),
+    E({ start: 1054, project: '[[Time Turtle]]', label: 'Block format feel-gate', vaultCells: { mode: '#deep' } }),
+    E({ durMin: 30, project: '[[Home]]', vaultCells: { mode: '#rest' } }),
+  ];
+
+  it('emits SB-045’s exact frozen shape', () => {
+    expect(TT.serializeVaultBlock(DAY, { revision: 8 })).toBe(
+      [
+        '## Time Log',
+        '',
+        '| Time | Mode | Project | Task | Bill |',
+        '|---|---|---|---|---|',
+        '| 09:00→09:15 | #admin | [[Planning]] | Daily planning ritual | |',
+        '| 11:00→12:45 | #deep | FAG | Search & facets<br>- Narrow the facet query | ✓ |',
+        '| 17:34→ | #deep | [[Time Turtle]] | Block format feel-gate | |',
+        '| 30m | #rest | [[Home]] | | |',
+        '| **2.5h** | | | | **1.75h billable** |',
+        '',
+        '`revision: 8`',
+      ].join('\n'),
+    );
+  });
+
+  it('emits the header row and the totals row even on a ZERO-entry day (no header = no schema)', () => {
+    expect(TT.serializeVaultBlock([], { revision: 1 })).toBe(
+      [
+        '## Time Log',
+        '',
+        '| Time | Mode | Project | Task | Bill |',
+        '|---|---|---|---|---|',
+        '| **0h** | | | | **0h billable** |',
+        '',
+        '`revision: 1`',
+      ].join('\n'),
+    );
+  });
+
+  it('emits a bare `- note` with no leading <br> when there is no label', () => {
+    const region = TT.serializeVaultBlock([E({ durMin: 30, note: 'freeform hour' })], { headers: ['Time', 'Task'] });
+    expect(region).toContain('| 30m | - freeform hour |');
+  });
+
+  it('a note ending in [nb] emits with NO backslash (encodeNoteCell was not used)', () => {
+    // encodeNoteCell escapes the trailing flag run — that is the v2 MIRROR's convention, and
+    // the vault has a Bill column instead. Routing through it would corrupt this cell.
+    const region = TT.serializeVaultBlock([E({ durMin: 45, label: 'Admin', note: 'invoicing [nb]' })], {
+      headers: ['Time', 'Task'],
+    });
+    expect(region).toContain('| 45m | Admin<br>- invoicing [nb] |');
+    expect(region).not.toContain('\\[nb]');
+  });
+
+  it('a running entry contributes 0 to the totals row, whatever the clock says (SB-077)', () => {
+    const today = TT.todayStr();
+    const region = TT.serializeVaultBlock(
+      [E({ date: today, start: 540, billable: true }), E({ date: today, durMin: 60, billable: true })],
+      { headers: ['Time', 'Bill'] },
+    );
+    expect(region).toContain('| 09:00→ | ✓ |'); // the open range is written as-is…
+    expect(region).toContain('| **1h** | **1h billable** |'); // …and only the finished hour counts
+  });
+
+  it('the heading and the header set come from the block, not from a constant', () => {
+    expect(TT.serializeVaultBlock([], { heading: 'Timeloggen', headers: ['Time', 'Task'], revision: 2 })).toBe(
+      ['## Timeloggen', '', '| Time | Task |', '|---|---|', '| **0h** | **0h billable** |', '', '`revision: 2`'].join(
+        '\n',
+      ),
+    );
+  });
+
+  // ---- the splice ----
+  const HOST = [
+    '---',
+    'date: 2026-01-05',
+    '---',
+    '',
+    '# Monday 5 January',
+    '',
+    '## Intentions',
+    '',
+    '- [ ] ship the block format',
+    '',
+    '## Habits',
+    '',
+    '| Habit | Done |',
+    '|---|---|',
+    '| Walk | ✓ |',
+    '',
+    '## Time Log',
+    '',
+    '| Time | Mode | Project | Task | Bill |',
+    '|---|---|---|---|---|',
+    '| 09:00→09:15 | #admin | [[Planning]] | Daily planning ritual | |',
+    '| **0.25h** | | | | **0h billable** |',
+    '',
+    '`revision: 4`',
+    '',
+    '## Captures',
+    '',
+    '- a stray thought   ',
+    '',
+    '## Reflection',
+    '',
+    'It went fine.',
+    '',
+  ].join('\n');
+
+  it('leaves every byte outside the region untouched', () => {
+    const res = TT.writeVaultBlock(HOST, DAY);
+    expect(res.quarantine).toBe(false);
+    expect(res.md).not.toBe(HOST); // the block DID change — the test is not vacuous
+
+    const inLines = HOST.split('\n');
+    const outLines = res.md.split('\n');
+    const inLoc = TT.locateVaultBlock(HOST);
+    const outLoc = TT.locateVaultBlock(res.md);
+    expect(outLoc.quarantine).toBe(false);
+
+    const before = (lines, loc) => lines.slice(0, loc.start).join('\n');
+    const after = (lines, loc) => lines.slice(loc.end + 1).join('\n');
+    expect(before(outLines, outLoc)).toBe(before(inLines, inLoc));
+    expect(after(outLines, outLoc)).toBe(after(inLines, inLoc));
+    // the halves are both substantial — a fixture with nothing after the block would prove
+    // only that the easy end survived
+    expect(before(inLines, inLoc)).toContain('| Walk | ✓ |');
+    expect(after(inLines, inLoc)).toContain('- a stray thought   '); // trailing spaces and all
+    expect(after(inLines, inLoc)).toContain('## Reflection');
+  });
+
+  it('re-emits the block’s OWN header set — a pre-Mode block does not gain a Mode column', () => {
+    const preMode = HOST.replace('| Time | Mode | Project | Task | Bill |', '| Time | Project | Task | Bill |')
+      .replace('|---|---|---|---|---|', '|---|---|---|---|')
+      .replace(
+        '| 09:00→09:15 | #admin | [[Planning]] | Daily planning ritual | |',
+        '| 09:00→09:15 | [[Planning]] | Daily planning ritual | |',
+      ) // prettier-ignore
+      .replace('| **0.25h** | | | | **0h billable** |', '| **0.25h** | | | **0h billable** |');
+    const res = TT.writeVaultBlock(preMode, [E({ durMin: 30, project: '[[Home]]', label: 'Tidying' })]);
+    expect(res.quarantine).toBe(false);
+    expect(res.md).toContain('| Time | Project | Task | Bill |');
+    expect(res.md).not.toContain('Mode');
+    expect(res.md).toContain('| 30m | [[Home]] | Tidying | |');
+  });
+
+  it('keeps the located revision unless told otherwise (bumping is SB-057’s call)', () => {
+    expect(TT.writeVaultBlock(HOST, DAY).md).toContain('`revision: 4`');
+    expect(TT.writeVaultBlock(HOST, DAY, { revision: 5 }).md).toContain('`revision: 5`');
+  });
+
+  it('it is impossible to write from a quarantined block — the input comes back byte-identical', () => {
+    const QUARANTINED = [
+      ['no heading', HOST.replace('## Time Log', '## Tidsloggen')],
+      ['no revision line', HOST.replace('`revision: 4`\n', '')],
+      ['revision past the next heading', HOST.replace('`revision: 4`\n', '').replace('It went fine.', '`revision: 4`')],
+      ['unknown header', HOST.replace('| Time | Mode |', '| Time | Mood |')],
+      ['a broken Time cell', HOST.replace('09:00→09:15', 'sometime this morning')],
+      ['a Bill cell that is neither a check nor blank', HOST.replace('| Daily planning ritual | |', '| Daily planning ritual | yes |')], // prettier-ignore
+      ['the table deleted', HOST.replace('| Time | Mode | Project | Task | Bill |\n|---|---|---|---|---|\n', '')],
+    ];
+    for (const [name, md] of QUARANTINED) {
+      const res = TT.writeVaultBlock(md, DAY);
+      expect(res.quarantine, name).toBe(true);
+      expect(typeof res.reason).toBe('string');
+      expect(res.md, name).toBe(md); // byte-identical: nothing was written
+    }
+  });
+
+  it('no ephemeral runtime id reaches the emitted bytes (DD-008)', () => {
+    const parsed = TT.parseVaultBlock(HOST, { date: '2026-01-05' });
+    const res = TT.writeVaultBlock(HOST, parsed.entries);
+    expect(parsed.entries.length).toBeGreaterThan(0);
+    for (const entry of parsed.entries) {
+      expect(entry.id).toMatch(/^e\d+-/); // it exists…
+      expect(res.md).not.toContain(entry.id); // …and it is nowhere in the file
+    }
+    // …nor does an id reach the region bytes when serializing straight from state
+    expect(TT.serializeVaultBlock(DAY, { revision: 1 })).not.toContain('runtime-id');
+  });
+});

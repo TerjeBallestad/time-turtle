@@ -737,6 +737,140 @@ TT.parseVaultBlock = function (md, opts) {
   return { quarantine: false, heading: loc.heading, revision: loc.revision, headers, entries };
 };
 
+// ---- vault block serialize + splice (SB-055) ----
+// Emits exactly SB-045's frozen shape:
+//
+//   ## Time Log
+//
+//   | Time | Mode | Project | Task | Bill |
+//   |---|---|---|---|---|
+//   | 09:00→09:15 | #admin | [[Planning]] | Daily planning ritual | |
+//   | **8.7h** | | | | **5.1h billable** |
+//
+//   `revision: 8`
+//
+// The header row is written ALWAYS, including on a zero-entry day — no header means no
+// schema. An empty cell is one space between pipes (`| |`), never two, which is what makes
+// the emitted bytes and SB-045's own example the same string.
+//
+// THE TASK CELL USES TT.encodeTaskCell, NEVER TT.encodeNoteCell. encodeNoteCell escapes a
+// trailing `[nb]`/`[ea]` run, which is the v2 MIRROR's flag convention; the vault carries
+// billability in a dedicated `Bill` column, so routing through it would put a spurious
+// backslash on a note that happens to end in `[nb]`.
+/** One table line. An empty cell is a single space, matching SB-045's example bytes. */
+/** @param {string[]} cells @returns {string} */
+const vaultRow = (cells) => '|' + cells.map((c) => (c === '' ? ' ' : ' ' + c + ' ')).join('|') + '|';
+// THE REVISION LINE HAS EXACTLY ONE EMITTER — this one. OD-3 (SB-078) is unresolved: SB-051
+// measured that Obsidian diff-merges an external write into a dirty open buffer taking TT's
+// marker line and the buffer's rows, so the revision counter is structurally incapable of
+// detecting that corruption, and the `sum=<short-hash>` SB-051 required lost its home when
+// SB-045 deleted every `%%…%%` marker. If SB-078 comes back "yes", the digest lands HERE and
+// nowhere else. Do not inline this string anywhere.
+/** @param {number} revision @returns {string} */
+const vaultRevisionLine = (revision) => '`revision: ' + revision + '`';
+// SB-077 (Terje, ruled 2026-07-25): a RUNNING entry contributes 0 to the note's totals,
+// regardless of date. The daily note is a record of FINISHED work, not a live display — the
+// row is written once with its open range (`15:30→`) and left alone until an end time lands.
+// Do NOT delegate to TT.entryMinutes: it deliberately returns wall-clock elapsed for a
+// today-dated running entry, which is right for the app's live total and wrong here. Two
+// questions, two helpers; the app keeps the live one. This is also what makes the emitted
+// bytes clock-independent, so the running-timer golden can be written for the case SB-055
+// actually names instead of a past-dated proxy for it.
+/** @param {Entry} entry @returns {number} */
+function vaultEntryMinutes(entry) {
+  if (entry.durMin != null) return entry.durMin;
+  if (entry.start == null || entry.end == null) return 0; // running, or no time yet
+  const minutes = entry.end - entry.start;
+  return minutes < 0 ? minutes + 1440 : minutes; // overnight rolls into the next day
+}
+// The single named totals helper. No client rounding is applied — the vault block has no
+// client or rate model (that is the app's surface); this row is hours worked, not money.
+/** @param {Entry[]} entries @returns {{ min: number, bill: number }} */
+function vaultTotals(entries) {
+  let min = 0,
+    bill = 0;
+  for (const entry of entries) {
+    const m = vaultEntryMinutes(entry);
+    min += m;
+    if (entry.billable) bill += m;
+  }
+  return { min, bill };
+}
+/**
+ * Serialize entries into the block's region bytes — the `## <heading>` line through the
+ * `` `revision: N` `` line, with no trailing newline (the splice supplies the line breaks).
+ * `opts.headers` is the block's OWN declared header set, so a block written before a column
+ * existed re-emits its own columns; it defaults to the canonical five.
+ * @param {Entry[]} entries
+ * @param {{ heading?: string, headers?: string[], revision?: number }} [opts]
+ * @returns {string}
+ */
+TT.serializeVaultBlock = function (entries, opts) {
+  const rows = entries || [];
+  const heading = (opts && opts.heading) || VAULT_HEADING;
+  const headers = (opts && opts.headers && opts.headers.length ? opts.headers : VAULT_COLUMNS).slice();
+  const revision = opts && opts.revision != null ? opts.revision : 1; // a first write starts at 1
+  const keys = headers.map((label) => label.toLowerCase());
+
+  const lines = ['## ' + heading, '', vaultRow(headers), '|' + headers.map(() => '---').join('|') + '|'];
+  for (const entry of rows) {
+    lines.push(
+      vaultRow(
+        keys.map((key) => {
+          if (key === 'time') return TT.fmtTimeCell(entry);
+          if (key === 'project') return entry.project ? TT.encodeCell(entry.project) : '';
+          if (key === 'task') return TT.encodeTaskCell({ label: entry.label, note: entry.note });
+          if (key === 'bill') return entry.billable ? BILL_YES : '';
+          // a vocabulary column TT has no model field for — re-emitted verbatim from the
+          // raw cell the parser carried, so `Mode` survives until SB-059 gives it a home
+          return (entry.vaultCells && entry.vaultCells[key]) || '';
+        }),
+      ),
+    );
+  }
+  // The totals row is POSITIONAL — the bold hours total is always the FIRST cell and the
+  // bold billable total always the LAST. That is not cosmetic: the locator detects this row
+  // by "last row of the table AND first cell bold", so emitting the hours anywhere else
+  // would produce a row TT could no longer recognise as generated and would try to read
+  // back as an entry. The two rules are one decision.
+  const { min, bill } = vaultTotals(rows);
+  const totals = headers.map(() => '');
+  totals[0] = '**' + TT.fmtHours(min) + 'h**';
+  if (headers.length > 1) totals[headers.length - 1] = '**' + TT.fmtHours(bill) + 'h billable**';
+  lines.push(vaultRow(totals), '', vaultRevisionLine(revision));
+  return lines.join('\n');
+};
+/**
+ * Write entries into the note's vault block, leaving every byte outside the block's region
+ * untouched. Intentions, Habits, Captures and Reflection are Terje's, not TT's.
+ *
+ * The gate is the PARSER, not just the locator: a block whose header set or rows the parser
+ * refuses is quarantined, and it must be impossible to reach a write from a quarantined
+ * block. On any verdict the input `md` comes back byte-identical.
+ *
+ * The revision is NOT bumped here. `opts.revision` sets it; absent, the located revision is
+ * re-emitted unchanged. When a write bumps the counter is SB-057's arbitration to rule on,
+ * not this function's to assume.
+ * @param {string} md @param {Entry[]} entries
+ * @param {{ heading?: string, date?: string, headers?: string[], revision?: number }} [opts]
+ * @returns {{ md: string, quarantine: boolean, reason: string | null }}
+ */
+TT.writeVaultBlock = function (md, entries, opts) {
+  const input = String(md == null ? '' : md);
+  const parsed = TT.parseVaultBlock(input, opts);
+  if (parsed.quarantine) return { md: input, quarantine: true, reason: parsed.reason };
+  const loc = TT.locateVaultBlock(input, opts); // offsets for the splice
+  if (loc.quarantine) return { md: input, quarantine: true, reason: loc.reason }; // unreachable; belt and braces
+  const lines = input.split('\n');
+  const region = TT.serializeVaultBlock(entries, {
+    heading: loc.heading,
+    headers: (opts && opts.headers) || parsed.headers, // the block's own declared columns
+    revision: opts && opts.revision != null ? opts.revision : loc.revision,
+  });
+  const out = lines.slice(0, loc.start).concat(region.split('\n'), lines.slice(loc.end + 1));
+  return { md: out.join('\n'), quarantine: false, reason: null };
+};
+
 TT.serializeMd = function (state) {
   const lines = [
     '# timesheet',

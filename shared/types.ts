@@ -443,6 +443,24 @@ export interface TTModule {
    * the note's date — SB-045's format has no date column.
    */
   parseVaultBlock(md: string, opts?: { heading?: string; date?: string }): VaultBlockParseResult;
+  /**
+   * SB-055: the block's region bytes — the `## <heading>` line through the
+   * `` `revision: N` `` line, no trailing newline. Header row always, totals row always
+   * (generated, never round-tripped as an entry), `opts.headers` defaulting to the
+   * canonical five.
+   */
+  serializeVaultBlock(entries: Entry[], opts?: { heading?: string; headers?: string[]; revision?: number }): string;
+  /**
+   * SB-055: splice the serialized block back into its host note. Every byte outside the
+   * located region survives untouched. On a quarantine verdict the input `md` is
+   * returned byte-identical — it is impossible to write from a quarantined block. The
+   * revision is not bumped here; that is SB-057's arbitration.
+   */
+  writeVaultBlock(
+    md: string,
+    entries: Entry[],
+    opts?: { heading?: string; date?: string; headers?: string[]; revision?: number },
+  ): { md: string; quarantine: boolean; reason: string | null };
   serializeMd(state: Catalog): string;
   newId(): string;
   parseMd(md: string): Catalog;
