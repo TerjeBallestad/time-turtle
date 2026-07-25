@@ -29,6 +29,7 @@
 // BOTH Live Preview and Reading view; a genuine `<br>` yields exactly one.
 // ## Verified red-green: 2026-07-25
 import { describe, it, expect } from 'vitest';
+import { readFileSync } from 'node:fs';
 import TT from '../shared/core.js';
 
 // ---- V1 fixture (byte-identical to the pre-SDD-002 golden) ----
@@ -889,7 +890,7 @@ describe('vault block locator (SB-055)', () => {
   });
 
   it('returns a verdict — never throws — for junk input of any shape', () => {
-    for (const junk of [null, undefined, '', '\n\n\n', 42, {}, [], '## Time Log'.repeat(500), ' �|||']) {
+    for (const junk of [null, undefined, '', '\n\n\n', 42, {}, [], '## Time Log'.repeat(500), '\u0000\uFFFD|||']) {
       // @ts-expect-error — deliberately hostile input: the boot scan must survive it
       const loc = TT.locateVaultBlock(junk);
       expect(loc.quarantine).toBe(true);
@@ -1378,13 +1379,33 @@ describe('vault block round-trip (SB-055)', () => {
     ].join('\n');
 
     // A header set in a different ORDER — also a subset, also migration-free.
+    // The totals row is KEYED, so reading left to right it looks inverted: the billable total
+    // sits under `Bill` and the hours total under `Time`, which is what those headings mean.
+    // For a canonical block the keyed and positional readings are the same bytes; this is the
+    // fixture that tells them apart.
     const REORDERED_DAY = [
       '## Time Log',
       '',
       '| Bill | Task | Time |',
       '|---|---|---|',
       '| ✓ | Checkout flow | 08:30→12:00 |',
-      '| **3.5h** | | **3.5h billable** |',
+      '| **3.5h billable** | | **3.5h** |',
+      '',
+      '`revision: 1`',
+      '',
+    ].join('\n');
+
+    // The reordering that matters for safety: a column that can hold arbitrary user text sits
+    // FIRST. A row whose label a hand edit bolded used to be read as the generated totals row
+    // and silently dropped, taking the hour with it (found in end-gate review).
+    const TEXT_FIRST_DAY = [
+      '## Time Log',
+      '',
+      '| Task | Time | Bill |',
+      '|---|---|---|',
+      '| Checkout flow | 08:30→12:00 | ✓ |',
+      '| **urgent** fixes | 1h | |',
+      '| | **4.5h** | **3.5h billable** |',
       '',
       '`revision: 1`',
       '',
@@ -1411,6 +1432,7 @@ describe('vault block round-trip (SB-055)', () => {
       ['a full day: pipes, a literal <br>, a running timer, a bare duration, an empty Task, a [nb] tail', FULL_DAY],
       ['a pre-Mode 4-column block (the migration-free property)', PRE_MODE_DAY],
       ['a reordered header set', REORDERED_DAY],
+      ['a reordered set with a free-text column FIRST, holding a bolded label', TEXT_FIRST_DAY],
       ['a zero-entry day (header row and totals row still written)', ZERO_ENTRY_DAY],
     ];
 
@@ -1443,10 +1465,15 @@ describe('vault block round-trip (SB-055)', () => {
     });
 
     it('the running entry contributes 0 to the totals — the note records finished work', () => {
-      // 390 + 30 + 0 (running) + 30 + 45 = 495 min = 8.25h; only the first is billable
+      // 390 + 30 + 0 (running) + 30 + 45 = 495 min = 8.25h; only the first is billable.
+      // Asserted on what the SERIALIZER emits. Asserting it against FULL_DAY would be a
+      // tautology over the fixture constant, and would survive swapping the totals helper
+      // for TT.entryMinutes — which is exactly what it exists to catch (end-gate review).
       const entries = TT.parseVaultBlock(FULL_DAY, { date: TT.todayStr() }).entries;
-      expect(entries.reduce((n, e) => n + (e.end != null || e.durMin != null ? 1 : 0), 0)).toBe(4);
-      expect(FULL_DAY).toContain('| **8.25h** | | | | **6.5h billable** |');
+      expect(entries.filter((e) => TT.isRunning(e))).toHaveLength(1);
+      const region = TT.serializeVaultBlock(entries, { revision: 8 });
+      expect(region).toContain('| **8.25h** | | | | **6.5h billable** |');
+      expect(region).toContain('| 17:34→ |'); // the running row is still written, open-ended
     });
 
     it('every byte outside the block survives each golden untouched', () => {
@@ -1574,23 +1601,23 @@ describe('vault block round-trip (SB-055)', () => {
     }
 
     it('covers every quarantine reason the parser and locator can produce', () => {
-      // a guard against a new reason being added without a refusal golden beside it
+      // A guard against a new reason being added without a refusal golden beside it. The
+      // vocabulary's home is the VaultQuarantineReason union in shared/types.ts, so the list
+      // is read from there rather than kept as a second hand-maintained copy — and every
+      // reason in it must ALSO be emitted somewhere in core.js, which catches a dead one.
       const produced = new Set(REFUSALS.map(([reason]) => reason));
-      for (const reason of [
-        'no-heading',
-        'multiple-headings',
-        'no-revision',
-        'revision-past-next-heading',
-        'multiple-revisions',
-        'no-table',
-        'unexpected-content-in-block',
-        'unknown-header',
-        'duplicate-header',
-        'row-cell-count',
-        'unparseable-time',
-        'bad-bill-cell',
-      ]) {
-        expect(produced.has(reason), reason).toBe(true);
+      const types = readFileSync(new URL('../shared/types.ts', import.meta.url), 'utf8');
+      const union = /export type VaultQuarantineReason =([\s\S]*?);/.exec(types);
+      expect(union, 'VaultQuarantineReason union not found in shared/types.ts').toBeTruthy();
+      const reasons = [...union[1].matchAll(/'([a-z-]+)'/g)].map((m) => m[1]);
+      expect(reasons.length).toBe(14);
+      const core = readFileSync(new URL('../shared/core.js', import.meta.url), 'utf8');
+      // covered by their own tests in the end-gate review-regression section below
+      const elsewhere = new Set(['crlf-line-endings', 'write-would-corrupt']);
+      for (const reason of reasons) {
+        expect(core.includes(`'${reason}'`), `reason declared but never emitted: ${reason}`).toBe(true);
+        if (elsewhere.has(reason)) continue;
+        expect(produced.has(reason), `no refusal golden for reason: ${reason}`).toBe(true);
       }
     });
   });
@@ -1638,5 +1665,184 @@ describe('vault block round-trip (SB-055)', () => {
       const entries = TT.parseVaultBlock(DAY).entries.map((e) => ({ ...e, id: 'SMUGGLED-e1-abc' }));
       expect(TT.writeVaultBlock(DAY, entries).md).not.toContain('SMUGGLED');
     });
+  });
+});
+
+// ---- end-gate review regressions (PLAN-009) ----
+// Every case below is a defect the review found in the six task commits, reproduced first and
+// then fixed. They are kept as their own section because each is a claim about what TT must
+// NEVER do, not about what a task delivers.
+// ## Verified red-green: 2026-07-25
+describe('vault block — end-gate review regressions (SB-055)', () => {
+  const note = (header, delim, rows) => ['## Time Log', '', header, delim, ...rows, '', '`revision: 1`', ''].join('\n');
+
+  // ---- an entry is never silently dropped as "the totals row" ----
+  // The original detection rule was "last row AND first cell is bold", justified by "an
+  // entry's Time cell is never bold". That silently assumed Time is column 0 — which the
+  // vocabulary rule (any subset, any ORDER) does not guarantee. Both reviews found it.
+  describe('a last row that is not the generated totals row is never guessed to be one', () => {
+    it('a bolded LABEL in the first column is an entry, not the totals row', () => {
+      // the reproduction: `| Task | Time |`, last row's label bolded by a hand edit
+      const md = note('| Task | Time |', '|---|---|', ['| Checkout | 30m |', '| **urgent** | 1h |']);
+      const parsed = TT.parseVaultBlock(md);
+      expect(parsed.quarantine).toBe(false);
+      expect(parsed.entries).toHaveLength(2); // the hour is still here
+      expect(parsed.entries[1]).toMatchObject({ label: '**urgent**', durMin: 60 });
+      // …and a write does not delete it
+      expect(TT.writeVaultBlock(md, parsed.entries).md).toContain('| **urgent** | 1h |');
+    });
+
+    it('a bolded but unparseable Time cell quarantines rather than vanishing', () => {
+      const md = note('| Time | Project | Task | Bill |', '|---|---|---|---|', [
+        '| 30m | [[Home]] | Tidying | |',
+        '| **30m** | [[Home]] | Emphasised | |',
+      ]);
+      expect(TT.parseVaultBlock(md)).toEqual({ quarantine: true, reason: 'unparseable-time' });
+      expect(TT.writeVaultBlock(md, []).md).toBe(md); // refused, nothing written
+    });
+
+    it('a totals row whose cell count does not match the header is not exempt from validation', () => {
+      // `continue`-ing on the totals line used to run BEFORE the row-cell-count check, so a
+      // mangled totals row was the one row inside TT's region that could be anything at all
+      const md = note('| Time | Project | Task | Bill |', '|---|---|---|---|', [
+        '| 30m | [[Home]] | Tidying | |',
+        '| **7h** |',
+      ]);
+      expect(TT.parseVaultBlock(md)).toEqual({ quarantine: true, reason: 'row-cell-count' });
+    });
+
+    it('still recognises the genuine generated totals row, in any column order', () => {
+      for (const [header, delim, row, totals] of [
+        ['| Time | Task | Bill |', '|---|---|---|', '| 30m | Tidying | |', '| **0.5h** | | **0h billable** |'],
+        ['| Bill | Task | Time |', '|---|---|---|', '| | Tidying | 30m |', '| **0h billable** | | **0.5h** |'],
+        ['| Time |', '|---|', '| 30m |', '| **0.5h** |'],
+      ]) {
+        const md = note(header, delim, [row, totals]);
+        const parsed = TT.parseVaultBlock(md);
+        expect(parsed.quarantine, header).toBe(false);
+        expect(parsed.entries, header).toHaveLength(1); // the totals row is excluded, the entry is not
+        expect(TT.writeVaultBlock(md, parsed.entries).md, header).toBe(md); // and it regenerates identically
+      }
+    });
+  });
+
+  // ---- the writer checks its own output ----
+  // The module gated its INPUT exhaustively and never asked whether what it wrote was
+  // readable. Both cases below reported a successful write and left a note TT could no longer
+  // read — frozen until a human repaired it by hand.
+  describe('a write that would not parse back is refused, not performed', () => {
+    const OK = note('| Time | Task | Bill |', '|---|---|---|', ['| 30m | Tidying | |', '| **0.5h** | | **0h billable** |']); // prettier-ignore
+    const E = (o) => ({ id: 'e1', date: '2026-01-05', start: null, end: null, durMin: null, project: null, label: '', note: '', billable: false, ...o }); // prettier-ignore
+
+    it('a newline inside a field cannot split the row', () => {
+      // encodeCell escapes `\` and `|` — not a newline, which would end the table row
+      const res = TT.writeVaultBlock(OK, [E({ durMin: 30, label: 'a\nb' })]);
+      expect(res.quarantine).toBe(true);
+      expect(res.reason).toBe('write-would-corrupt');
+      expect(res.md).toBe(OK);
+    });
+
+    it('a zero duration, which fmtDur emits as `0m` and parseTimeCell rejects, is refused', () => {
+      const res = TT.writeVaultBlock(OK, [E({ durMin: 0, label: 'Nothing' })]);
+      expect(res.quarantine).toBe(true);
+      expect(res.reason).toBe('write-would-corrupt');
+      expect(res.md).toBe(OK);
+    });
+
+    it('an ordinary write is unaffected by the output gate', () => {
+      const res = TT.writeVaultBlock(OK, [E({ durMin: 45, label: 'Real work', billable: true })]);
+      expect(res.quarantine).toBe(false);
+      expect(res.md).toContain('| 45m | Real work | ✓ |');
+      expect(TT.parseVaultBlock(res.md).quarantine).toBe(false); // and it really does parse back
+    });
+  });
+
+  // ---- fences close on the same character (CommonMark) ----
+  it('a tilde run does not close a backtick fence — no located region inside a code block', () => {
+    // the note most likely to contain a fenced copy of the block format is the note
+    // documenting the block format; a located region inside it is a write into someone's docs
+    // The tilde run sits BEFORE the heading on purpose: if it closed the backtick fence, the
+    // heading and the revision line below it would both go LIVE and the locator would hand
+    // back a writable region pointing into the middle of the example.
+    const doc = [
+      '# Format notes',
+      '',
+      '```markdown',
+      'an example of the other fence syntax:',
+      '~~~',
+      '## Time Log',
+      '',
+      '| Time | Task |',
+      '|---|---|',
+      '| **0h** | |',
+      '',
+      '`revision: 3`',
+      '```',
+      '',
+    ].join('\n');
+    expect(TT.locateVaultBlock(doc)).toEqual({ quarantine: true, reason: 'no-heading' });
+    expect(TT.writeVaultBlock(doc, []).md).toBe(doc); // nothing written into the example
+    // the same document with a REAL block after it still locates the real one
+    const withReal = doc + '\n' + note('| Time | Task |', '|---|---|', ['| 30m | Tidying |']);
+    expect(TT.locateVaultBlock(withReal).quarantine).toBe(false);
+  });
+
+  // ---- diagnosis quality ----
+  it('a CRLF note is refused with a reason that names the real cause', () => {
+    const lf = note('| Time | Task |', '|---|---|', ['| 30m | Tidying |', '| **0.5h** | |']);
+    expect(TT.locateVaultBlock(lf).quarantine).toBe(false);
+    // Refusing stays the behaviour — TT does not rewrite line endings it did not author — but
+    // 'no-heading' for a note that plainly has the heading sends a human to the wrong place.
+    const crlf = lf.replace(/\n/g, '\r\n');
+    expect(TT.locateVaultBlock(crlf)).toEqual({ quarantine: true, reason: 'crlf-line-endings' });
+    expect(TT.writeVaultBlock(crlf, []).md).toBe(crlf); // and nothing is written
+  });
+
+  it('an NFD heading matches its NFC twin (macOS hands out NFD)', () => {
+    // `Å` genuinely decomposes (A + U+030A); `ø` does not, so a fixture built on it would
+    // hold even with normalisation removed — a gate that cannot fail (caught in review).
+    const heading = 'Årslogg';
+    expect(heading.normalize('NFD')).not.toBe(heading.normalize('NFC')); // the fixture bites
+    const md = note('| Time | Task |', '|---|---|', ['| 30m | Tidying |']).replace(
+      '## Time Log',
+      '## ' + heading.normalize('NFD'),
+    );
+    // written NFD in the note, asked for NFC from settings — and the other way round
+    expect(TT.locateVaultBlock(md, { heading: heading.normalize('NFC') }).quarantine).toBe(false);
+    expect(TT.locateVaultBlock(md, { heading: heading.normalize('NFD') }).quarantine).toBe(false);
+  });
+
+  it('an explicit empty header list does not silently re-canonicalise the block', () => {
+    // `[]` is truthy, so it used to fall through to the canonical five — the exact opposite
+    // of the migration-free property the header set exists to provide
+    // no Bill column → billable defaults true → the billable total falls back to the last
+    // column, which here is Task. Odd to read, documented as the fallback, and it round-trips.
+    const md = note('| Time | Task |', '|---|---|', ['| 30m | Tidying |', '| **0.5h** | **0.5h billable** |']);
+    const res = TT.writeVaultBlock(md, TT.parseVaultBlock(md).entries, { headers: [] });
+    expect(res.quarantine).toBe(false);
+    expect(res.md).toContain('| Time | Task |');
+    expect(res.md).not.toContain('Mode');
+    expect(res.md).toBe(md);
+  });
+
+  // ---- the read chain and the emit chain must stay in step ----
+  // parseVaultBlock and serializeVaultBlock switch over the same vocabulary 100 lines apart.
+  // SB-044 (settings-extended vocabulary) and SB-059 (Entry.tags removes `mode` from the
+  // passthrough) each have to edit both. This is the guard: every column TT can READ must
+  // also be one TT can WRITE, or the block gains a column on read it cannot emit.
+  it('every vocabulary column round-trips — a column TT can read is one TT can write', () => {
+    const SAMPLES = { Time: '30m', Mode: '#deep', Project: '[[Home]]', Task: 'Tidying', Bill: '✓' };
+    const columns = ['Time', 'Mode', 'Project', 'Task', 'Bill'];
+    for (const column of columns) {
+      expect(SAMPLES[column], `no sample value for the column ${column} — add one`).toBeTruthy();
+      const header = column === 'Time' ? '| Time |' : `| Time | ${column} |`;
+      const delim = column === 'Time' ? '|---|' : '|---|---|';
+      const row = column === 'Time' ? '| 30m |' : `| 30m | ${SAMPLES[column]} |`;
+      const totals = column === 'Bill' ? '| **0.5h** | **0.5h billable** |' : column === 'Time' ? '| **0.5h** |' : '| **0.5h** | **0.5h billable** |'; // prettier-ignore
+      const md = note(header, delim, [row, totals]);
+      const parsed = TT.parseVaultBlock(md);
+      expect(parsed.quarantine, column).toBe(false);
+      expect(TT.writeVaultBlock(md, parsed.entries).md, column).toBe(md);
+    }
   });
 });

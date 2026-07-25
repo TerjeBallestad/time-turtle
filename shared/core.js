@@ -2,6 +2,7 @@
 // Time Turtle core: parsing, model, markdown serialization.
 // Shared between client (UI + i18n overrides) and server (markdown mirror).
 /** @typedef {import('./types.ts').Entry} Entry */
+/** @typedef {import('./types.ts').VaultEntry} VaultEntry */
 /** @typedef {import('./types.ts').Task} Task */
 /** @typedef {import('./types.ts').Project} Project */
 /** @typedef {import('./types.ts').Client} Client */
@@ -492,12 +493,33 @@ TT.decodeTaskCell = function (cell) {
 // hand edit TT cannot account for, and it quarantines instead of splicing over it.
 const VAULT_HEADING = 'Time Log';
 const REVISION_RE = /^`revision: (\d+)`$/;
-/** @param {string} reason @returns {{ quarantine: true, reason: string }} */
+/**
+ * Unicode-normalise for comparison. macOS hands out NFD strings (a filename-derived setting,
+ * a paste), and an NFD `Tidsløggen` is not `===` its NFC twin — the block would quarantine as
+ * 'no-heading' for a heading sitting right there.
+ * @param {string} s @returns {string}
+ */
+const nfc = (s) => (s.normalize ? s.normalize('NFC') : s);
+/**
+ * Is this line the `## <heading>` top anchor? One matcher, used by the scan and the CRLF
+ * diagnosis, so the two cannot disagree about what an anchor is.
+ * @param {string} line @param {string} heading already trimmed + NFC @returns {boolean}
+ */
+function isHeadingAnchor(line, heading) {
+  const m = /^##[ \t]+(.*)$/.exec(line);
+  return !!m && nfc(m[1].trim()) === heading;
+}
+/**
+ * @param {import('./types.ts').VaultQuarantineReason} reason
+ * @returns {{ quarantine: true, reason: import('./types.ts').VaultQuarantineReason }}
+ */
 const vaultQuarantine = (reason) => ({ quarantine: true, reason });
 /** @param {string} line @returns {boolean} */
 const isTableRow = (line) => line.trim().startsWith('|');
-/** `|---|---|` (alignment colons allowed) — the row that makes the line above it a header. */
-/** @param {string} line @returns {boolean} */
+/**
+ * `|---|---|` (alignment colons allowed) — the row that makes the line above it a header.
+ * @param {string} line @returns {boolean}
+ */
 const isDelimiterRow = (line) => /^\s*\|(?:\s*:?-+:?\s*\|)+\s*$/.test(line);
 /**
  * Split a `| a | b |` table line into its trimmed, STILL-ESCAPED cells. The outer pipes are
@@ -511,27 +533,67 @@ function vaultRowCells(line) {
   return TT.splitCells(s);
 }
 // The generated totals row (SB-045: always present, never round-tripped as an entry).
-// DETECTION RULE, pinned: it is the LAST table row of the block AND its first cell is bold
-// (`**8.7h**`). Both halves are needed — an entry's Time cell is never bold, so no entry row
-// can be mistaken for it, and a bold cell higher up the table is not the totals row.
-/** @param {string} line @returns {boolean} */
-const isTotalsRow = (line) => /^\*\*.*\*\*$/.test(vaultRowCells(line)[0] || '');
+//
+// DETECTION RULE, pinned: it is the LAST table row of the block, its cell count matches the
+// header, and EVERY non-empty cell is a totals cell — `**8.7h**` or `**5.1h billable**`.
+// Detection and emission share this one regex, which is what makes them a single decision
+// rather than two that merely happen to agree.
+//
+// An earlier version tested only "first cell is bold", justified by "an entry's Time cell is
+// never bold". That justification silently assumed Time is column 0, which the vocabulary
+// rule (any subset, any ORDER) does not guarantee — under a `| Task | Time |` header a row
+// whose LABEL was bolded by hand was read as the totals row and dropped, and the block was
+// then rewritten without it. An hour vanished from the note with no verdict, which is the
+// exact failure row-level quarantine exists to prevent. Requiring the full generated shape
+// means an ambiguous last row is no longer guessed: it falls through to the entry path and
+// either parses as the entry it is, or quarantines.
+const TOTALS_CELL_RE = /^\*\*\d+(?:\.\d+)?h(?: billable)?\*\*$/;
+/** @param {string} line @param {number} cols @returns {boolean} */
+function isTotalsRow(line, cols) {
+  const cells = vaultRowCells(line);
+  if (cells.length !== cols) return false;
+  let seen = 0;
+  for (const cell of cells) {
+    if (cell === '') continue;
+    if (!TOTALS_CELL_RE.test(cell)) return false;
+    seen++;
+  }
+  return seen > 0; // an all-blank last row is a (degenerate) entry, not the totals row
+}
 /**
- * Which lines are inside a fenced code block. Toggled by a ``` or ~~~ run at the start of a
- * line (up to 3 spaces of indent, the CommonMark allowance). The fence line itself counts as
- * inert too, so a fence opener can never be an anchor.
+ * Which lines are inside a fenced code block. A fence opens on a run of three or more
+ * backticks or tildes at the start of a line (up to 3 spaces of indent, the CommonMark
+ * allowance) and closes only on a run of the SAME character, at least as long, with nothing
+ * after it — also CommonMark. Matching the character matters: a documentation example fenced
+ * with backticks may legitimately contain a tilde run, and treating that as the close would
+ * end the fence early and expose the rest of the example. The note most likely to hold a
+ * fenced copy of the block format is the note documenting the block format, so a located
+ * region inside a code fence is a write into someone's documentation.
+ *
+ * The fence lines themselves count as inert, so a fence opener can never be an anchor.
+ * NOTE: no literal fence marker appears in this comment — TypeScript parses JSDoc as
+ * markdown, and an unterminated one swallows the tags below it (that is a real bug this
+ * file has already had once).
  * @param {string[]} lines @returns {boolean[]}
  */
 function markFences(lines) {
   const out = new Array(lines.length).fill(false);
-  let open = false;
+  /** @type {{ char: string, len: number } | null} */
+  let open = null;
   for (let i = 0; i < lines.length; i++) {
-    if (/^ {0,3}(?:`{3,}|~{3,})/.test(lines[i])) {
+    const m = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(lines[i]);
+    if (m && !open) {
+      // an opener may carry an info string; a closer may not
       out[i] = true;
-      open = !open;
+      open = { char: m[1][0], len: m[1].length };
       continue;
     }
-    out[i] = open;
+    if (m && open && m[1][0] === open.char && m[1].length >= open.len && m[2].trim() === '') {
+      out[i] = true;
+      open = null;
+      continue;
+    }
+    out[i] = !!open;
   }
   return out;
 }
@@ -541,7 +603,7 @@ function markFences(lines) {
  * @returns {import('./types.ts').VaultBlockLocation}
  */
 TT.locateVaultBlock = function (md, opts) {
-  const heading = ((opts && opts.heading) || VAULT_HEADING).trim();
+  const heading = nfc(((opts && opts.heading) || VAULT_HEADING).trim());
   const lines = String(md == null ? '' : md).split('\n');
   const fenced = markFences(lines);
 
@@ -549,11 +611,18 @@ TT.locateVaultBlock = function (md, opts) {
   /** @type {number[]} */
   const anchors = [];
   for (let i = 0; i < lines.length; i++) {
-    if (fenced[i]) continue;
-    const m = /^##[ \t]+(.*)$/.exec(lines[i]);
-    if (m && m[1].trim() === heading) anchors.push(i);
+    if (!fenced[i] && isHeadingAnchor(lines[i], heading)) anchors.push(i);
   }
-  if (!anchors.length) return vaultQuarantine('no-heading');
+  if (!anchors.length) {
+    // Diagnose CRLF rather than blaming the heading. A `\r\n` note leaves a `\r` on every
+    // line, and JS `.`/`$` do not cross it, so every anchor match fails on a note that
+    // plainly HAS the heading. Refusing is the safe direction and stays the behaviour — TT
+    // does not rewrite line endings it did not author — but 'no-heading' would send a human
+    // looking in the wrong place forever. Whether TT should support CRLF notes at all is
+    // SB-083.
+    const crlf = lines.some((line) => line.endsWith('\r') && isHeadingAnchor(line.slice(0, -1), heading));
+    return vaultQuarantine(crlf ? 'crlf-line-endings' : 'no-heading');
+  }
   // two blocks with one name: nothing can say which is the day's, so neither is writable
   if (anchors.length > 1) return vaultQuarantine('multiple-headings');
   const start = anchors[0];
@@ -569,10 +638,11 @@ TT.locateVaultBlock = function (md, opts) {
   }
 
   // 3. the bottom anchor, which must sit BEFORE the hard stop
-  /** @type {number[]} */
+  /** @type {{ line: number, revision: number }[]} */
   const revLines = [];
   for (let i = start + 1; i < stop; i++) {
-    if (!fenced[i] && REVISION_RE.test(lines[i])) revLines.push(i);
+    const m = fenced[i] ? null : REVISION_RE.exec(lines[i]);
+    if (m) revLines.push({ line: i, revision: +m[1] });
   }
   if (!revLines.length) {
     // name the dangerous case precisely: the anchor exists, but only in someone else's section
@@ -582,8 +652,7 @@ TT.locateVaultBlock = function (md, opts) {
     return vaultQuarantine('no-revision');
   }
   if (revLines.length > 1) return vaultQuarantine('multiple-revisions');
-  const revisionLine = revLines[0];
-  const revision = +REVISION_RE.exec(lines[revisionLine])[1];
+  const { line: revisionLine, revision } = revLines[0];
 
   // 4. the table: header row, delimiter row, then contiguous data rows
   let headerLine = -1;
@@ -612,8 +681,12 @@ TT.locateVaultBlock = function (md, opts) {
     headerLine,
     separatorLine,
     rowLines,
+    // the column count comes from the header row, so a totals row that does not match the
+    // declared width is not treated as generated — it falls through to the row-level checks
     totalsLine:
-      rowLines.length && isTotalsRow(lines[rowLines[rowLines.length - 1]]) ? rowLines[rowLines.length - 1] : -1,
+      rowLines.length && isTotalsRow(lines[rowLines[rowLines.length - 1]], vaultRowCells(lines[headerLine]).length)
+        ? rowLines[rowLines.length - 1]
+        : -1,
     revisionLine,
     revision,
   };
@@ -677,13 +750,13 @@ TT.parseVaultBlock = function (md, opts) {
     keys.push(key);
   }
 
-  /** @type {Entry[]} */
+  /** @type {VaultEntry[]} */
   const entries = [];
   for (const ln of loc.rowLines) {
     if (ln === loc.totalsLine) continue; // generated, never round-tripped as an entry
     const cells = vaultRowCells(lines[ln]);
     if (cells.length !== keys.length) return vaultQuarantine('row-cell-count');
-    /** @type {Entry} */
+    /** @type {VaultEntry} */
     const entry = {
       // DD-008: the runtime id is EPHEMERAL — minted here only because the React key and
       // the mutation handle need one. It must NEVER be written back to disk; phase 3
@@ -757,8 +830,10 @@ TT.parseVaultBlock = function (md, opts) {
 // trailing `[nb]`/`[ea]` run, which is the v2 MIRROR's flag convention; the vault carries
 // billability in a dedicated `Bill` column, so routing through it would put a spurious
 // backslash on a note that happens to end in `[nb]`.
-/** One table line. An empty cell is a single space, matching SB-045's example bytes. */
-/** @param {string[]} cells @returns {string} */
+/**
+ * One table line. An empty cell is a single space, matching SB-045's example bytes.
+ * @param {string[]} cells @returns {string}
+ */
 const vaultRow = (cells) => '|' + cells.map((c) => (c === '' ? ' ' : ' ' + c + ' ')).join('|') + '|';
 // THE REVISION LINE HAS EXACTLY ONE EMITTER — this one. OD-3 (SB-078) is unresolved: SB-051
 // measured that Obsidian diff-merges an external write into a dirty open buffer taking TT's
@@ -801,7 +876,7 @@ function vaultTotals(entries) {
  * `` `revision: N` `` line, with no trailing newline (the splice supplies the line breaks).
  * `opts.headers` is the block's OWN declared header set, so a block written before a column
  * existed re-emits its own columns; it defaults to the canonical five.
- * @param {Entry[]} entries
+ * @param {VaultEntry[]} entries
  * @param {{ heading?: string, headers?: string[], revision?: number }} [opts]
  * @returns {string}
  */
@@ -828,15 +903,23 @@ TT.serializeVaultBlock = function (entries, opts) {
       ),
     );
   }
-  // The totals row is POSITIONAL — the bold hours total is always the FIRST cell and the
-  // bold billable total always the LAST. That is not cosmetic: the locator detects this row
-  // by "last row of the table AND first cell bold", so emitting the hours anywhere else
-  // would produce a row TT could no longer recognise as generated and would try to read
-  // back as an entry. The two rules are one decision.
+  // The totals row is KEYED, not positional: the hours total sits under `Time` and the
+  // billable total under `Bill`, which is what SB-045's example means — those are simply
+  // columns 0 and 4 in the canonical order, so for a canonical block the two readings are the
+  // same bytes. A block whose header row was reordered by hand gets its totals under the
+  // right headings instead of under whatever happens to be first and last.
+  //
+  // This composes with detection because isTotalsRow keys on the CELL SHAPE
+  // (TOTALS_CELL_RE), not on position — the two rules share that regex, which is what makes
+  // them one decision. Fallbacks keep a degenerate header set writable: no `Time` column puts
+  // the hours in column 0, no `Bill` column puts the billable total in the last one, and if
+  // those collide the hours win (a one-column block has nowhere else to put them).
   const { min, bill } = vaultTotals(rows);
   const totals = headers.map(() => '');
-  totals[0] = '**' + TT.fmtHours(min) + 'h**';
-  if (headers.length > 1) totals[headers.length - 1] = '**' + TT.fmtHours(bill) + 'h billable**';
+  const timeAt = keys.indexOf('time') >= 0 ? keys.indexOf('time') : 0;
+  const billAt = keys.indexOf('bill') >= 0 ? keys.indexOf('bill') : headers.length - 1;
+  totals[timeAt] = '**' + TT.fmtHours(min) + 'h**';
+  if (billAt !== timeAt) totals[billAt] = '**' + TT.fmtHours(bill) + 'h billable**';
   lines.push(vaultRow(totals), '', vaultRevisionLine(revision));
   return lines.join('\n');
 };
@@ -848,27 +931,42 @@ TT.serializeVaultBlock = function (entries, opts) {
  * refuses is quarantined, and it must be impossible to reach a write from a quarantined
  * block. On any verdict the input `md` comes back byte-identical.
  *
+ * The OUTPUT is gated too, not just the input. TT.encodeCell escapes `\` and `|`; it does not
+ * escape a newline, and TT.fmtDur emits `0m` for a zero duration, which parseTimeCell rejects.
+ * Either would produce a block TT's own parser refuses — a note frozen against TT until a
+ * human repairs it by hand, reported as a successful write. So the spliced result is parsed
+ * back before it is returned, and anything that would not survive the round-trip is refused
+ * as 'write-would-corrupt' with the input handed back untouched. One gate, whole class.
+ *
  * The revision is NOT bumped here. `opts.revision` sets it; absent, the located revision is
  * re-emitted unchanged. When a write bumps the counter is SB-057's arbitration to rule on,
  * not this function's to assume.
- * @param {string} md @param {Entry[]} entries
+ * @param {string} md @param {VaultEntry[]} entries
  * @param {{ heading?: string, date?: string, headers?: string[], revision?: number }} [opts]
- * @returns {{ md: string, quarantine: boolean, reason: string | null }}
+ * @returns {{ md: string, quarantine: boolean, reason: import('./types.ts').VaultQuarantineReason | null }}
  */
 TT.writeVaultBlock = function (md, entries, opts) {
   const input = String(md == null ? '' : md);
   const parsed = TT.parseVaultBlock(input, opts);
   if (parsed.quarantine) return { md: input, quarantine: true, reason: parsed.reason };
-  const loc = TT.locateVaultBlock(input, opts); // offsets for the splice
-  if (loc.quarantine) return { md: input, quarantine: true, reason: loc.reason }; // unreachable; belt and braces
+  // Re-locating is not redundant: parseVaultBlock returns values, not line offsets, and this
+  // also narrows the union for @ts-check so `loc.heading` below is legal. Do not delete it.
+  const loc = TT.locateVaultBlock(input, opts);
+  if (loc.quarantine) return { md: input, quarantine: true, reason: loc.reason };
   const lines = input.split('\n');
   const region = TT.serializeVaultBlock(entries, {
     heading: loc.heading,
-    headers: (opts && opts.headers) || parsed.headers, // the block's own declared columns
+    // `[]` is truthy, so an explicit empty header list would silently fall through to the
+    // canonical five and re-canonicalise a block — the opposite of the migration-free property
+    headers: opts && opts.headers && opts.headers.length ? opts.headers : parsed.headers,
     revision: opts && opts.revision != null ? opts.revision : loc.revision,
   });
-  const out = lines.slice(0, loc.start).concat(region.split('\n'), lines.slice(loc.end + 1));
-  return { md: out.join('\n'), quarantine: false, reason: null };
+  const out = lines
+    .slice(0, loc.start)
+    .concat(region.split('\n'), lines.slice(loc.end + 1))
+    .join('\n');
+  if (TT.parseVaultBlock(out, opts).quarantine) return { md: input, quarantine: true, reason: 'write-would-corrupt' };
+  return { md: out, quarantine: false, reason: null };
 };
 
 // ---- canonical row string (DD-008 spec obligation — nothing computes this in phase 1) ----

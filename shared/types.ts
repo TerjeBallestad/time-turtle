@@ -94,16 +94,6 @@ export interface Entry {
    * additively (emit-when-true `[ea]` token, the ` [nb]` discipline).
    */
   editedByAdmin?: boolean;
-  /**
-   * SB-055 phase 1: vault-block columns TT parsed but has no model field for, keyed by
-   * the lowercased header label and holding the RAW (still-escaped) cell, so they are
-   * re-emitted verbatim. Today that is `Mode` — `Entry.tags` does not exist yet (SB-059
-   * adds it and is blockedBy SB-055), and dropping the cell would lose a hand-typed
-   * `#deep` on the next write. Present only when the block declared such a column, and
-   * never produced by the sqlite/mirror path. SB-059's seam: adding `tags` removes
-   * `mode` from here.
-   */
-  vaultCells?: Record<string, string>;
 }
 
 export interface Settings {
@@ -191,15 +181,56 @@ export interface AppState extends Catalog {
 
 // ---- vault block (SB-055 / SB-045) ----
 /**
- * The locator refused. `reason` is a stable code SB-057's boot scan can record and
- * surface: 'no-heading' | 'multiple-headings' | 'no-revision' |
- * 'revision-past-next-heading' | 'multiple-revisions' | 'no-table' |
- * 'unexpected-content-in-block', plus the parser's row/header reasons.
- * A quarantined block is NEVER written — quarantine, never guess.
+ * An entry as it comes out of (or goes into) a vault block. Identical to `Entry` plus the
+ * phase-1 passthrough: vocabulary columns TT parsed but has no model field for, keyed by
+ * the lowercased header label and holding the RAW (still-escaped) cell, so they are
+ * re-emitted verbatim. Today that is `Mode` — `Entry.tags` does not exist yet (SB-059 adds
+ * it and is blockedBy SB-055), and dropping the cell would lose a hand-typed `#deep` on the
+ * next write. SB-059's seam: adding `tags` removes `mode` from here.
+ *
+ * It is a SEPARATE type rather than an optional field on `Entry` deliberately. The sqlite
+ * path casts query rows to `Entry` (server/src/db.js), and this field can never come out of
+ * a SQLite row — putting it on the shared type both lies about that and breaks the cast.
+ */
+export interface VaultEntry extends Entry {
+  vaultCells?: Record<string, string>;
+}
+
+/**
+ * Every way TT can refuse a vault block. Enumerated rather than left as `string` so
+ * SB-057's boot scan gets a compiler check when it switches on these — a typo'd reason
+ * is otherwise silent, and the list would live only in a test.
+ *
+ * Structural (the locator): the two anchors, the `##` hard stop, the region's shape.
+ * Schema and row level (the parser): the header vocabulary and each row's cells.
+ * Output (the writer): the spliced result would not parse back.
+ */
+export type VaultQuarantineReason =
+  // --- locator: the block cannot be bounded ---
+  | 'no-heading'
+  | 'crlf-line-endings'
+  | 'multiple-headings'
+  | 'no-revision'
+  | 'revision-past-next-heading'
+  | 'multiple-revisions'
+  | 'no-table'
+  | 'unexpected-content-in-block'
+  // --- parser: the schema or a row cannot be read ---
+  | 'unknown-header'
+  | 'duplicate-header'
+  | 'row-cell-count'
+  | 'unparseable-time'
+  | 'bad-bill-cell'
+  // --- writer: what TT would emit is not readable back ---
+  | 'write-would-corrupt';
+
+/**
+ * The block was refused. `reason` is a stable code SB-057's boot scan can record and
+ * surface. A quarantined block is NEVER written — quarantine, never guess.
  */
 export interface VaultQuarantine {
   quarantine: true;
-  reason: string;
+  reason: VaultQuarantineReason;
 }
 
 /**
@@ -235,7 +266,7 @@ export interface VaultBlockParse {
   heading: string;
   revision: number;
   headers: string[];
-  entries: Entry[];
+  entries: VaultEntry[];
 }
 
 export type VaultBlockParseResult = VaultBlockParse | VaultQuarantine;
@@ -449,7 +480,10 @@ export interface TTModule {
    * (generated, never round-tripped as an entry), `opts.headers` defaulting to the
    * canonical five.
    */
-  serializeVaultBlock(entries: Entry[], opts?: { heading?: string; headers?: string[]; revision?: number }): string;
+  serializeVaultBlock(
+    entries: VaultEntry[],
+    opts?: { heading?: string; headers?: string[]; revision?: number },
+  ): string;
   /**
    * SB-055: splice the serialized block back into its host note. Every byte outside the
    * located region survives untouched. On a quarantine verdict the input `md` is
@@ -458,9 +492,9 @@ export interface TTModule {
    */
   writeVaultBlock(
     md: string,
-    entries: Entry[],
+    entries: VaultEntry[],
     opts?: { heading?: string; date?: string; headers?: string[]; revision?: number },
-  ): { md: string; quarantine: boolean; reason: string | null };
+  ): { md: string; quarantine: boolean; reason: VaultQuarantineReason | null };
   serializeMd(state: Catalog): string;
   newId(): string;
   parseMd(md: string): Catalog;
