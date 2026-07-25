@@ -1287,3 +1287,356 @@ describe('vault block serialize + splice (SB-055)', () => {
     expect(TT.serializeVaultBlock(DAY, { revision: 1 })).not.toContain('runtime-id');
   });
 });
+
+// ---- SB-055 / PLAN-009 task 5: the goldens ----
+// The house golden is `serialize(parse(md)) === md`. SB-055 enumerates what it must cover,
+// and it is built here as FOUR families, because one of them CANNOT be a byte golden and
+// pretending otherwise produces a test that lies:
+//
+//   A — byte round-trip over TT-canonical markdown. The strongest claim, and the only one
+//       that can be asserted byte-exactly.
+//   B — CONVERGENCE, not byte identity. TT.parseTimeCell accepts `->`, `→` and `-` while
+//       TT.fmtTimeCell always emits `→`, so `09:00-15:30` round-trips to `09:00→15:30`. The
+//       byte golden cannot hold for accepted-but-non-canonical input; the correct property
+//       is that one pass canonicalises and a second is a fixed point. Conflating the two is
+//       how someone "fixes" the parser into preserving the input separator, and how the
+//       `- ` prefix accretion bug comes back.
+//   C — the refusals. Every quarantine reason asserts NO WRITE occurred (input md
+//       byte-identical), not merely that a flag came back.
+//   D — no ephemeral runtime id in the bytes, asserted on resolved references rather than a
+//       string scan alone (DD-008: a byte golden is blind to a severed semantic link).
+//
+// Every Family A fixture below is written from SB-045's ruling table and SB-055's own
+// example block. None of it is pasted from the implementation's output — that would test
+// the code against itself and would happily enshrine a wrong separator or a doubled prefix.
+// ## Verified red-green: 2026-07-25
+describe('vault block round-trip (SB-055)', () => {
+  /** serialize(parse(md)) — the house golden, as one call. */
+  const roundTrip = (md, opts) => {
+    const parsed = TT.parseVaultBlock(md, opts);
+    if (parsed.quarantine) throw new Error('unexpectedly quarantined: ' + parsed.reason);
+    const res = TT.writeVaultBlock(md, parsed.entries, opts);
+    expect(res.quarantine).toBe(false);
+    return res.md;
+  };
+
+  // ---- Family A: byte round-trip over TT-canonical markdown ----
+  // Proves: the format is closed under parse→serialize for every shape SB-055 enumerates.
+  // Cannot prove: anything about input TT did not write itself (that is Family B), and
+  // nothing identity-adjacent (that is Family D).
+  describe('Family A — byte round-trip (TT-canonical bytes)', () => {
+    // A pipe in a project name AND in a note; a literal <br> in a note; a running timer; a
+    // bare duration; an empty Task; a note ending in [nb]; `✓` and blank Bill.
+    const FULL_DAY = [
+      '---',
+      'date: 2026-01-05',
+      '---',
+      '',
+      '# Monday 5 January',
+      '',
+      '## Intentions',
+      '',
+      '- [ ] ship the block format',
+      '',
+      '## Time Log',
+      '',
+      '| Time | Mode | Project | Task | Bill |',
+      '|---|---|---|---|---|',
+      '| 09:00→15:30 | #deep | A\\|B | Pipe \\| work<br>- and a note with a \\| in it | ✓ |',
+      '| 11:00→11:30 | #admin | FAG | Docs<br>- use \\<br> for a line break | |',
+      '| 17:34→ | #deep | [[Time Turtle]] | Block format feel-gate | |',
+      '| 30m | #rest | [[Home]] | | |',
+      '| 45m | #admin | INT-ADM | Invoicing<br>- weekly invoicing [nb] | |',
+      '| **8.25h** | | | | **6.5h billable** |',
+      '',
+      '`revision: 8`',
+      '',
+      '## Captures',
+      '',
+      '- a stray thought',
+      '',
+      '## Reflection',
+      '',
+      'It went fine.',
+      '',
+    ].join('\n');
+
+    // The migration-free property, now carried by the header row: a block written before
+    // `Mode` existed keeps parsing and keeps its own four columns.
+    const PRE_MODE_DAY = [
+      '## Time Log',
+      '',
+      '| Time | Project | Task | Bill |',
+      '|---|---|---|---|',
+      '| 08:30→12:00 | FJH-NETT | Checkout flow<br>- wireframes | ✓ |',
+      '| **3.5h** | | | **3.5h billable** |',
+      '',
+      '`revision: 2`',
+      '',
+      '## Captures',
+      '',
+    ].join('\n');
+
+    // A header set in a different ORDER — also a subset, also migration-free.
+    const REORDERED_DAY = [
+      '## Time Log',
+      '',
+      '| Bill | Task | Time |',
+      '|---|---|---|',
+      '| ✓ | Checkout flow | 08:30→12:00 |',
+      '| **3.5h** | | **3.5h billable** |',
+      '',
+      '`revision: 1`',
+      '',
+    ].join('\n');
+
+    const ZERO_ENTRY_DAY = [
+      '# Monday 5 January',
+      '',
+      '## Time Log',
+      '',
+      '| Time | Mode | Project | Task | Bill |',
+      '|---|---|---|---|---|',
+      '| **0h** | | | | **0h billable** |',
+      '',
+      '`revision: 1`',
+      '',
+      '## Reflection',
+      '',
+      'Nothing logged.',
+      '',
+    ].join('\n');
+
+    const GOLDENS = [
+      ['a full day: pipes, a literal <br>, a running timer, a bare duration, an empty Task, a [nb] tail', FULL_DAY],
+      ['a pre-Mode 4-column block (the migration-free property)', PRE_MODE_DAY],
+      ['a reordered header set', REORDERED_DAY],
+      ['a zero-entry day (header row and totals row still written)', ZERO_ENTRY_DAY],
+    ];
+
+    for (const [name, md] of GOLDENS) {
+      it(`serialize(parse(md)) === md — ${name}`, () => {
+        // today-dated, so the running timer is the case SB-055 actually names rather than a
+        // past-dated proxy for it (SB-077 made that deterministic)
+        expect(roundTrip(md, { date: TT.todayStr() })).toBe(md);
+      });
+    }
+
+    it('is a fixed point under a SECOND cycle (a single pass hides accretion)', () => {
+      for (const [, md] of GOLDENS) {
+        const once = roundTrip(md);
+        expect(roundTrip(once)).toBe(once);
+      }
+    });
+
+    it('the bytes are clock-independent with a timer running (SB-077)', () => {
+      // Serializing the same today-dated running block twice must agree. Before SB-077's
+      // ruling the totals cell was computed from TT.nowMin() and this could differ across a
+      // minute boundary — the reason the running-timer golden could not be written at all.
+      const today = TT.todayStr();
+      const parsed = TT.parseVaultBlock(FULL_DAY, { date: today });
+      expect(parsed.entries.some((e) => TT.isRunning(e))).toBe(true); // the case is really present
+      const a = TT.writeVaultBlock(FULL_DAY, parsed.entries, { date: today }).md;
+      const b = TT.writeVaultBlock(FULL_DAY, TT.parseVaultBlock(FULL_DAY, { date: today }).entries, { date: today }).md;
+      expect(b).toBe(a);
+      expect(a).toBe(FULL_DAY);
+    });
+
+    it('the running entry contributes 0 to the totals — the note records finished work', () => {
+      // 390 + 30 + 0 (running) + 30 + 45 = 495 min = 8.25h; only the first is billable
+      const entries = TT.parseVaultBlock(FULL_DAY, { date: TT.todayStr() }).entries;
+      expect(entries.reduce((n, e) => n + (e.end != null || e.durMin != null ? 1 : 0), 0)).toBe(4);
+      expect(FULL_DAY).toContain('| **8.25h** | | | | **6.5h billable** |');
+    });
+
+    it('every byte outside the block survives each golden untouched', () => {
+      for (const [name, md] of GOLDENS) {
+        const out = roundTrip(md);
+        const inLoc = TT.locateVaultBlock(md);
+        const outLoc = TT.locateVaultBlock(out);
+        expect(out.split('\n').slice(0, outLoc.start).join('\n'), name).toBe(
+          md.split('\n').slice(0, inLoc.start).join('\n'),
+        );
+        expect(
+          out
+            .split('\n')
+            .slice(outLoc.end + 1)
+            .join('\n'),
+          name,
+        ).toBe(
+          md
+            .split('\n')
+            .slice(inLoc.end + 1)
+            .join('\n'),
+        );
+      }
+    });
+  });
+
+  // ---- Family B: convergence, NOT byte identity ----
+  // Proves: accepted-but-non-canonical input converges to canonical bytes in ONE pass and
+  // then holds steady. Cannot prove: that the input bytes survive — they deliberately do
+  // not, and asserting that they should is the mistake this family exists to prevent.
+  // Mirrors the existing HAND_EDITED fixed-point pattern in the Task-cell codec above.
+  describe('Family B — convergence (hand-edited, accepted-but-non-canonical)', () => {
+    const withRow = (row) =>
+      ['## Time Log', '', '| Time | Task | Bill |', '|---|---|---|', row, '', '`revision: 1`', ''].join('\n');
+
+    const HAND_EDITED = [
+      ['an ASCII hyphen separator', withRow('| 09:00-15:30 | Checkout flow | ✓ |'), '| 09:00→15:30 |'],
+      ['an ASCII arrow separator', withRow('| 09:00->15:30 | Checkout flow | ✓ |'), '| 09:00→15:30 |'],
+      // `- - note` is NOT a doubled prefix to be cleaned up: SB-045's codec strips exactly
+      // one `- `, so this cell means a note whose text is `- note`. The property that
+      // matters is that it never grows a THIRD hyphen — accretion is asserted below.
+      ['a note that itself begins with `- `', withRow('| 30m | Label<br>- - note | |'), '<br>- - note |'],
+      ['a note typed without the `- ` prefix', withRow('| 30m | Label<br>note | |'), '<br>- note |'],
+      ['a raw <br> a hand edit left in the note', withRow('| 30m | Docs<br>- use <br> here | |'), '\\<br> here |'],
+      ['a totals row someone edited by hand', withRow('| 1h | Label | ✓ |\n| **99h** | | **99h billable** |'), '| **1h** | | **1h billable** |'], // prettier-ignore
+    ];
+
+    for (const [name, md, canonicalFragment] of HAND_EDITED) {
+      it(`canonicalises then holds steady: ${name}`, () => {
+        const once = roundTrip(md);
+        const twice = roundTrip(once);
+        expect(twice).toBe(once); // the fixed point — where accretion and drift would show
+        expect(once).toContain(canonicalFragment); // …and it landed on the canonical form
+        // the values hold across the normalisation, so convergence is not quiet data loss
+        expect(TT.parseVaultBlock(twice).entries).toEqual(TT.parseVaultBlock(once).entries.map((e) => ({ ...e, id: expect.any(String) }))); // prettier-ignore
+      });
+    }
+
+    it('a canonical block is ALREADY a fixed point (one pass changes nothing)', () => {
+      const canonical = roundTrip(withRow('| 09:00→15:30 | Checkout flow | ✓ |'));
+      expect(roundTrip(canonical)).toBe(canonical);
+    });
+
+    it('the `- ` prefix never accretes across repeated writes', () => {
+      // the bug this family exists to prevent: `- note` → `- - note` → `- - - note`, one
+      // hyphen per write cycle, until the note is unreadable
+      let md = withRow('| 30m | Label<br>note | |');
+      for (let i = 0; i < 5; i++) md = roundTrip(md);
+      expect(md).toContain('| 30m | Label<br>- note | |');
+      expect(md).not.toContain('- - ');
+      expect(TT.parseVaultBlock(md).entries[0]).toMatchObject({ label: 'Label', note: 'note' });
+    });
+  });
+
+  // ---- Family C: the refusals ----
+  // Proves: every quarantine path from tasks 2 and 3 provably writes NOTHING. The assertion
+  // is byte identity of the returned md — "a flag came back true" would be satisfied by a
+  // function that quarantined AND wrote.
+  describe('Family C — refusals write nothing', () => {
+    const OK = [
+      '# Monday',
+      '',
+      '## Intentions',
+      '',
+      '- a thing',
+      '',
+      '## Time Log',
+      '',
+      '| Time | Mode | Project | Task | Bill |',
+      '|---|---|---|---|---|',
+      '| 30m | #rest | [[Home]] | Tidying | |',
+      '| **0.5h** | | | | **0h billable** |',
+      '',
+      '`revision: 3`',
+      '',
+      '## Captures',
+      '',
+      '- a stray thought',
+      '',
+    ].join('\n');
+
+    const REFUSALS = [
+      ['no-heading', OK.replace('## Time Log', '## Tidsloggen')],
+      ['multiple-headings', OK + '\n## Time Log\n\n| Time |\n|---|\n\n`revision: 9`\n'],
+      ['no-revision', OK.replace('`revision: 3`\n', '')],
+      ['revision-past-next-heading', OK.replace('`revision: 3`\n', '').replace('- a stray thought', '`revision: 3`')],
+      ['multiple-revisions', OK.replace('`revision: 3`', '`revision: 3`\n\n`revision: 4`')],
+      ['no-table', OK.replace('| Time | Mode | Project | Task | Bill |\n|---|---|---|---|---|\n', '')],
+      ['unexpected-content-in-block', OK.replace('`revision: 3`', 'a stray line\n\n`revision: 3`')],
+      ['unknown-header', OK.replace('| Time | Mode |', '| Time | Mood |')],
+      ['duplicate-header', OK.replace('| Time | Mode |', '| Time | Time |')],
+      ['row-cell-count', OK.replace('| 30m | #rest | [[Home]] | Tidying | |', '| 30m | #rest | [[Home]] |')],
+      ['unparseable-time', OK.replace('| 30m |', '| after lunch |')],
+      ['bad-bill-cell', OK.replace('| Tidying | |', '| Tidying | yes |')],
+    ];
+
+    for (const [reason, md] of REFUSALS) {
+      it(`${reason} — the note comes back byte-identical`, () => {
+        const entries = [{ id: 'e9', date: '2026-01-05', start: 540, end: 600, durMin: null, project: 'X', label: 'Y', note: '', billable: true }]; // prettier-ignore
+        const res = TT.writeVaultBlock(md, entries);
+        expect(res.quarantine).toBe(true);
+        expect(res.reason).toBe(reason);
+        expect(res.md).toBe(md); // nothing written, not one byte
+      });
+    }
+
+    it('covers every quarantine reason the parser and locator can produce', () => {
+      // a guard against a new reason being added without a refusal golden beside it
+      const produced = new Set(REFUSALS.map(([reason]) => reason));
+      for (const reason of [
+        'no-heading',
+        'multiple-headings',
+        'no-revision',
+        'revision-past-next-heading',
+        'multiple-revisions',
+        'no-table',
+        'unexpected-content-in-block',
+        'unknown-header',
+        'duplicate-header',
+        'row-cell-count',
+        'unparseable-time',
+        'bad-bill-cell',
+      ]) {
+        expect(produced.has(reason), reason).toBe(true);
+      }
+    });
+  });
+
+  // ---- Family D: no ephemeral id reaches the bytes ----
+  // Asserted on RESOLVED REFERENCES, not on a string scan alone. DD-008 recorded the exact
+  // blindness being guarded against: the existing mirror golden passes byte-exact while
+  // commitSnapshot(entry) returns null, because ids never appear in the bytes at all.
+  describe('Family D — the runtime id is ephemeral (DD-008)', () => {
+    const DAY = [
+      '## Time Log',
+      '',
+      '| Time | Project | Task | Bill |',
+      '|---|---|---|---|',
+      '| 09:00→15:30 | FJH-NETT | Checkout flow<br>- wireframes | ✓ |',
+      '| 30m | INT-ADM | Admin | |',
+      '| 30m | INT-ADM | Admin | |',
+      '| **6.5h** | | | **6.5h billable** |',
+      '',
+      '`revision: 5`',
+      '',
+    ].join('\n');
+
+    it('no parsed entry’s id appears anywhere in the serialized output', () => {
+      const parsed = TT.parseVaultBlock(DAY);
+      const out = TT.writeVaultBlock(DAY, parsed.entries).md;
+      expect(parsed.entries).toHaveLength(3);
+      for (const entry of parsed.entries) expect(out).not.toContain(entry.id);
+    });
+
+    it('the entry COUNT and their resolved values survive the round-trip', () => {
+      // two byte-identical `30m | INT-ADM | Admin` rows are a legitimate day — a
+      // content-keyed scheme would collide here, which is why DD-008's spec owes an
+      // ordinal-on-collision rule. Nothing may collapse them.
+      const before = TT.parseVaultBlock(DAY).entries;
+      const after = TT.parseVaultBlock(TT.writeVaultBlock(DAY, before).md).entries;
+      expect(after).toHaveLength(before.length);
+      const shape = (e) => ({ start: e.start, end: e.end, durMin: e.durMin, project: e.project, label: e.label, note: e.note, billable: e.billable }); // prettier-ignore
+      expect(after.map(shape)).toEqual(before.map(shape));
+      expect(after[1]).toMatchObject({ durMin: 30, project: 'INT-ADM', label: 'Admin' });
+      expect(after[2]).toMatchObject({ durMin: 30, project: 'INT-ADM', label: 'Admin' });
+    });
+
+    it('an id planted in the entry list is not smuggled into the file', () => {
+      const entries = TT.parseVaultBlock(DAY).entries.map((e) => ({ ...e, id: 'SMUGGLED-e1-abc' }));
+      expect(TT.writeVaultBlock(DAY, entries).md).not.toContain('SMUGGLED');
+    });
+  });
+});
