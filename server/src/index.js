@@ -137,6 +137,37 @@ class ConflictError extends Error {
 }
 
 /**
+ * SB-070: an entry id is the ONE caller-supplied string that reaches the mirror's `## commits`
+ * section, and that section is deliberately not escaped (see the commits serializer in
+ * shared/core.js — every field in it is machine-generated, so encodeCell would be a no-op).
+ * An id holding a `|` therefore splits its own frozen-money row: `  - a|b | 1250 | 60 | 100`
+ * parses back to snapshot key `a` with rate NaN, silently rewriting COMMITTED money on a
+ * mirror restore. Terje's ruling (option 1) closes it at the source instead of escaping the
+ * section: reject the id at the API boundary, loud and explicit, server-side.
+ *
+ * The charset is what the machine already produces — `nid()` (`e<n>-<base36>`), and any
+ * `TT.segmentKey` output — so nothing legitimate is rejected. It deliberately excludes `:`:
+ * ISO timestamps live on the commit SEGMENT (`committedAt`/`approvedAt`), never on an entry.
+ */
+const ENTRY_ID_RE = /^[A-Za-z0-9._-]+$/;
+/**
+ * The first bad entry id in a collection-replace payload, as an error message, or null when
+ * every id is clean. @param {any[]} entries @returns {string | null}
+ */
+function entryIdError(entries) {
+  for (const entry of entries) {
+    const id = entry == null || entry.id == null ? '' : String(entry.id);
+    if (!ENTRY_ID_RE.test(id))
+      return (
+        'invalid entry id ' +
+        JSON.stringify(id) +
+        ': an entry id may contain only letters, digits, dot, underscore and hyphen'
+      );
+  }
+  return null;
+}
+
+/**
  * SDD-002 ruling 7 (PLAN-006): the never-referenced true-delete guard, mapped to 409.
  * Archive is the default path; a HARD delete is a code/id ABSENT from the collection-
  * replace PUT (there is no DELETE route). The server allows a hard delete only when the
@@ -365,6 +396,12 @@ app.put('/api/state', requireUser, (req, res) => {
     if (body[key] !== undefined && !Array.isArray(body[key]))
       return res.status(400).json({ error: key + ' must be an array' });
   }
+  // SB-070: charset-check every entry id BEFORE any of the normalize/pin/reconcile helpers
+  // touch the body, so a rejected PUT writes nothing at all.
+  if (body.entries !== undefined) {
+    const badId = entryIdError(body.entries);
+    if (badId) return res.status(400).json({ error: badId });
+  }
   // DC-002: with TT_MD_DIR_LOCK set the mirror path is env-only. Compare against the
   // stored value rather than rejecting the key outright — the client PUTs the whole
   // settings object, so an unchanged mdDir rides along with every currency/language edit.
@@ -500,6 +537,10 @@ app.put('/api/users/:id/entries', requireUser, requireAdmin, (req, res) => {
     if (!entry || typeof entry.id !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(String(entry.date)))
       return res.status(400).json({ error: 'each entry needs an id and a YYYY-MM-DD date' });
   }
+  // SB-070: the same charset guard as the self path — this route re-freezes commit snapshots
+  // too, so a piped id corrupts the target's frozen money exactly the same way.
+  const badId = entryIdError(body.entries);
+  if (badId) return res.status(400).json({ error: badId });
   // DC-001 optimistic concurrency (mirrors the self path's optional-version shape): a
   // `version` (StateVersion, the entries scope) makes the write conditional — if the
   // target's entries moved since the Review tab loaded (the employee logged an hour, or a

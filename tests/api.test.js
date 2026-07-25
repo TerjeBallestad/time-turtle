@@ -1483,6 +1483,139 @@ describe('DC-005 server-reconciled project-code rename (SDD-002)', () => {
   });
 });
 
+// SB-070: an entry id is the one caller-supplied string that reaches the mirror's `## commits`
+// section, and that section is deliberately NOT escaped (see the commits serializer in
+// shared/core.js). An id holding a `|` splits its own frozen-money row — `  - a|b | 1250 | 60 |
+// 100` parses back to snapshot key `a` with rate NaN — so COMMITTED money is silently rewritten
+// on a mirror restore. Terje ruled option 1: reject the id at the API boundary, server-side.
+//
+// Proven at the api rung: hostile ids actually go over HTTP and the rejection is asserted, and
+// the store is re-read to prove the rejected PUT wrote nothing. Reading the guard proves nothing.
+// The legitimate half matters just as much — a guard that rejects real machine-generated ids is
+// worse than the bug — so the accepted cases are the shapes the app actually produces.
+//
+// ## Verified red-green: 2026-07-25
+// break — widen ENTRY_ID_RE in server/src/index.js to /^[\s\S]*$/ → 'rejects the pipe',
+//   'rejects every other out-of-charset shape' and the admin-path test all fail (400 → 200),
+//   and the store-unchanged assertions fail with them.
+describe('SB-070 entry-id charset guard', () => {
+  const admin = session();
+  const emp = session();
+  const PROJ = 'SB70-PROJ'; // dedicated, rated, so the frozen snapshot below is predictable
+  const DATE = '2026-09-07';
+  const KEY = TT.segmentKey(DATE);
+  // The ids the machine actually mints: nid() from TT.newEntry (`e<n>-<base36>`), a
+  // segmentKey-shaped id, and a plain date-ish id. None of them leaves [A-Za-z0-9._-].
+  const NID = TT.newEntry(DATE).id;
+  const GOOD_IDS = [NID, KEY, '2026-09-07', 'e12-ms0nqlr8', 'a.b_c-D9'];
+  const line = (id) => ({
+    id,
+    date: DATE,
+    start: 540,
+    end: 660,
+    durMin: null,
+    project: PROJ,
+    label: 'work',
+    note: 'sb70',
+    billable: true,
+  });
+  let empId;
+  const empEntries = async () => (await emp('GET', '/api/state')).json.entries;
+
+  beforeAll(async () => {
+    await admin('POST', '/api/auth/login', { email: 'admin@timeturtle.local', password: 'testpw' });
+    await admin('POST', '/api/users', {
+      email: 'sb70@timeturtle.local',
+      name: 'Seven Zero',
+      role: 'employee',
+      password: 'sb70pw',
+    });
+    await emp('POST', '/api/auth/login', { email: 'sb70@timeturtle.local', password: 'sb70pw' });
+    empId = (await admin('GET', '/api/users')).json.users.find((u) => u.email === 'sb70@timeturtle.local').id;
+    const st = await admin('GET', '/api/state');
+    const put = await admin('PUT', '/api/state', {
+      projects: [...st.json.projects, { code: PROJ, name: 'SB70', clientId: null, rate: 900, billable: true }],
+    });
+    expect(put.status).toBe(200);
+  });
+
+  it('accepts every id shape the app actually generates (nid, segment key, dotted/underscored)', async () => {
+    // nid() is `e<counter>-<base36 timestamp>`; the guard must not touch it, or logging an
+    // hour stops working. This is the assertion that keeps the guard from being worse than
+    // the bug it closes.
+    expect(NID).toMatch(/^e\d+-[a-z0-9]+$/);
+    const put = await emp('PUT', '/api/state', { entries: GOOD_IDS.map(line) });
+    expect(put.status).toBe(200);
+    expect((await empEntries()).map((e) => e.id).sort()).toEqual([...GOOD_IDS].sort());
+  });
+
+  it('rejects the pipe (the SB-070 repro) with 400, and the rejected PUT writes NOTHING', async () => {
+    const before = await empEntries();
+    const put = await emp('PUT', '/api/state', { entries: [...GOOD_IDS.map(line), line('a|b')] });
+    expect(put.status).toBe(400);
+    expect(put.json.error).toContain('a|b');
+    expect(put.json.error).toContain('invalid entry id');
+    // the whole collection-replace was refused — the store is byte-identical, and the
+    // hostile id is nowhere near the mirror
+    expect(await empEntries()).toEqual(before);
+  });
+
+  it('rejects every other out-of-charset shape, and an absent/non-string id', async () => {
+    const hostile = [
+      'a|b', // the column delimiter — the money-losing one
+      'a\\b', // the escape character
+      'a b', // whitespace splits nothing but is not machine-generated either
+      'a\nb', // a newline would forge a second snapshot row outright
+      'e1[nb]', // the flag-marker syntax
+      'e1#x',
+      'æøå',
+      '', // empty
+    ];
+    for (const id of hostile) {
+      const put = await emp('PUT', '/api/state', { entries: [line(id)] });
+      expect(`${JSON.stringify(id)} → ${put.status}`).toBe(`${JSON.stringify(id)} → 400`);
+    }
+    // a missing id, and an id that is not a string at all, are rejected on the same path
+    expect((await emp('PUT', '/api/state', { entries: [{ ...line('x'), id: undefined }] })).status).toBe(400);
+    expect((await emp('PUT', '/api/state', { entries: [{ ...line('x'), id: { toString: () => 'ok' } }] })).status).toBe(
+      400,
+    );
+    // and the good state from the first test is still exactly what is stored
+    expect((await empEntries()).map((e) => e.id).sort()).toEqual([...GOOD_IDS].sort());
+  });
+
+  it('the admin cross-user path rejects it too, and the target’s entries survive', async () => {
+    // PUT /api/users/:id/entries re-freezes commit snapshots as well, so it is the same hole.
+    const before = (await admin('GET', `/api/users/${empId}/timesheet`)).json.entries;
+    const put = await admin('PUT', `/api/users/${empId}/entries`, { entries: [...before, line('adm|hack')] });
+    expect(put.status).toBe(400);
+    expect(put.json.error).toContain('adm|hack');
+    expect((await admin('GET', `/api/users/${empId}/timesheet`)).json.entries).toEqual(before);
+  });
+
+  it('with only clean ids surviving the guard, the frozen money round-trips off the mirror on disk', async () => {
+    // The point of the guard, end to end: commit the segment, then parse the bytes the server
+    // actually wrote. Every snapshot key must come back as the id that went in, with numeric
+    // money — which is precisely what a piped id destroyed (key truncated, rate NaN).
+    const commit = await emp('PUT', '/api/state', { entries: GOOD_IDS.map(line), commits: [{ key: KEY }] });
+    expect(commit.status).toBe(200);
+
+    const mdDir = join(DATA_DIR, 'markdown');
+    const text = readdirSync(mdDir)
+      .filter((f) => f.endsWith('.md'))
+      .map((f) => readFileSync(join(mdDir, f), 'utf8'))
+      .find((t) => t.includes('sb70'));
+    expect(text).toBeDefined();
+    const seg = TT.parseMd(text).commits.find((c) => c.key === KEY);
+    expect(seg).toBeDefined();
+    // 120 min on a rate-900 exact project → rate 900 | billMin 120 | amount 1800, per id
+    expect(Object.keys(seg.snapshot).sort()).toEqual([...GOOD_IDS].sort());
+    for (const id of GOOD_IDS) {
+      expect(`${id} → ${JSON.stringify(seg.snapshot[id])}`).toBe(`${id} → {"rate":900,"billMin":120,"amount":1800}`);
+    }
+  });
+});
+
 // DC-001: PUT /api/state used to be last-write-wins. A `version` in the body makes
 // the write conditional. These run last — they replace the catalog wholesale.
 // SDD-002 ruling 7 (PLAN-006): a wholesale replace may no longer DROP a referenced

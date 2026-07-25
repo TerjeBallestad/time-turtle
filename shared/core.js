@@ -520,13 +520,25 @@ TT.serializeMd = function (state) {
   // header followed by one indented `  - <entryId> | <rate> | <billMin> | <amount>` row
   // per frozen entry (the snapshot); an absent section parses back to `commits: []`.
   //
-  // SB-041: this section is deliberately NOT routed through encodeCell/decodeCell — every
-  // field in it is machine-generated (segment keys from TT.segmentKey, ISO timestamps,
-  // entry ids, numbers), so no user content reaches it and emit-when-needed would be a
-  // no-op. Both sides agree: nothing is escaped and nothing is unescaped. The consequence,
-  // unchanged from before SB-041 and NOT introduced by it: an entry id that itself
-  // contains a `|` still splits the snapshot row (tracked separately). SB-055 must not
-  // assume the escaping is universal across sections.
+  // ESCAPING EXEMPTION — READ THIS BEFORE ADDING A SECTION (SB-041, ruled again in SB-070).
+  // This section is deliberately NOT routed through encodeCell/decodeCell. Every field in it
+  // is machine-generated (segment keys from TT.segmentKey, ISO timestamps, entry ids,
+  // numbers), so no user content reaches it and emit-when-needed would be a no-op. Both
+  // sides agree: nothing is escaped here and nothing is unescaped.
+  //
+  // THE ESCAPING IS THEREFORE NOT UNIVERSAL ACROSS SECTIONS. `## clients` / `## projects` /
+  // `## tasks` / the date sections escape; `## commits` does not. SB-055 (and anything else
+  // adding a section or a field here) must not assume otherwise: put a `|` in a field this
+  // section emits raw and it splits its own row. An entry id `a|b` emits
+  // `  - a|b | 1250 | 60 | 100`, which parses back to snapshot key `a` with rate NaN —
+  // committed money silently rewritten on a mirror restore.
+  //
+  // SB-070 ruling (Terje, option 1): the hole is closed at the SOURCE, not here. The server
+  // charset-validates entry ids at the API boundary (`entryIdError` in server/src/index.js,
+  // `[A-Za-z0-9._-]`), so no `|` can reach this serializer through a PUT. Routing the section
+  // through encodeCell was considered and REJECTED — it escapes fields that never need it and
+  // leaves the hostile-input path itself open. Do not "fix" this by adding escaping here
+  // without re-opening that ruling; the golden mirrors depend on these bytes.
   const commits = state.commits;
   if (commits && commits.length) {
     lines.push('', '## commits');

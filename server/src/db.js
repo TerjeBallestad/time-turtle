@@ -335,6 +335,9 @@ export function getAllEntries(from, to) {
     );
   return rows.map((entry) => ({ ...entry, billable: !!entry.billable }));
 }
+// SB-070: entry ids are charset-validated at the API boundary (`entryIdError`, server/src/
+// index.js) because they reach the mirror's unescaped `## commits` section. This layer stays
+// a dumb writer — String(entry.id) — so any NEW write path must run that guard itself.
 /** @param {number} userId @param {Entry[]} entries */
 export function putEntries(userId, entries) {
   db.prepare('DELETE FROM entries WHERE user_id = ?').run(userId);
