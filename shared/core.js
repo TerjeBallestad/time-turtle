@@ -539,6 +539,14 @@ TT.serializeMd = function (state) {
   // through encodeCell was considered and REJECTED — it escapes fields that never need it and
   // leaves the hostile-input path itself open. Do not "fix" this by adding escaping here
   // without re-opening that ruling; the golden mirrors depend on these bytes.
+  //
+  // SB-074 closed the other half the same way. The SEGMENT KEY is worse than an entry id — an id
+  // is machine-minted by nid(), but the key comes verbatim from the request body, and a `|` in it
+  // splits the segment HEADER (`- <key> | <committedAt>`), manufacturing two segments with one key
+  // so commitSnapshot's first-match-wins returns the wrong (empty) one. `commitLedgerError` in
+  // server/src/index.js now rejects it, plus a non-ISO `committedAt` and a repeated key. The key
+  // check is DERIVED from TT.segmentKey (a key is valid iff some real date produces it), so the
+  // grammar above stays its one home — do not copy it into a regex somewhere else.
   const commits = state.commits;
   if (commits && commits.length) {
     lines.push('', '## commits');

@@ -168,6 +168,103 @@ function entryIdError(entries) {
 }
 
 /**
+ * SB-074: the commit SEGMENT KEY is the other caller-supplied string that reaches the mirror's
+ * unescaped `## commits` section — and unlike an entry id (machine-minted by `nid()`) it is taken
+ * verbatim from the request body. A key holding a `|` splits its own segment HEADER:
+ * `- 2026-W30-2026-07|x | <ts>` parses back as key `2026-W30-2026-07` with committedAt `x`, so two
+ * segments now share one key and `TT.commitSnapshot` (`commits.find(...)`, shared/core.js) takes
+ * the first — the empty one. Committed money silently vanishes on a mirror restore. Same class as
+ * SB-070, same fix shape: reject at the API boundary, before anything writes.
+ *
+ * DERIVED, NOT RE-DECLARED. `TT.segmentKey` stays the one home of the grammar: a key is valid iff
+ * some REAL calendar date actually produces it. The `\d{4}-\d{2}` scan is only a candidate-month
+ * generator (every `TT.segmentKey` output ends in the date's `YYYY-MM`); the verdict is always the
+ * `TT.segmentKey(date) === key` comparison against live output. So this cannot silently drift if
+ * the grammar changes — it would start over-rejecting LOUDLY, and the "accepts real segment keys"
+ * test is the alarm. Being an exact-output check it also rejects well-formed-but-nonsense keys
+ * (`2026-W99-2026-07`, or a week that never touches the month it names).
+ * @param {unknown} key @returns {boolean}
+ */
+function isSegmentKey(key) {
+  // The length cap is a bound on the candidate scan below (a hostile 10KB key would otherwise
+  // cost thousands of probes). It is NOT a claim about the grammar — real keys are ~16 chars.
+  if (typeof key !== 'string' || !key || key.length > 64) return false;
+  for (const match of key.matchAll(/\d{4}-\d{2}/g)) {
+    const month = match[0];
+    for (let day = 1; day <= 31; day++) {
+      const date = month + '-' + String(day).padStart(2, '0');
+      if (TT.dateStr(TT.parseDate(date)) !== date) continue; // not a real day of that month
+      if (TT.segmentKey(date) === key) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * SB-074: `committedAt` rides the same header, emitted raw and POSITIONALLY
+ * (`'- ' + seg.key + ' | ' + seg.committedAt`), so a `|` in it forges extra header columns —
+ * and the columns after it are the labeled `approved:` / `released:` lock tokens.
+ *
+ * HONESTY NOTE (measured, see SB-074): this is defence in depth, not a live hole.
+ * `reconcileCommits` never trusts a client `committedAt` — a new key is server-stamped and a
+ * known key keeps the STORED segment verbatim — so today nothing hostile in this field can reach
+ * the store. The guard exists so a future refactor that starts honouring the body cannot quietly
+ * re-open the header split.
+ *
+ * Derived from the emitter, not hand-written: both the server (`new Date().toISOString()`) and the
+ * client (`commitSegment` in App.tsx) emit a canonical ISO instant, and a value is accepted iff it
+ * survives that exact round-trip. Deliberately NOT SB-070's `[A-Za-z0-9._-]` charset — an ISO
+ * timestamp contains `:`, so reusing it would reject every legitimate commit. An ABSENT
+ * committedAt is fine (the client may PUT a bare `{ key }`); the server stamps it.
+ * @param {unknown} value @returns {boolean}
+ */
+function isIsoInstant(value) {
+  if (typeof value !== 'string') return false;
+  const ms = Date.parse(value);
+  return Number.isFinite(ms) && new Date(ms).toISOString() === value;
+}
+
+/**
+ * SB-074: the first structurally invalid thing in an incoming commit ledger, as an error message,
+ * or null when it is clean. Three checks, all rejection (SB-070/SB-072 precedent: rejection lives
+ * at the API boundary because it can return an error; silent normalization lives in db.js).
+ *
+ * The duplicate check is the third: two segments sharing one key is nonsense however it arose, and
+ * a duplicate is what `TT.commitSnapshot`'s first-match-wins actually chokes on. HONESTY NOTE
+ * (measured): like committedAt this is defence in depth — `reconcileCommits` already dedupes
+ * incoming keys first-seen-wins, so a duplicate cannot reach the store today either. The
+ * duplicates that lose money are the ones MANUFACTURED downstream by a split header, which is what
+ * the key check above prevents. Rejecting here makes the invariant explicit instead of implicit in
+ * a dedupe loop.
+ * @param {any[]} commits @returns {string | null}
+ */
+function commitLedgerError(commits) {
+  const seen = new Set();
+  for (const segment of commits) {
+    const key = segment == null ? undefined : segment.key;
+    if (!isSegmentKey(key))
+      return (
+        'invalid commit segment key ' +
+        JSON.stringify(key === undefined ? null : key) +
+        ': a segment key must be one TT.segmentKey produces, e.g. "2026-W30-2026-07"'
+      );
+    if (seen.has(key))
+      return 'duplicate commit segment key ' + JSON.stringify(key) + ': a segment may appear only once';
+    seen.add(key);
+    const at = segment.committedAt;
+    if (at != null && !isIsoInstant(at))
+      return (
+        'invalid committedAt ' +
+        JSON.stringify(at) +
+        ' on segment ' +
+        JSON.stringify(key) +
+        ': committedAt must be an ISO timestamp'
+      );
+  }
+  return null;
+}
+
+/**
  * SDD-002 ruling 7 (PLAN-006): the never-referenced true-delete guard, mapped to 409.
  * Archive is the default path; a HARD delete is a code/id ABSENT from the collection-
  * replace PUT (there is no DELETE route). The server allows a hard delete only when the
@@ -401,6 +498,13 @@ app.put('/api/state', requireUser, (req, res) => {
   if (body.entries !== undefined) {
     const badId = entryIdError(body.entries);
     if (badId) return res.status(400).json({ error: badId });
+  }
+  // SB-074: same deal for the commit ledger — shape-check every segment key against what
+  // TT.segmentKey actually produces, check committedAt is an ISO instant, and refuse a repeated
+  // key. Runs BEFORE reconcileCommits (and every other helper) so a rejected PUT writes nothing.
+  if (body.commits !== undefined) {
+    const badCommit = commitLedgerError(body.commits);
+    if (badCommit) return res.status(400).json({ error: badCommit });
   }
   // DC-002: with TT_MD_DIR_LOCK set the mirror path is env-only. Compare against the
   // stored value rather than rejecting the key outright — the client PUTs the whole
