@@ -179,6 +179,41 @@ export interface AppState extends Catalog {
   mdDirLocked?: boolean;
 }
 
+// ---- vault block (SB-055 / SB-045) ----
+/**
+ * The locator refused. `reason` is a stable code SB-057's boot scan can record and
+ * surface: 'no-heading' | 'multiple-headings' | 'no-revision' |
+ * 'revision-past-next-heading' | 'multiple-revisions' | 'no-table' |
+ * 'unexpected-content-in-block', plus the parser's row/header reasons.
+ * A quarantined block is NEVER written — quarantine, never guess.
+ */
+export interface VaultQuarantine {
+  quarantine: true;
+  reason: string;
+}
+
+/**
+ * A located vault block. All fields are 0-based LINE indices into `md.split('\n')`;
+ * `start`..`end` (the `## <heading>` line through the `` `revision: N` `` line,
+ * inclusive) is the only region TT may rewrite — everything outside it is Terje's.
+ * `totalsLine` is -1 when the generated totals row is absent.
+ */
+export interface VaultBlockRegion {
+  quarantine: false;
+  /** the heading name actually matched (from opts, defaulting to `Time Log`) */
+  heading: string;
+  start: number;
+  end: number;
+  headerLine: number;
+  separatorLine: number;
+  rowLines: number[];
+  totalsLine: number;
+  revisionLine: number;
+  revision: number;
+}
+
+export type VaultBlockLocation = VaultBlockRegion | VaultQuarantine;
+
 // ---- parsed time cell (discriminated union) ----
 export type ParsedTime =
   | { kind: 'range'; start: number; end: number }
@@ -368,6 +403,13 @@ export interface TTModule {
   // survive as content. Composes on top of encodeCell; consumed by SB-055.
   encodeTaskCell(v: { label?: string; note?: string }): string;
   decodeTaskCell(cell: string): { label: string; note: string };
+  /**
+   * SB-055: locate the vault block between its two anchors — the `## <heading>` line
+   * (name from `opts.heading`, default `Time Log`) and the `` `revision: N` `` line —
+   * or return a quarantine verdict. Never throws, and never returns a region it is
+   * unsure of: this is what stops a write from running into the rest of the note.
+   */
+  locateVaultBlock(md: string, opts?: { heading?: string }): VaultBlockLocation;
   serializeMd(state: Catalog): string;
   newId(): string;
   parseMd(md: string): Catalog;

@@ -713,3 +713,187 @@ describe('vault Task-cell codec (SB-045)', () => {
     );
   });
 });
+
+// ---- SB-055 / PLAN-009 task 2: locate the block, or refuse ----
+// The safety half of the format, and the reason it is proven BEFORE anything parses a row:
+// this function is what stands between a malformed daily note and TT overwriting Terje's
+// Intentions, Habits, Captures and Reflection.
+//
+// So most of what is below is REFUSALS. A suite that fed only well-formed notes would prove
+// the opposite of what this task claims. Note also what is NOT asserted anywhere: that a bad
+// note makes the locator throw. A throw is not a quarantine — SB-057's boot scan needs a
+// verdict it can record and surface, so every malformed case returns `{quarantine, reason}`.
+// ## Verified red-green: 2026-07-25
+describe('vault block locator (SB-055)', () => {
+  /** A realistic daily note: TT's block sits between sections that are Terje's. */
+  const HOST_NOTE = [
+    '# 2026-01-05',
+    '',
+    '## Intentions',
+    '',
+    '- ship the block format',
+    '',
+    '## Time Log',
+    '',
+    '| Time | Mode | Project | Task | Bill |',
+    '|---|---|---|---|---|',
+    '| 09:00→09:15 | #admin | [[Planning]] | Daily planning ritual | |',
+    '| 11:00→12:45 | #deep | FAG | Search & facets<br>- Narrow the facet query | ✓ |',
+    '| **2h** | | | | **1.75h billable** |',
+    '',
+    '`revision: 8`',
+    '',
+    '## Captures',
+    '',
+    '- something Terje wrote',
+    '',
+  ].join('\n');
+
+  /** @param {string} md @param {string} needle */
+  const lineOf = (md, needle) => md.split('\n').indexOf(needle);
+
+  it('locates the region and reads the revision', () => {
+    const loc = TT.locateVaultBlock(HOST_NOTE);
+    expect(loc.quarantine).toBe(false);
+    expect(loc.revision).toBe(8);
+    expect(loc.start).toBe(lineOf(HOST_NOTE, '## Time Log'));
+    expect(loc.end).toBe(lineOf(HOST_NOTE, '`revision: 8`'));
+    expect(loc.headerLine).toBe(lineOf(HOST_NOTE, '| Time | Mode | Project | Task | Bill |'));
+    expect(loc.separatorLine).toBe(loc.headerLine + 1);
+    expect(loc.rowLines).toEqual([loc.headerLine + 2, loc.headerLine + 3, loc.headerLine + 4]);
+    expect(loc.totalsLine).toBe(loc.headerLine + 4); // the LAST row, first cell bold
+  });
+
+  it('the heading name is a PARAMETER, not a hardcoded string', () => {
+    const renamed = HOST_NOTE.replace('## Time Log', '## Timeloggen');
+    expect(TT.locateVaultBlock(renamed, { heading: 'Timeloggen' }).quarantine).toBe(false);
+    // …and the default no longer finds anything in that note, which is what proves it
+    expect(TT.locateVaultBlock(renamed)).toEqual({ quarantine: true, reason: 'no-heading' });
+    // symmetrically, a non-default heading does not match the default note
+    expect(TT.locateVaultBlock(HOST_NOTE, { heading: 'Timeloggen' }).quarantine).toBe(true);
+  });
+
+  // ---- the refusals ----
+  const REFUSALS = [
+    {
+      name: 'no heading at all',
+      reason: 'no-heading',
+      md: ['# 2026-01-05', '', '## Captures', '', '- nothing to see', ''].join('\n'),
+    },
+    {
+      name: 'heading present, no revision line before the hard stop',
+      reason: 'no-revision',
+      md: HOST_NOTE.replace('`revision: 8`\n', ''),
+    },
+    {
+      name: 'a revision line that exists only PAST the hard stop',
+      reason: 'revision-past-next-heading',
+      // the bottom anchor is gone from the block and reappears under `## Captures` —
+      // exactly the shape that would let a write run into Terje's section
+      md: HOST_NOTE.replace('`revision: 8`\n', '').replace('- something Terje wrote', '`revision: 8`'),
+    },
+    {
+      name: 'a `###` sub-heading between the table and the revision line',
+      reason: 'revision-past-next-heading',
+      md: HOST_NOTE.replace('`revision: 8`', '### Notes\n\n`revision: 8`'),
+    },
+    {
+      name: 'more than one anchor heading in the file',
+      reason: 'multiple-headings',
+      md: HOST_NOTE + '\n## Time Log\n\n| Time |\n|---|\n\n`revision: 2`\n',
+    },
+    {
+      name: 'the heading is the last line of the file',
+      reason: 'no-revision',
+      md: '# 2026-01-05\n\n## Time Log',
+    },
+    {
+      name: 'two revision lines inside one block',
+      reason: 'multiple-revisions',
+      md: HOST_NOTE.replace('`revision: 8`', '`revision: 8`\n\n`revision: 9`'),
+    },
+    {
+      name: 'the table is missing entirely',
+      reason: 'no-table',
+      md: '# 2026-01-05\n\n## Time Log\n\n`revision: 8`\n\n## Captures\n',
+    },
+    {
+      name: 'a header row with no `|---|` delimiter row under it',
+      reason: 'no-table',
+      md: HOST_NOTE.replace('|---|---|---|---|---|\n', ''),
+    },
+    {
+      name: 'prose between the heading and the table',
+      reason: 'no-table',
+      md: HOST_NOTE.replace('## Time Log\n', '## Time Log\n\nsome prose a hand edit left here\n'),
+    },
+    {
+      name: 'stray content between the table and the revision line',
+      reason: 'unexpected-content-in-block',
+      md: HOST_NOTE.replace('`revision: 8`', 'a stray line\n\n`revision: 8`'),
+    },
+  ];
+
+  for (const { name, reason, md } of REFUSALS) {
+    it(`quarantines: ${name}`, () => {
+      const loc = TT.locateVaultBlock(md);
+      expect(loc).toEqual({ quarantine: true, reason });
+    });
+  }
+
+  // ---- near-misses on the bottom anchor: backticks are LITERAL SYNTAX (SB-045) ----
+  const NEAR_MISSES = [
+    'revision: 8', // bare — no backticks
+    '`revision:8`', // no space
+    '`revision: eight`', // not a number
+    '`revision: 8', // unterminated
+    '`Revision: 8`', // wrong case
+    '  `revision: 8`', // indented (this is the code-fence shape)
+    '`revision: 8` and more text', // not the whole line
+    '``revision: 8``', // a double-backtick span
+  ];
+  for (const anchor of NEAR_MISSES) {
+    it(`does NOT accept ${JSON.stringify(anchor)} as the bottom anchor`, () => {
+      const md = HOST_NOTE.replace('`revision: 8`', anchor);
+      const loc = TT.locateVaultBlock(md);
+      expect(loc.quarantine).toBe(true);
+      expect(loc.revision).toBeUndefined();
+    });
+  }
+
+  it('a fenced example of the block format is inert — neither anchor nor hard stop', () => {
+    const doc = ['# doc', '', '## Format', '', '```markdown', '## Time Log', '', '`revision: 3`', '```', ''].join('\n');
+    expect(TT.locateVaultBlock(doc)).toEqual({ quarantine: true, reason: 'no-heading' });
+    // and a fenced copy alongside a real block does not make it "multiple headings"
+    const both = doc + '\n' + HOST_NOTE;
+    const loc = TT.locateVaultBlock(both);
+    expect(loc.quarantine).toBe(false);
+    expect(loc.revision).toBe(8);
+  });
+
+  it('a zero-row table (header + delimiter only) is still a located region', () => {
+    const md = ['## Time Log', '', '| Time | Task |', '|---|---|', '', '`revision: 1`', ''].join('\n');
+    const loc = TT.locateVaultBlock(md);
+    expect(loc.quarantine).toBe(false);
+    expect(loc.rowLines).toEqual([]);
+    expect(loc.totalsLine).toBe(-1);
+  });
+
+  it('an entry row is never mistaken for the generated totals row', () => {
+    // the totals rule is "last row AND first cell bold" — an entry's Time cell is never bold
+    const md = HOST_NOTE.replace('| **2h** | | | | **1.75h billable** |\n', '');
+    const loc = TT.locateVaultBlock(md);
+    expect(loc.quarantine).toBe(false);
+    expect(loc.rowLines).toHaveLength(2);
+    expect(loc.totalsLine).toBe(-1); // no bold last row → no totals row, not "the last entry"
+  });
+
+  it('returns a verdict — never throws — for junk input of any shape', () => {
+    for (const junk of [null, undefined, '', '\n\n\n', 42, {}, [], '## Time Log'.repeat(500), ' �|||']) {
+      // @ts-expect-error — deliberately hostile input: the boot scan must survive it
+      const loc = TT.locateVaultBlock(junk);
+      expect(loc.quarantine).toBe(true);
+      expect(typeof loc.reason).toBe('string');
+    }
+  });
+});

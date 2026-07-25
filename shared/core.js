@@ -458,6 +458,167 @@ TT.decodeTaskCell = function (cell) {
   if (only.startsWith('- ')) return { label: '', note: TT.decodeCell(stripNotePrefix(only)) };
   return { label: TT.decodeCell(only), note: '' };
 };
+
+// ---- vault block region (SB-055) ----
+// This is the thing standing between a malformed daily note and TT overwriting Terje's
+// Intentions, Habits, Captures and Reflection. It locates the block or REFUSES; it never
+// throws, and it never hands back a region it is unsure of. Everything downstream — the
+// parser (parseVaultBlock) and the writer (writeVaultBlock) — goes through it first.
+//
+// TWO ANCHORS, both mandatory (SB-045 final ruling):
+//   • TOP: a `## <heading>` line. The name is `opts.heading`, defaulting to `Time Log`,
+//     and is NEVER baked into a regex — SB-045 consequence 1 puts it in settings, and
+//     `Settings` has no `vaultPaths` field yet, so SB-056/SB-058 must be able to feed it
+//     in without touching this function. Matched at `##` level on the trimmed heading TEXT.
+//   • BOTTOM: a line that is EXACTLY the inline-code span `` `revision: N` `` — the
+//     backticks are literal syntax (SB-045's correction). A bare `revision: 8`, a
+//     `revision:8` with no space, a non-numeric N and an indented copy all fail to match.
+//
+// THE HARD STOP. The forward scan from the heading stops at the next ATX heading line of
+// ANY level (`#`…`######`). SB-045 names `##`; stopping at `#` too is strictly safer and
+// costs nothing (an H1 is a note title, never inside a Time Log section). A revision line
+// found only PAST that stop is not this block's anchor — the block quarantines rather than
+// letting a missing bottom anchor run a write into `## Captures`.
+//
+// CODE FENCES. Lines inside a ``` / ~~~ fence are inert: they can neither be an anchor nor
+// the hard stop. Without this a fenced example of the block format would be read as the
+// real thing — and a fenced revision line is the dangerous direction, since it would name
+// a bottom anchor in the middle of prose.
+//
+// SHAPE OF THE REGION. Between the anchors TT owns everything, so the shape is pinned
+// tightly: the first non-blank line after the heading MUST be the table header row, the
+// next line MUST be the `|---|` delimiter row, data rows run contiguously after it, and
+// between the table and the revision line only blank lines are allowed. Anything else is a
+// hand edit TT cannot account for, and it quarantines instead of splicing over it.
+const VAULT_HEADING = 'Time Log';
+const REVISION_RE = /^`revision: (\d+)`$/;
+/** @param {string} reason @returns {{ quarantine: true, reason: string }} */
+const vaultQuarantine = (reason) => ({ quarantine: true, reason });
+/** @param {string} line @returns {boolean} */
+const isTableRow = (line) => line.trim().startsWith('|');
+/** `|---|---|` (alignment colons allowed) — the row that makes the line above it a header. */
+/** @param {string} line @returns {boolean} */
+const isDelimiterRow = (line) => /^\s*\|(?:\s*:?-+:?\s*\|)+\s*$/.test(line);
+/**
+ * Split a `| a | b |` table line into its trimmed, STILL-ESCAPED cells. The outer pipes are
+ * table syntax, not delimiters; an escaped trailing `\|` is content and stays.
+ * @param {string} line @returns {string[]}
+ */
+function vaultRowCells(line) {
+  let s = line.trim();
+  if (s.startsWith('|')) s = s.slice(1);
+  if (s.endsWith('|') && !isEscapedAt(s, s.length - 1)) s = s.slice(0, -1);
+  return TT.splitCells(s);
+}
+// The generated totals row (SB-045: always present, never round-tripped as an entry).
+// DETECTION RULE, pinned: it is the LAST table row of the block AND its first cell is bold
+// (`**8.7h**`). Both halves are needed — an entry's Time cell is never bold, so no entry row
+// can be mistaken for it, and a bold cell higher up the table is not the totals row.
+/** @param {string} line @returns {boolean} */
+const isTotalsRow = (line) => /^\*\*.*\*\*$/.test(vaultRowCells(line)[0] || '');
+/**
+ * Which lines are inside a fenced code block. Toggled by a ``` or ~~~ run at the start of a
+ * line (up to 3 spaces of indent, the CommonMark allowance). The fence line itself counts as
+ * inert too, so a fence opener can never be an anchor.
+ * @param {string[]} lines @returns {boolean[]}
+ */
+function markFences(lines) {
+  const out = new Array(lines.length).fill(false);
+  let open = false;
+  for (let i = 0; i < lines.length; i++) {
+    if (/^ {0,3}(?:`{3,}|~{3,})/.test(lines[i])) {
+      out[i] = true;
+      open = !open;
+      continue;
+    }
+    out[i] = open;
+  }
+  return out;
+}
+/**
+ * Locate the vault block in a note, or refuse. Never throws.
+ * @param {string} md @param {{ heading?: string }} [opts]
+ * @returns {import('./types.ts').VaultBlockLocation}
+ */
+TT.locateVaultBlock = function (md, opts) {
+  const heading = ((opts && opts.heading) || VAULT_HEADING).trim();
+  const lines = String(md == null ? '' : md).split('\n');
+  const fenced = markFences(lines);
+
+  // 1. the top anchor — the heading TEXT compared exactly, never interpolated into a regex
+  /** @type {number[]} */
+  const anchors = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (fenced[i]) continue;
+    const m = /^##[ \t]+(.*)$/.exec(lines[i]);
+    if (m && m[1].trim() === heading) anchors.push(i);
+  }
+  if (!anchors.length) return vaultQuarantine('no-heading');
+  // two blocks with one name: nothing can say which is the day's, so neither is writable
+  if (anchors.length > 1) return vaultQuarantine('multiple-headings');
+  const start = anchors[0];
+
+  // 2. the hard stop — the next heading of any level ends the region, full stop
+  let stop = lines.length;
+  for (let i = start + 1; i < lines.length; i++) {
+    if (fenced[i]) continue;
+    if (/^#{1,6}[ \t]/.test(lines[i])) {
+      stop = i;
+      break;
+    }
+  }
+
+  // 3. the bottom anchor, which must sit BEFORE the hard stop
+  /** @type {number[]} */
+  const revLines = [];
+  for (let i = start + 1; i < stop; i++) {
+    if (!fenced[i] && REVISION_RE.test(lines[i])) revLines.push(i);
+  }
+  if (!revLines.length) {
+    // name the dangerous case precisely: the anchor exists, but only in someone else's section
+    for (let i = stop; i < lines.length; i++) {
+      if (!fenced[i] && REVISION_RE.test(lines[i])) return vaultQuarantine('revision-past-next-heading');
+    }
+    return vaultQuarantine('no-revision');
+  }
+  if (revLines.length > 1) return vaultQuarantine('multiple-revisions');
+  const revisionLine = revLines[0];
+  const revision = +REVISION_RE.exec(lines[revisionLine])[1];
+
+  // 4. the table: header row, delimiter row, then contiguous data rows
+  let headerLine = -1;
+  for (let i = start + 1; i < revisionLine; i++) {
+    if (lines[i].trim() === '') continue;
+    headerLine = isTableRow(lines[i]) ? i : -1;
+    break;
+  }
+  const separatorLine = headerLine + 1;
+  if (headerLine < 0 || separatorLine >= revisionLine || !isDelimiterRow(lines[separatorLine])) {
+    return vaultQuarantine('no-table');
+  }
+  /** @type {number[]} */
+  const rowLines = [];
+  let i = separatorLine + 1;
+  for (; i < revisionLine && isTableRow(lines[i]); i++) rowLines.push(i);
+  for (let j = i; j < revisionLine; j++) {
+    if (lines[j].trim() !== '') return vaultQuarantine('unexpected-content-in-block');
+  }
+
+  return {
+    quarantine: false,
+    heading,
+    start,
+    end: revisionLine, // inclusive — the splice in writeVaultBlock replaces start..end
+    headerLine,
+    separatorLine,
+    rowLines,
+    totalsLine:
+      rowLines.length && isTotalsRow(lines[rowLines[rowLines.length - 1]]) ? rowLines[rowLines.length - 1] : -1,
+    revisionLine,
+    revision,
+  };
+};
+
 TT.serializeMd = function (state) {
   const lines = [
     '# timesheet',
