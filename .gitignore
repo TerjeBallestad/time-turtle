@@ -8,8 +8,14 @@ server/data/
 .pm/
 pm.config.json
 
-# agent config kept locally, untracked here
-.claude/
+# agent skills and commands ARE tracked — they document how this project is worked,
+# and untracked meant an agent could silently degrade a protocol with no diff to revert.
+# Local/machine state stays out.
+.claude/*
+!.claude/skills/
+!.claude/commands/
+.claude/worktrees/
+.claude/settings.local.json
 
 # stripped from public tree per DD-005 (kept locally, untracked)
 design-import/
