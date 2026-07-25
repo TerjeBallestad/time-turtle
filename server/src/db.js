@@ -205,13 +205,23 @@ function replaceAll(table, rows, insert) {
   db.exec(`DELETE FROM ${table}`);
   for (const row of rows) insert(row);
 }
-/** @param {Client[]} clients */
+/**
+ * SB-072: `name` is trimmed here, not at the API boundary. The mirror parser splits a row on
+ * `|` and trims every cell (`splitCells` → `splitUnescaped(s, '|', true)`, shared/core.js), so
+ * it cannot tell format padding from typed content and a stored `'  Acme  '` comes back
+ * `'Acme'`. Terje's re-ruling: make the data fit the format rather than escape the edges —
+ * normalize on the way in so the DB never holds a value the mirror cannot round-trip. It lives
+ * at this layer, on the `String(name).trim()` precedent in createUser below, because a
+ * client-side trim is bypassable by any direct PUT and so cannot support a data-integrity
+ * claim. Same `.trim()` the parser uses, so the two agree exactly; interior whitespace, which
+ * the format DOES carry, is untouched.
+ * @param {Client[]} clients */
 export function putClients(clients) {
   const insert = db.prepare('INSERT INTO clients (id, name, rounding, rate, archived) VALUES (?, ?, ?, ?, ?)');
   replaceAll('clients', clients, (client) =>
     insert.run(
       String(client.id),
-      String(client.name),
+      String(client.name).trim(),
       String(client.rounding ?? 'exact'),
       client.rate == null ? null : +client.rate,
       client.archived ? 1 : 0,
@@ -338,6 +348,13 @@ export function getAllEntries(from, to) {
 // SB-070: entry ids are charset-validated at the API boundary (`entryIdError`, server/src/
 // index.js) because they reach the mirror's unescaped `## commits` section. This layer stays
 // a dumb writer — String(entry.id) — so any NEW write path must run that guard itself.
+//
+// SB-072: `note` is the exception — it is NORMALIZED here rather than rejected, because the
+// mirror parser trims every cell it splits out and so silently eats a note's leading/trailing
+// whitespace on a restore. Trimming on the way in keeps the DB inside what the format can
+// represent; see the putClients comment for the full ruling. Normalization sits at this layer
+// (all write paths, including the admin cross-user one and the demo seed) while rejection sits
+// at the API boundary, where it can return an error. Interior whitespace is untouched.
 /** @param {number} userId @param {Entry[]} entries */
 export function putEntries(userId, entries) {
   db.prepare('DELETE FROM entries WHERE user_id = ?').run(userId);
@@ -355,7 +372,7 @@ export function putEntries(userId, entries) {
       entry.durMin == null ? null : +entry.durMin,
       entry.project == null ? null : String(entry.project),
       String(entry.label ?? ''),
-      String(entry.note ?? ''),
+      String(entry.note ?? '').trim(),
       entry.billable ? 1 : 0,
       entry.editedByAdmin ? 1 : 0,
     );

@@ -1616,6 +1616,135 @@ describe('SB-070 entry-id charset guard', () => {
   });
 });
 
+// SB-072: the mirror parser splits a row on `|` and trims every cell it produces
+// (`splitUnescaped(s, '|', true)`, shared/core.js), so it cannot tell format padding from typed
+// content — a stored note `'trailing space '` came back `'trailing space'` on a mirror restore,
+// and Settings → Markdown backend makes that restore a one-action UI path. Terje's re-ruling:
+// make the DATA fit the format instead of escaping the edges — trim `entry.note` and
+// `client.name` on the way in, server-side, so the DB never holds a value the mirror cannot
+// round-trip. Server-side is the point: the claim is a data-integrity guarantee, and a
+// client-side trim is bypassable by exactly the raw PUTs below.
+//
+// Proven at the api rung — every assertion below reads what the server STORED (a fresh GET, or
+// the mirror bytes the server itself wrote to disk), never the payload that was sent. The
+// interior-whitespace control is load-bearing: `'a  b'` is what a careless trim/collapse breaks,
+// and the format genuinely carries it.
+//
+// ## Verified red-green: 2026-07-25
+// break — drop `.trim()` from String(entry.note ?? '') and String(client.name) in
+//   server/src/db.js putEntries/putClients → 'stores entry.note trimmed', 'stores client.name
+//   trimmed', both round-trip tests and the mirror-on-disk test fail (4 of 5 in this block; the
+//   interior-whitespace control stays green, as it must).
+describe('SB-072 edge whitespace is trimmed at the write edge', () => {
+  const admin = session();
+  const emp = session();
+  const DATE = '2026-09-14';
+  // id → [what is PUT, what must be STORED]. The last two are the control: interior
+  // whitespace is representable in the mirror and must survive untouched.
+  const NOTES = {
+    'sb72-lead': [' leading', 'leading'],
+    'sb72-trail': ['trailing space ', 'trailing space'],
+    'sb72-both': ['  padded  ', 'padded'],
+    'sb72-tabnl': ['\t\n mixed \n\t', 'mixed'],
+    'sb72-blank': ['   ', ''],
+    'sb72-interior': ['a  b', 'a  b'],
+    'sb72-interior-edge': [' a  b ', 'a  b'],
+  };
+  const CLIENT_PAD = 'SB72-PAD';
+  const CLIENT_INTERIOR = 'SB72-INT';
+  const entry = (id, note) => ({
+    id,
+    date: DATE,
+    start: 540,
+    end: 660,
+    durMin: null,
+    project: null,
+    label: 'sb72 work',
+    note,
+    billable: false,
+  });
+  const stored = async () => (await emp('GET', '/api/state')).json;
+
+  beforeAll(async () => {
+    await admin('POST', '/api/auth/login', { email: 'admin@timeturtle.local', password: 'testpw' });
+    await admin('POST', '/api/users', {
+      email: 'sb72@timeturtle.local',
+      name: 'Seven Two',
+      role: 'employee',
+      password: 'sb72pw',
+    });
+    await emp('POST', '/api/auth/login', { email: 'sb72@timeturtle.local', password: 'sb72pw' });
+    // Raw PUTs — no client code runs in this test, which is the whole point of proving the
+    // guarantee here rather than in the UI. Existing clients are carried forward (ruling 7).
+    const st = await admin('GET', '/api/state');
+    const put = await admin('PUT', '/api/state', {
+      clients: [
+        ...st.json.clients,
+        { id: CLIENT_PAD, name: '  Padded Client  ', rounding: 'exact', rate: null },
+        { id: CLIENT_INTERIOR, name: 'Two  Spaces', rounding: 'exact', rate: null },
+      ],
+    });
+    expect(put.status).toBe(200);
+    const entries = await emp('PUT', '/api/state', {
+      entries: Object.entries(NOTES).map(([id, [sent]]) => entry(id, sent)),
+    });
+    expect(entries.status).toBe(200);
+  });
+
+  it('stores entry.note trimmed — the GET reflects the DB, not the payload', async () => {
+    const byId = Object.fromEntries((await stored()).entries.map((e) => [e.id, e.note]));
+    for (const [id, [sent, want]] of Object.entries(NOTES)) {
+      expect(`${id} ${JSON.stringify(sent)} → ${JSON.stringify(byId[id])}`).toBe(
+        `${id} ${JSON.stringify(sent)} → ${JSON.stringify(want)}`,
+      );
+    }
+  });
+
+  it('stores client.name trimmed, and leaves interior whitespace alone', async () => {
+    const byId = Object.fromEntries((await stored()).clients.map((c) => [c.id, c.name]));
+    expect(byId[CLIENT_PAD]).toBe('Padded Client');
+    expect(byId[CLIENT_INTERIOR]).toBe('Two  Spaces');
+  });
+
+  it('an interior-whitespace note is not collapsed or trimmed (the control)', async () => {
+    // This is what a careless trim breaks, and what the mirror format genuinely does carry.
+    const byId = Object.fromEntries((await stored()).entries.map((e) => [e.id, e.note]));
+    expect(byId['sb72-interior']).toBe('a  b');
+    expect(byId['sb72-interior']).not.toBe('a b');
+  });
+
+  // An entry id is NOT carried in a day row (only the `## commits` snapshot keys are), so a
+  // parsed entry gets a fresh id — these compare the notes in file order, which serializeMd
+  // preserves, rather than by id.
+  const notesOn = (state) => state.entries.filter((e) => e.date === DATE).map((e) => e.note);
+  const WANT = Object.values(NOTES).map(([, want]) => want);
+
+  it('serialize→parse of the stored state is now EXACT for every note and both names', async () => {
+    const state = await stored();
+    const back = TT.parseMd(TT.serializeMd(state));
+    // exact means exact: the notes that came out of the DB come back unchanged, in order
+    expect(notesOn(back)).toEqual(notesOn(state));
+    expect([...notesOn(back)].sort()).toEqual([...WANT].sort());
+    const nameById = Object.fromEntries(back.clients.map((c) => [c.id, c.name]));
+    expect(nameById[CLIENT_PAD]).toBe('Padded Client');
+    expect(nameById[CLIENT_INTERIOR]).toBe('Two  Spaces');
+  });
+
+  it('the mirror the server wrote to disk round-trips these values', async () => {
+    // The end-to-end shape of the bug: the file Settings → Markdown backend hands the user,
+    // written by the server itself from the DB. Before the trim, ' leading' went in and
+    // 'leading' came back out of here.
+    const text = readFileSync(join(DATA_DIR, 'markdown', 'timesheet-seven-two.md'), 'utf8');
+    const back = TT.parseMd(text);
+    expect([...notesOn(back)].sort()).toEqual([...WANT].sort());
+    const nameById = Object.fromEntries(back.clients.map((c) => [c.id, c.name]));
+    expect(nameById[CLIENT_PAD]).toBe('Padded Client');
+    expect(nameById[CLIENT_INTERIOR]).toBe('Two  Spaces');
+    // and re-serializing what came off disk is a fixed point — no residual drift
+    expect(TT.serializeMd(back)).toBe(text);
+  });
+});
+
 // DC-001: PUT /api/state used to be last-write-wins. A `version` in the body makes
 // the write conditional. These run last — they replace the catalog wholesale.
 // SDD-002 ruling 7 (PLAN-006): a wholesale replace may no longer DROP a referenced
