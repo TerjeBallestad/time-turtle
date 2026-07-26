@@ -214,6 +214,45 @@ db.seedIfEmpty();
   if (target.shape === 'personal') {
     const at = store.stampVaultCutover();
     console.log(`[time-turtle] vault cutover: ${at} — entries dated before it stay in SQLite (DD-016)`);
+
+    // ---- PLAN-013 / SB-115 / DD-018: what this boot just STRANDED ----
+    //
+    // DD-018 keeps the env path UNGATED on purpose — you cannot ask a boot, and an env var is the
+    // operator's answer — but it owes the same sentences the modal owes, because an env-switched
+    // install is precisely the one where nobody was in the room at the moment of stranding.
+    //
+    // PLACEMENT IS THE WHOLE THING. After the stamp, so the preflight reads the cutover now in
+    // force; before `retireMirrors()` below, so the mirror files are still there to count and so
+    // SB-115's ordering rule — ENTRIES FIRST, FILES LAST — is true where the per-file retirement
+    // lines already print. The `app.listen` banner is deliberately untouched: DD-018's mock is
+    // abbreviated, and the composite `api on … · shape: … · storage: …` line is SB-073's.
+    //
+    // `db.listUsers()[0]` is safe HERE and would not be higher up: `seedIfEmpty()` guarantees a
+    // row and the single-user refusal has already run, so under `personal` there is exactly one.
+    //
+    // TWO console.log CALLS, NOT ONE. The order rule is a claim about separate statements; an
+    // order asserted inside a single call cannot fail and so proves nothing.
+    //
+    // AND IT IS SILENT WHEN THERE IS NOTHING TO SAY. DD-018's "it always appears" is a rule about
+    // the MODAL, which is SB-116's; a boot log that announces zero losses on every start is a boot
+    // log people stop reading.
+    const stranding = shapePreflight(db.listUsers()[0].id, 'personal');
+    const count = /** @type {any} */ (stranding).entries.count;
+    const segments = /** @type {any} */ (stranding).commits.segments;
+    if (count > 0 || segments > 0) {
+      console.log(
+        count === 1
+          ? '[time-turtle]   1 entry dated before it stays in SQLite and never reaches the vault'
+          : `[time-turtle]   ${count} entries dated before it stay in SQLite and never reach the vault`,
+      );
+      const range =
+        count > 0
+          ? `(${/** @type {any} */ (stranding).entries.first} … ${/** @type {any} */ (stranding).entries.last})`
+          : '';
+      const frozen =
+        segments > 0 ? `${segments} commit segment${segments === 1 ? ' freezes' : 's freeze'} with them` : '';
+      console.log('[time-turtle]   ' + [range, frozen].filter(Boolean).join('; '));
+    }
   }
 }
 
@@ -223,7 +262,14 @@ db.seedIfEmpty();
 // looking current until somebody happened to save. Idempotent; runs after seedIfEmpty so
 // listUsers() is populated on a first run, and after the refusal above so a server that is
 // not going to start touches nothing.
-if (!TT.shapeCapabilities(activeShape()).mirror) retireMirrors();
+if (!TT.shapeCapabilities(activeShape()).mirror) {
+  // PLAN-013: the total. `retireMirrors()` has always returned what it renamed and this call site
+  // has always discarded it. It belongs HERE and nowhere else — `retireMirrors` also runs on every
+  // save via `store.mirror`, so a total printed inside it would fire on every keystroke.
+  const retired = retireMirrors();
+  if (retired.length)
+    console.log(`[time-turtle] ${retired.length} mirror file${retired.length === 1 ? '' : 's'} retired in total`);
+}
 
 const app = express();
 app.use(express.json({ limit: '4mb' }));
