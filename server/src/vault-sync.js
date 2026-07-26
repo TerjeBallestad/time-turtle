@@ -1,5 +1,48 @@
 // @ts-check
 //
+// ============================================================================================
+// THE FOUR INVARIANTS (SB-057) — "what keeps a parser bug from eating real hours"
+// ============================================================================================
+// In their CURRENT wording. Two of them have moved since SB-057's body was written, and each is
+// restated here rather than left standing next to code that does something else. Every one is
+// pinned by its own describe block in tests/vault-invariants.test.js.
+//
+// 1. UNREADABLE OR ABSENT → `unknown`, NEVER `empty`. TT never infers a deletion from a file it
+//    could not read.
+//    WHAT SB-052 CHANGED ABOUT THIS: eviction is NOT what this defends against. An evicted file is
+//    readable — via a ~1 s blocking download — so it never presents as absent or unreadable, and
+//    believing this invariant covered it is precisely why nobody would build the timeout. What it
+//    does cover: a genuine partial-sync state, a permissions failure, and an offline read that
+//    times out. Keep the invariant; stop describing it as the eviction defence.
+//
+// 2. AN UNPARSEABLE BLOCK IS QUARANTINED, SURFACED, AND LEFT ALONE — never overwritten.
+//    DD-014's rider: quarantine rather than write a DEGRADED cell. The vault block is a lossless
+//    carrier of a TT entry because `personal → team` is the upgrade path, and losing history on
+//    the way in is the one stranding nobody survives.
+//
+// 3. TT NEVER WRITES OUTSIDE ITS OWN MARKERS. `TT.locateVaultBlock` bounds the region
+//    (`start..end` inclusive, hard-stopping at the next ATX heading) and `writeVaultBlock` splices
+//    only that range. Intentions, Habits, Captures and Reflection are Terje's.
+//
+// 4. RESTATED — the old wording is superseded TWICE, by SB-045's heading-anchoring and then by
+//    DD-012's adoption. SDD-003 said "TT only claims a note that already has a block or that TT
+//    created for the purpose". The rule TT actually follows now:
+//
+//        TT claims a note that carries the anchor heading EXACTLY ONCE and whose region between
+//        that heading and the next `##` (or EOF) TT can describe COMPLETELY — empty, or a single
+//        well-formed TT table and nothing else. On first write TT writes the bottom anchor itself.
+//        Anything else it refuses and leaves alone.
+//
+//    The heading name comes from `Settings.vaultPaths.timeLogHeading` and is never a constant.
+//
+//    THE CONSEQUENCE TERJE SHOULD NOT HAVE TO REDISCOVER: his Templater daily template puts
+//    `## Time Log` in EVERY daily note, so under this rule every daily note is claimable —
+//    bounded only by the header vocabulary. That vocabulary is what keeps SB-049's 60 pre-cutover
+//    notes closed: they carry `| Time | Cat | Project | Description |`, which is not TT's schema.
+//    SB-044 (a settings-extended vocabulary) is therefore LOAD-BEARING for SB-049 — adding `Cat`
+//    and `Description` to it would open all 60 to adoption in one commit. SB-091 left a test that
+//    goes red if that happens. Do not weaken it.
+//
 // ---- THE SYNC ENGINE (SB-057) ----
 //
 // Three triggers, one per-file pass. This is where the filesystem lives; `vault-arbitrate.js`
