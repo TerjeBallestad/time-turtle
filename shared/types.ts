@@ -494,7 +494,16 @@ export type VaultCatalogQuarantineReason =
    * sections always carry the same N — a disagreement means a merge or a partial hand edit, and
    * it is refused rather than reconciled to the maximum. See SB-104.
    */
-  | 'catalog-revision-mismatch';
+  | 'catalog-revision-mismatch'
+  /**
+   * SB-124: the section name handed to `TT.parseVaultCatalogSection` is not one of the four. A
+   * refusal rather than a throw, because every neighbouring vault codec refuses and says why
+   * (SB-083) — and because TypeScript's union guards only the TS callers. `server/src/` is plain
+   * JS, and SB-057's sync engine feeds this function names derived from real notes, which is the
+   * one direction the type system does not defend. Not producible through the app: nothing a
+   * human can type into a catalog reaches it, which is why its golden is a direct call.
+   */
+  | 'catalog-unknown-section';
 
 /**
  * Every refusal TT's vault codecs can produce — what a boot scan records and surfaces, and the

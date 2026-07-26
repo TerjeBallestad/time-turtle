@@ -1937,7 +1937,22 @@ TT.serializeVaultCatalogSection = function (section, rows, opts) {
  * @returns {import('./types.ts').VaultCatalogSectionResult}
  */
 TT.parseVaultCatalogSection = function (md, section) {
-  const spec = CATALOG_SECTIONS[section];
+  // `hasOwnProperty`, not a truthiness test on the lookup: `CATALOG_SECTIONS['__proto__']` resolves
+  // to `Object.prototype`, which is TRUTHY and has no `heading` — so a bare `if (!spec)` would let
+  // that one name through to report `no-heading` about a section that does not exist. An untrusted
+  // string really does take that shape, which is the whole reason this check is here.
+  const spec = Object.prototype.hasOwnProperty.call(CATALOG_SECTIONS, section) ? CATALOG_SECTIONS[section] : null;
+  // SB-124: REFUSE, DO NOT THROW. Every other vault codec here is documented as never throwing —
+  // it returns a verdict, because SB-083's posture is "TT refuses, but it says why" and a refusal
+  // a caller can inspect is the mechanism that makes that true. A throw is not a refusal: it skips
+  // the quarantine reporting entirely and hands a human a stack trace, or a dead boot scan, instead
+  // of a line explaining what TT could not read.
+  //
+  // The TYPE guards TypeScript callers and stays — but `server/src/` is plain JS, and SB-057's sync
+  // engine is the first caller that hands this function a section name derived from a note a HUMAN
+  // typed rather than a typed literal. That is exactly the untrusted-input direction the type
+  // system does not defend. Before this, an unknown name reached `spec.heading` on `undefined`.
+  if (!spec) return { quarantine: true, reason: 'catalog-unknown-section', section };
   const loc = TT.locateVaultBlock(md, { heading: spec.heading });
   // propagated UNCHANGED, plus the section name — the locator owns its reasons, and a shared
   // reason like 'no-heading' only becomes actionable once you know WHICH heading
