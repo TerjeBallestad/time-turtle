@@ -177,6 +177,25 @@ export interface AppState extends Catalog {
   version: StateVersion;
   /** DC-002: TT_MD_DIR_LOCK is set, so the mirror folder is env-only and read-only in the UI. */
   mdDirLocked?: boolean;
+  /** SB-065: this user's mirror file changed under TT, so TT has stopped writing it. */
+  mirrorBlocked?: MirrorBlock | null;
+}
+
+/**
+ * SB-065: a mirror write TT refused because the file on disk is not the one it last wrote —
+ * another machine or a human edited it. Sticky (it survives restarts and further saves) and
+ * reported by /api/state, because a mirror that silently stops updating still LOOKS current;
+ * cleared by POST /api/mirror/acknowledge, which is consent to overwrite on the next write.
+ */
+export interface MirrorBlock {
+  /** absolute path of the file TT declined to write */
+  path: string;
+  /** when the mismatch was first seen */
+  detectedAt: string;
+  /** why: the file changed since TT's last write, or TT never wrote it at all */
+  reason: string;
+  /** when TT last wrote this path, if it ever did */
+  lastWrittenAt: string | null;
 }
 
 // ---- vault block (SB-055 / SB-045) ----
@@ -345,6 +364,12 @@ export interface PutStateResponse {
   version: StateVersion;
   mirror: string | null;
   mirrorError: string | null;
+  /**
+   * SB-065: the standing mirror refusal, if any. Present on the PUT response too (not only
+   * on /api/state) so the client learns about it on the save that hit it — the save itself
+   * still succeeded; only the mirror declined.
+   */
+  mirrorBlocked?: MirrorBlock | null;
 }
 
 /** 409 body when a PUT loses the race; `version` is the server's current one. */

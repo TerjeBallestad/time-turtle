@@ -6,7 +6,7 @@ import { dirname, join, resolve } from 'node:path';
 import { PORT, MD_DIR_LOCKED } from './config.js';
 import { verifyPassword, makeToken, readSessionCookie, sessionCookie, clearCookie } from './auth.js';
 import * as db from './db.js';
-import { writeMirror, mirrorTarget } from './markdown.js';
+import { writeMirror, mirrorTarget, mirrorPath, mirrorBlockFor, acknowledgeMirrorBlock } from './markdown.js';
 import { teamReport } from './reports.js';
 import TT from '../../shared/core.js';
 
@@ -106,6 +106,9 @@ function stateFor(user) {
     user,
     version: db.getVersions(user.id),
     mdDirLocked: MD_DIR_LOCKED,
+    // SB-065: a standing mirror refusal is STATE, not a log line — a mirror that has
+    // quietly stopped updating still looks current, which is the failure this guards.
+    mirrorBlocked: mirrorBlockFor(user),
     settings: db.getSettings(),
     clients: db.getClients().map(strip),
     projects: db.getProjects().map(strip),
@@ -577,7 +580,31 @@ app.put('/api/state', requireUser, (req, res) => {
     mirrorError = /** @type {Error} */ (err).message;
     console.error('[time-turtle] markdown mirror failed:', mirrorError);
   }
-  res.json({ ok: true, version: db.getVersions(req.user.id), mirror, mirrorError });
+  // SB-065: the DB write above already committed. A guard refusal is reported, never
+  // promoted to a 500 — "you cannot save at all" is a worse failure than a stale mirror.
+  res.json({
+    ok: true,
+    version: db.getVersions(req.user.id),
+    mirror,
+    mirrorError,
+    mirrorBlocked: mirrorBlockFor(req.user),
+  });
+});
+
+// ---- markdown mirror (SB-065) ----
+// The acknowledgement seam for the never-clobber guard: "yes, I dealt with it — overwrite
+// on the next save". Clearing is all it does; nothing is written here, so acknowledging by
+// mistake still costs nothing until the user saves again. Admins may clear another user's
+// block, because an admin cross-user edit can be the write that trips it and the target may
+// never log in to clear it themselves.
+app.post('/api/mirror/acknowledge', requireUser, (req, res) => {
+  const requested = req.body && req.body.userId !== undefined ? +req.body.userId : req.user.id;
+  if (requested !== req.user.id && req.user.role !== 'admin') return res.status(403).json({ error: 'admin only' });
+  const target = requested === req.user.id ? req.user : db.findUserById(requested);
+  if (!target) return res.status(404).json({ error: 'no such user' });
+  const path = mirrorPath(target);
+  const cleared = acknowledgeMirrorBlock(path);
+  res.json({ ok: true, cleared, path });
 });
 
 // ---- team reports (admin) ----
@@ -748,7 +775,7 @@ app.put('/api/users/:id/entries', requireUser, requireAdmin, (req, res) => {
     mirrorError = /** @type {Error} */ (err).message;
     console.error('[time-turtle] markdown mirror failed:', mirrorError);
   }
-  res.json({ ok: true, version: db.getVersions(id), mirror, mirrorError });
+  res.json({ ok: true, version: db.getVersions(id), mirror, mirrorError, mirrorBlocked: mirrorBlockFor(target) });
 });
 
 // SDD-002 ruling 5 (SB-025): the lock verbs. Approve stamps approvedAt (and clears any
@@ -792,7 +819,7 @@ function segmentLockHandler(verb) {
       mirrorError = /** @type {Error} */ (err).message;
       console.error('[time-turtle] markdown mirror failed:', mirrorError);
     }
-    res.json({ ok: true, version: db.getVersions(id), mirrorError });
+    res.json({ ok: true, version: db.getVersions(id), mirrorError, mirrorBlocked: mirrorBlockFor(target) });
   };
 }
 app.post('/api/users/:id/segments/:key/approve', requireUser, requireAdmin, segmentLockHandler('approve'));
