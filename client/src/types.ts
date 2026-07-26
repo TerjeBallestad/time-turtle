@@ -1,7 +1,18 @@
 // Client-local types: the `ui` actions object (threaded through every view/grid
 // component as props) and small grid/navigation helper signatures.
 import type React from 'react';
-import type { Entry, Task, Project, Client, User, UserCreateRequest, ParsedTime } from '../../shared/types';
+import type {
+  Entry,
+  Task,
+  Project,
+  Client,
+  User,
+  UserCreateRequest,
+  ParsedTime,
+  Backend,
+  VaultPaths,
+  VaultTimeSeparator,
+} from '../../shared/types';
 
 /** The imperative actions the App exposes to every view; the highest-value client type. */
 export interface UiActions {
@@ -34,6 +45,17 @@ export interface UiActions {
   setLanguage: (language: string) => void;
   setCurrency: (currency: string) => void;
   setMdDir: (dir: string) => void;
+  /**
+   * SB-056: switch the storage backend. NOT an optimistic local edit like the others — it goes
+   * straight to the server and then reloads, because the server may refuse it (TT_BACKEND_LOCK,
+   * or the single-user guard) and because half the UI is derived from the EFFECTIVE backend the
+   * server reports, not from the value we asked for.
+   */
+  setBackend: (backend: Backend) => void;
+  /** SB-056: where inside the vault TT reads and writes. */
+  setVaultPaths: (patch: Partial<VaultPaths>) => void;
+  /** SB-063: which characters the vault daily note writes between a start and an end time. */
+  setVaultTimeSeparator: (separator: VaultTimeSeparator) => void;
   /**
    * SB-065/SB-085: clear the standing mirror refusal — consent for the next save to
    * overwrite whatever is on disk. Resolves false (and toasts) when the server said no.

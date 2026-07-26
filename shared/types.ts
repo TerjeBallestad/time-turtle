@@ -174,6 +174,29 @@ export interface BackendCapabilities {
   mdImport: boolean;
 }
 
+/**
+ * SB-056: where inside the vault TT reads and writes. SB-056 owns only the SETTING; SB-057 and
+ * SB-058 own everything that opens a file under these paths, and may extend this shape
+ * ADDITIVELY. `root` empty means the vault has not been chosen yet.
+ *
+ * `timeLogHeading` is the heading TT's block sits under in a daily note, and SB-057 established
+ * that it is CONFIGURATION and never a constant: rename or translate that heading and TT's
+ * parse boundary moves with it, which is why `TT.locateVaultBlock` is already parameterised on
+ * it rather than matching a literal `## Time Log`.
+ */
+export interface VaultPaths {
+  /** absolute path of the Obsidian vault; '' until chosen */
+  root: string;
+  /** folder holding the daily notes, relative to `root` */
+  daily: string;
+  /** folder holding the weekly notes (phase 3), relative to `root` */
+  weekly: string;
+  /** the catalog note (SB-058), relative to `root` */
+  catalog: string;
+  /** the heading TT's time block sits under in a daily note */
+  timeLogHeading: string;
+}
+
 export interface Settings {
   currency: string;
   language: string;
@@ -195,6 +218,12 @@ export interface Settings {
    * the same shape as `TT_MD_DIR_LOCK`).
    */
   backend?: Backend;
+  /**
+   * SB-056: where inside the vault TT reads and writes. INSTANCE-LOCAL for the same reason as
+   * `backend` — these paths are how TT FINDS the catalog note, so serializing them INTO it
+   * (SB-058) would be a bootstrap loop. Stored as one JSON value; defaulted on read.
+   */
+  vaultPaths?: VaultPaths;
   /**
    * SB-063: the vault daily note's Time-column separator; absent behaves as `unicode`.
    * Reaches the bytes ONLY through TT.serializeVaultBlock's `timeSeparator` option — the v2

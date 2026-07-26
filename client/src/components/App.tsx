@@ -20,7 +20,7 @@ import { TopBar } from './TopBar';
 import { useSession } from '../hooks/useSession';
 import { useToasts } from '../hooks/useToasts';
 import { useServerSync } from '../hooks/useServerSync';
-import type { AppState, MirrorBlock } from '../../../shared/types';
+import type { AppState, MirrorBlock, VaultPaths } from '../../../shared/types';
 import type { UiActions, Route, TaskModalInit } from '../types';
 
 /** Same refusal? Path + first-detection instant identify a block; nothing else changes. */
@@ -343,6 +343,36 @@ export function App() {
     },
     setCurrency: (currency) => updateState((current) => ({ ...current, settings: { ...current.settings, currency } })),
     setMdDir: (dir) => updateState((current) => ({ ...current, settings: { ...current.settings, mdDir: dir } })),
+    // SB-056: the backend switch does NOT go through the optimistic debounced diff the other
+    // settings use. It goes straight to the server and then reloads — the renameProject /
+    // renameClient shape — for two reasons the others do not have. The server can REFUSE it
+    // (TT_BACKEND_LOCK, or the single-user guard with more than one user), so an optimistic
+    // toggle would sit there showing a state that was rejected; and half the UI below is
+    // derived from the EFFECTIVE backend the server reports, which the env and the lock can
+    // both decide, so guessing it locally is guessing.
+    setBackend: (backend) => {
+      if (backend === state.settings.backend) return;
+      void api
+        .putState({ settings: { ...state.settings, backend } })
+        .then(() => {
+          toast(TT.t('storage backend: ') + backend);
+          load();
+        })
+        .catch((err: Error) => {
+          toast(err.message);
+          load(); // re-sync the toggle back to the server truth on a refusal
+        });
+    },
+    setVaultPaths: (patch) =>
+      updateState((current) => ({
+        ...current,
+        settings: {
+          ...current.settings,
+          vaultPaths: { ...(current.settings.vaultPaths as VaultPaths), ...patch },
+        },
+      })),
+    setVaultTimeSeparator: (separator) =>
+      updateState((current) => ({ ...current, settings: { ...current.settings, vaultTimeSeparator: separator } })),
     // SB-065/SB-085: consent to overwrite. The server adopts the bytes on disk as its stamp
     // and clears the block; nothing is written until the next save. Deliberately NOT a
     // reload — `load()` hands useServerSync a fresh object for every synced key, which would

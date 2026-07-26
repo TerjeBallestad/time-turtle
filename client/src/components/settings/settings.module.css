@@ -239,3 +239,47 @@
   gap: 8px;
   margin-top: 10px;
 }
+
+/* SB-056: the vault settings surface. Same 1px-border, mono-metadata grammar as the mirror
+   rows above — this is another "where does data live" block, not a new kind of thing. The
+   label track is wider than .mirrorLabel's because these labels are longer and the inputs
+   have to line up as a column. */
+.vaultLabel {
+  width: 128px;
+}
+/* TT_BACKEND_LOCK: the effective backend, read-only, in the same mono the paths use — a
+   disabled SegToggle would read as "you may pick, later". You may not; the server decided. */
+.vaultLocked {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--text-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 8px;
+}
+/* Ligatures OFF, and this is the only control in the app that needs it: JetBrains Mono
+   composes `->` into a long arrow, which made the `ascii` row pixel-identical to the
+   `unicode` one — a chooser that cannot show you what you are choosing. */
+.vaultSeparator.vaultSeparator {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  font-variant-ligatures: none;
+  font-feature-settings:
+    'liga' 0,
+    'calt' 0;
+}
+/* The same orange as .mirrorBlock above, and the same reason: nothing is broken and no data
+   is lost, you are simply standing somewhere unfinished and should know it before you type a
+   vault path into it. Deliberately NOT a new colour — this is the established "stopped, not
+   failed" note in this view. */
+.vaultWarn {
+  padding: 10px 12px;
+  margin: 0 0 12px;
+  border: 1px solid rgba(240, 136, 62, 0.35);
+  border-left: 2px solid var(--orange);
+  border-radius: var(--radius);
+  background: var(--tint-orange);
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--text-2);
+}

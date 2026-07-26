@@ -1,4 +1,4 @@
-// Settings: clients, projects, tasks, users (admin), general, markdown backend
+// Settings: clients, projects, tasks, users (admin), general, vault, markdown backend
 import React from 'react';
 import TT from '../../i18n';
 import { isAdmin } from '../../roles';
@@ -11,6 +11,7 @@ import { UsersSection } from './UsersSection';
 import { PasswordSection } from './PasswordSection';
 import { GeneralSection } from './GeneralSection';
 import { MarkdownSection } from './MarkdownSection';
+import { VaultSection } from './VaultSection';
 import type { AppState } from '../../../../shared/types';
 import type { UiActions } from '../../types';
 
@@ -31,6 +32,9 @@ export function SettingsView({ state, ui }: SettingsProps) {
       {admin && <UsersSection state={state} ui={ui} />}
       <PasswordSection ui={ui} />
       <GeneralSection state={state} ui={ui} admin={admin} />
+      {/* SB-056: the vault surface sits ABOVE the markdown one, because the backend selector
+          decides whether that section still has a working paste-back at all. */}
+      {admin && <VaultSection state={state} ui={ui} />}
       {admin && <MarkdownSection state={state} ui={ui} />}
     </div>
   );

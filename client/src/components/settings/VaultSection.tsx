@@ -1,0 +1,179 @@
+import React from 'react';
+import TT from '../../i18n';
+import { SectionLabel, SegToggle, Select, Input } from '../../ds';
+import st from './settings.module.css';
+import type { AppState, Backend, VaultPaths, VaultTimeSeparator } from '../../../../shared/types';
+import type { UiActions } from '../../types';
+
+interface SettingsProps {
+  state: AppState;
+  ui: UiActions;
+}
+
+/**
+ * SB-056: the vault settings surface — the backend selector, `vaultPaths`, and the time
+ * separator SB-063 shipped deliberately WITHOUT a control.
+ *
+ * SB-063's reasoning for shipping headless was that its only consumer was a vault backend that
+ * did not exist yet. That reasoning expires exactly here, at the commit that makes `vault`
+ * selectable, and this repo is its own live example of what the failure looks like: perfect
+ * plumbing, a green api test, and a setting nobody can change from the app. Which is why this
+ * task is judged at the browser rung and not at `api`.
+ *
+ * The heading name is a SETTING with a default, never a constant (SB-057): rename or translate
+ * `## Time Log` and TT's parse boundary moves with it, so it has to be editable next to the
+ * paths that decide which file it is a heading in.
+ */
+
+/** MirrorDirRow's discipline: commit on blur/Enter, revert on Escape. A path saved per keystroke is a half-typed path. */
+function PathRow({
+  label,
+  value,
+  placeholder,
+  hint,
+  onCommit,
+}: {
+  label: string;
+  value: string;
+  placeholder?: string;
+  hint?: string;
+  onCommit: (next: string) => void;
+}) {
+  const [draft, setDraft] = React.useState<string | null>(null);
+  const commit = () => {
+    if (draft != null && draft.trim() !== value) onCommit(draft.trim());
+    setDraft(null);
+  };
+  return (
+    <div className={st.mirror}>
+      <div className={st.mirrorRow}>
+        <span className={[st.label, st.mirrorLabel, st.vaultLabel].join(' ')}>{label}</span>
+        <Input
+          value={draft != null ? draft : value}
+          spellCheck={false}
+          placeholder={placeholder}
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={commit}
+          onKeyDown={(ev) => {
+            if (ev.key === 'Enter') commit();
+            else if (ev.key === 'Escape') setDraft(null);
+          }}
+          className={[st.small, st.mirrorInput].join(' ')}
+        />
+      </div>
+      {hint && <div className={st.mirrorHint}>{hint}</div>}
+    </div>
+  );
+}
+
+export function VaultSection({ state, ui }: SettingsProps) {
+  // The EFFECTIVE backend, not the stored one: TT_BACKEND and TT_BACKEND_LOCK can both beat the
+  // setting, and the toggle has to show what is actually in force.
+  const backend: Backend = state.backend ?? 'sqlite';
+  const locked = !!state.backendLocked;
+  const paths: VaultPaths = state.settings.vaultPaths ?? {
+    root: '',
+    daily: 'Calendar/Daily',
+    weekly: 'Calendar/Weekly',
+    catalog: 'Time Turtle/Catalog.md',
+    timeLogHeading: 'Time Log',
+  };
+  const separator: VaultTimeSeparator = state.settings.vaultTimeSeparator ?? 'unicode';
+  return (
+    <div className={st.section}>
+      <SectionLabel style={{ marginBottom: 10 }}>{TT.t('Vault')}</SectionLabel>
+      <div className={st.mirror}>
+        <div className={st.mirrorRow}>
+          <span className={[st.label, st.mirrorLabel, st.vaultLabel].join(' ')}>{TT.t('Storage backend')}</span>
+          {locked ? (
+            <span className={st.vaultLocked}>{backend}</span>
+          ) : (
+            <SegToggle
+              value={backend}
+              onChange={(next) => ui.setBackend(next as Backend)}
+              options={[
+                { value: 'sqlite', label: TT.t('SQLite') },
+                { value: 'vault', label: TT.t('Obsidian vault') },
+              ]}
+            />
+          )}
+        </div>
+        <div className={st.mirrorHint}>
+          {locked
+            ? TT.t('the server pins the storage backend (TT_BACKEND_LOCK) — change it in the server environment.')
+            : TT.t(
+                'SQLite is the source of truth and every save mirrors to markdown. The vault backend makes an Obsidian vault the source of truth instead.',
+              )}
+        </div>
+      </div>
+      {backend === 'vault' && (
+        <>
+          {/* Design decision 3, said out loud rather than discovered: `vault` is selectable
+              before SB-057 fills the vault store in. */}
+          <div className={st.vaultWarn}>
+            {TT.t(
+              'The vault backend is not finished: the markdown mirror is off (the files it wrote are retired), committing is off until weekly notes land, and markdown paste-back is off. Nothing syncs these paths yet.',
+            )}
+          </div>
+          <PathRow
+            label={TT.t('Vault folder')}
+            value={paths.root}
+            placeholder={TT.t('e.g. ~/Obsidian/ballestad')}
+            hint={TT.t('the vault root — every path below is relative to it.')}
+            onCommit={(root) => ui.setVaultPaths({ root })}
+          />
+          <PathRow label={TT.t('Daily notes')} value={paths.daily} onCommit={(daily) => ui.setVaultPaths({ daily })} />
+          <PathRow
+            label={TT.t('Weekly notes')}
+            value={paths.weekly}
+            hint={TT.t('where the commit ledger will live once weekly rollups land.')}
+            onCommit={(weekly) => ui.setVaultPaths({ weekly })}
+          />
+          <PathRow
+            label={TT.t('Catalog note')}
+            value={paths.catalog}
+            onCommit={(catalog) => ui.setVaultPaths({ catalog })}
+          />
+          <PathRow
+            label={TT.t('Time Log heading')}
+            value={paths.timeLogHeading}
+            hint={TT.t(
+              'the heading Time Turtle writes its block under in a daily note — rename it here if you renamed it there.',
+            )}
+            onCommit={(timeLogHeading) => ui.setVaultPaths({ timeLogHeading })}
+          />
+          <div className={st.mirror}>
+            <div className={st.mirrorRow}>
+              <span className={[st.label, st.mirrorLabel, st.vaultLabel].join(' ')}>{TT.t('Time separator')}</span>
+              <Select
+                value={separator}
+                onChange={(e) => ui.setVaultTimeSeparator(e.target.value as VaultTimeSeparator)}
+                options={[
+                  // The sample is in the label, because the choice is about how it LOOKS and a
+                  // list of bare value names would hide the only thing being decided.
+                  //
+                  // THE NAME IS THERE TOO, and it is not decoration. Measured in the browser:
+                  // JetBrains Mono composes `->` into a long-arrow ligature, so `ascii` and
+                  // `unicode` rendered as PIXEL-IDENTICAL rows and the control could not tell
+                  // you which one you had picked. That is SB-063's own warning ("if it's
+                  // dependant on a ligature, revert to the short arrow") landing on the control
+                  // built to expose it. `.vaultSeparator` turns ligatures off so the samples
+                  // differ again; the name is the half that cannot lie whatever font loads.
+                  { value: 'unicode', label: '09:00 → 10:00   unicode' },
+                  { value: 'ascii', label: '09:00 -> 10:00   ascii' },
+                  { value: 'hyphen', label: '09:00 - 10:00   hyphen' },
+                ]}
+                className={[st.small, st.vaultSeparator].join(' ')}
+              />
+            </div>
+            <div className={st.mirrorHint}>
+              {TT.t(
+                'how a daily note writes a start and an end time. Reading accepts all three, so changing it never needs a migration.',
+              )}
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}

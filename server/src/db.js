@@ -162,13 +162,50 @@ migrateToSdd002();
 // and `vaultPaths` stay in these SQLite rows under BOTH backends and must never be serialized
 // into the catalog note (SB-058) — they are how TT finds the catalog, so putting them there
 // would be a bootstrap loop. Like `mdDir` it reaches no mirror byte.
+//
+// SB-056: `vaultPaths` is the one settings key that is not a scalar. It rides the same
+// key/value table as ONE JSON value rather than five keys, because it is one decision — where
+// the vault is — and reading it back as a partial (root set, daily missing) would be a shape
+// no caller wants to handle. Defaulted on read, validated on write; SB-057/SB-058 may extend
+// the shape additively, and an older row missing a newer key simply takes that key's default.
+/** @type {import('../../shared/types.ts').VaultPaths} */
+const VAULT_PATHS_DEFAULT = {
+  root: '',
+  daily: 'Calendar/Daily',
+  weekly: 'Calendar/Weekly',
+  catalog: 'Time Turtle/Catalog.md',
+  timeLogHeading: 'Time Log',
+};
+/** @param {string} raw @returns {import('../../shared/types.ts').VaultPaths} */
+function parseVaultPaths(raw) {
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return { ...VAULT_PATHS_DEFAULT };
+    const out = { ...VAULT_PATHS_DEFAULT };
+    for (const key of /** @type {(keyof typeof VAULT_PATHS_DEFAULT)[]} */ (Object.keys(VAULT_PATHS_DEFAULT)))
+      if (typeof parsed[key] === 'string') out[key] = parsed[key];
+    return out;
+  } catch {
+    return { ...VAULT_PATHS_DEFAULT };
+  }
+}
+
 /** @returns {Settings & { mdDir: string }} */
 export function getSettings() {
   const rows = /** @type {{ key: string, value: string }[]} */ (db.prepare('SELECT key, value FROM settings').all());
-  const settings = { currency: 'kr', language: 'en', mdDir: '', vaultTimeSeparator: 'unicode', backend: 'sqlite' };
-  for (const row of rows)
-    settings[/** @type {'currency'|'language'|'mdDir'|'vaultTimeSeparator'|'backend'} */ (row.key)] = row.value;
-  return /** @type {Settings & { mdDir: string }} */ (settings);
+  const settings = {
+    currency: 'kr',
+    language: 'en',
+    mdDir: '',
+    vaultTimeSeparator: 'unicode',
+    backend: 'sqlite',
+    vaultPaths: { ...VAULT_PATHS_DEFAULT },
+  };
+  for (const row of rows) {
+    if (row.key === 'vaultPaths') settings.vaultPaths = parseVaultPaths(row.value);
+    else settings[/** @type {'currency'|'language'|'mdDir'|'vaultTimeSeparator'|'backend'} */ (row.key)] = row.value;
+  }
+  return /** @type {Settings & { mdDir: string }} */ (/** @type {unknown} */ (settings));
 }
 /**
  * SB-056: the backend AS STORED — the raw row, or null when nothing has been stored.
@@ -204,6 +241,18 @@ export function putSettings(settings) {
   // TT.backendCapabilities would resolve it to the safe sqlite row and the operator would be
   // looking at a stored `valut` believing the vault was live. The vocabulary lives in core.js.
   if (settings.backend != null && TT.BACKENDS.includes(settings.backend)) upsert.run('backend', settings.backend);
+  // SB-056: `vaultPaths` is validated by RECONSTRUCTION rather than by inspection — the stored
+  // value is built key by key from the default, taking only known keys whose value is a string.
+  // An unknown key is dropped and a non-string is ignored, so nothing a caller invents can end
+  // up in the row and nothing SB-057 later reads can be a non-string. Absent keys keep their
+  // defaults, which is what makes SB-057/SB-058's additive extension free.
+  if (settings.vaultPaths != null && typeof settings.vaultPaths === 'object' && !Array.isArray(settings.vaultPaths)) {
+    const incoming = /** @type {Record<string, unknown>} */ (/** @type {unknown} */ (settings.vaultPaths));
+    const next = { ...VAULT_PATHS_DEFAULT };
+    for (const key of /** @type {(keyof typeof VAULT_PATHS_DEFAULT)[]} */ (Object.keys(VAULT_PATHS_DEFAULT)))
+      if (typeof incoming[key] === 'string') next[key] = /** @type {string} */ (incoming[key]);
+    upsert.run('vaultPaths', JSON.stringify(next));
+  }
 }
 
 // ---- catalog ----

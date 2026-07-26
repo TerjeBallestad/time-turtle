@@ -13,6 +13,34 @@ const NO: Record<string, string> = {
   Clients: 'Kunder',
   General: 'Generelt',
   'Markdown backend': 'Markdown-backend',
+  // SB-056: the vault settings surface.
+  Vault: 'Hvelv',
+  'Storage backend': 'Lagringsbackend',
+  SQLite: 'SQLite',
+  'Obsidian vault': 'Obsidian-hvelv',
+  'storage backend: ': 'lagringsbackend: ',
+  'the server pins the storage backend (TT_BACKEND_LOCK) — change it in the server environment.':
+    'serveren har låst lagringsbackenden (TT_BACKEND_LOCK) — endre den i servermiljøet.',
+  'SQLite is the source of truth and every save mirrors to markdown. The vault backend makes an Obsidian vault the source of truth instead.':
+    'SQLite er fasiten, og hver lagring speiles til markdown. Hvelv-backenden gjør et Obsidian-hvelv til fasiten i stedet.',
+  'The vault backend is not finished: the markdown mirror is off (the files it wrote are retired), committing is off until weekly notes land, and markdown paste-back is off. Nothing syncs these paths yet.':
+    'Hvelv-backenden er ikke ferdig: markdown-speilet er av (filene den skrev er pensjonert), innsending er av til ukenotatene kommer, og tilbakeliming av markdown er av. Ingenting synkroniserer disse stiene ennå.',
+  'Vault folder': 'Hvelvmappe',
+  'e.g. ~/Obsidian/ballestad': 'f.eks. ~/Obsidian/ballestad',
+  'the vault root — every path below is relative to it.': 'roten i hvelvet — alle stiene under er relative til den.',
+  'Daily notes': 'Dagsnotater',
+  'Weekly notes': 'Ukenotater',
+  'where the commit ledger will live once weekly rollups land.':
+    'her havner innsendingsloggen når ukesoppsummeringene kommer.',
+  'Catalog note': 'Katalognotat',
+  // Deliberately short: 'Overskrift for timeloggen' wrapped to two lines in the 128px label
+  // column and broke the row rhythm the rest of this view keeps.
+  'Time Log heading': 'Timelogg-overskrift',
+  'the heading Time Turtle writes its block under in a daily note — rename it here if you renamed it there.':
+    'overskriften Time Turtle skriver blokken sin under i et dagsnotat — endre den her hvis du endret den der.',
+  'Time separator': 'Tidsskille',
+  'how a daily note writes a start and an end time. Reading accepts all three, so changing it never needs a migration.':
+    'hvordan et dagsnotat skriver start- og sluttid. Lesing godtar alle tre, så en endring krever aldri migrering.',
   time: 'tid',
   task: 'oppgave',
   note: 'notat',
