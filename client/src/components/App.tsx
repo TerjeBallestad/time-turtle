@@ -65,9 +65,7 @@ export function App() {
   // is dead weight — it lists users to count somebody else's pending segments, and there is
   // nobody else — but more to the point it would fetch for a badge that is no longer rendered.
   const isAdminSession =
-    !!state &&
-    (state as AppState).user?.role === 'admin' &&
-    TT.shapeCapabilities((state as AppState).shape).identity;
+    !!state && (state as AppState).user?.role === 'admin' && TT.shapeCapabilities((state as AppState).shape).identity;
   const [reviewPending, setReviewPending] = React.useState<number | null>(null);
   const [reviewNonce, setReviewNonce] = React.useState(0);
   React.useEffect(() => {
@@ -548,9 +546,32 @@ export function App() {
   // an employee signed in) resolves to null above — fall back to Today rather than a blank.
   if (view === null) view = <TodayView state={state} ui={ui} />;
 
-  const syncLabel =
-    sync === 'saving' ? TT.t('saving…') : sync === 'error' ? TT.t('offline — retrying') : TT.t('synced') + ' → md';
-  const syncColor = sync === 'error' ? 'var(--orange)' : 'var(--green)';
+  // SB-134: the sidebar's sync line is a STATUS INDICATOR, so it may only claim a write that is
+  // actually happening. Under `personal` the v2 markdown mirror is off by construction — DD-011
+  // retires it, and DD-015/SB-100 derive the `vault` backend instead — so `synced → md` was a
+  // positive claim about a write that does not occur. Same species as SB-113 (a surface still
+  // speaking the previous architecture), but worse than stale vocabulary: someone watching this
+  // line to know their hours are safe was reading a reassurance that meant nothing.
+  //
+  // THE GATE IS THE CAPABILITY TABLE, never `shape === 'personal'`. DD-011's rule is that a
+  // capability is a property of the SHAPE, and `mirror` is the exact bit that decides whether a
+  // mirror byte is written — so a third shape gets an honest label by adding a row to the table
+  // in shared/core.js, not by finding this line.
+  //
+  // The vault-side state is `state.vaultQuarantined` — the array SB-057 task 8 already puts on
+  // /api/state and renders in Settings → Vault. READ, never re-derived: this line and that panel
+  // are two views of one fact, and a second derivation is how two views come to disagree. The
+  // wording is that panel's own ('Notes paused'), so the sidebar and the place that explains it
+  // use one phrase.
+  const mirrors = TT.shapeCapabilities(state.shape).mirror;
+  const paused = mirrors ? 0 : (state.vaultQuarantined ?? []).length;
+  const settled = paused
+    ? TT.t('Notes paused') + ' (' + paused + ')'
+    : mirrors
+      ? TT.t('synced') + ' → md'
+      : TT.t('synced → vault');
+  const syncLabel = sync === 'saving' ? TT.t('saving…') : sync === 'error' ? TT.t('offline — retrying') : settled;
+  const syncColor = sync === 'error' || paused ? 'var(--orange)' : 'var(--green)';
 
   return (
     <div className={styles.app}>

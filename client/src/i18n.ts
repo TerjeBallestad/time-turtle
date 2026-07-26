@@ -255,6 +255,12 @@ const NO: Record<string, string> = {
   'Password updated': 'Passord oppdatert',
   'saving…': 'lagrer…',
   synced: 'synkronisert',
+  // SB-134: the sidebar's settled state under `personal`, where the markdown mirror is off and
+  // the vault is the storage — `synced → md` claimed a write that does not happen there. Kept as
+  // ONE key rather than composing `synced` with a bare `vault`: `→ md` is a file-format token
+  // that survives translation, `hvelv` is a word, and 'Hvelv' is already this surface's
+  // established Norwegian for the Obsidian vault (see the `Vault` key above).
+  'synced → vault': 'synkronisert → hvelv',
   'offline — retrying': 'frakoblet — prøver igjen',
   'someone else saved first — reloaded': 'noen andre lagret først — hentet på nytt',
   // SB-034: admin cross-user edit hit a stale-write 409 — the sheet was reloaded fresh.

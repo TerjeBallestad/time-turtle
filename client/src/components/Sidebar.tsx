@@ -112,7 +112,11 @@ export function Sidebar({
           active={route.view === 'settings'}
           onClick={() => setRoute({ view: 'settings' })}
         />
-        <div className={styles.syncRow}>
+        {/* SB-134: a stable anchor for the browser rung. CSS-module class names are hashed in the
+            built bundle, and the claim under test here is a NEGATIVE one — that this line makes no
+            mirror claim under `personal` — which cannot be located by the text it must not contain.
+            Same `data-tt` precedent as the quarantine panel in Settings → Vault. */}
+        <div className={styles.syncRow} data-tt="sync-status">
           <span className={styles.syncDot} style={{ background: syncColor }}></span>
           <span className={styles.syncLabel}>{syncLabel}</span>
         </div>
