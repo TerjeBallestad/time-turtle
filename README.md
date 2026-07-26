@@ -130,7 +130,7 @@ Stop, inspect or tail either one by naming it again — `tt stop --data ~/.time-
 `tt status --data ~/.time-turtle/personal`. Everything is per data dir: DB, markdown mirror,
 pid file, log, session secret, users, settings. Nothing is shared between instances but the
 code, and neither one knows the other exists — `tt status` answers only for the data dir you
-named, so a bare `tt status` saying `stopped` means *the default instance* is stopped. Every
+named, so a bare `tt status` saying `stopped` means _the default instance_ is stopped. Every
 answer prints the data dir it answered for, `tt stop`'s `not running` included.
 
 `tt status` is a read: it **reports** a leftover pid file (`stale pid file (pid N)`) rather than

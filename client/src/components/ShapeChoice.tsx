@@ -63,12 +63,7 @@ export function ShapeChoice({ ui }: { ui: UiActions }) {
               )}
             </div>
           </button>
-          <button
-            className={styles.option}
-            disabled={busy}
-            data-tt="shape-choice-team"
-            onClick={() => answer('team')}
-          >
+          <button className={styles.option} disabled={busy} data-tt="shape-choice-team" onClick={() => answer('team')}>
             <div className={styles.optionLabel}>{TT.t('My company’s')}</div>
             <div className={styles.optionBody}>
               {TT.t(
