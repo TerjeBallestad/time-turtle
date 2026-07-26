@@ -68,7 +68,16 @@ export function activeShape() {
   return shapeTarget().shape;
 }
 
-/** The storage backend the effective shape DERIVES (DD-015). Never selected. @returns {Backend} */
+/**
+ * The storage backend the effective shape DERIVES (DD-015). Never selected.
+ *
+ * DELIBERATELY UNCALLED TODAY, and that is not an oversight: nothing in the server branches on
+ * the backend name any more — the guards branch on the SHAPE and the banner reads
+ * `shapeTarget().backend`. Its first real caller is SB-057's vault store, which is the only
+ * code that will ever need to know which implementation it is. Deleting it would only mean
+ * re-deriving the same map somewhere worse.
+ * @returns {Backend}
+ */
 export function activeBackend() {
   return shapeTarget().backend;
 }

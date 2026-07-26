@@ -44,6 +44,10 @@ export {
   // settings
   getSettings,
   putSettings,
+  getStoredShape,
+  // SB-100 / DD-016: the cutover stamp. On the seam because SB-057's vault store is the thing
+  // that will READ it — the write filter that keeps pre-cutover entries out of the vault.
+  stampVaultCutover,
   // catalog
   getClients,
   putClients,

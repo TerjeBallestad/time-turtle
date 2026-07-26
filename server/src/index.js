@@ -84,6 +84,46 @@ db.seedIfEmpty();
   }
 }
 
+// ---- SB-100: what the boot answers for itself ----
+//
+// BOTH WRITES BELOW SIT AFTER THE REFUSAL, and that is the same load-bearing ordering the
+// retirement sweep has: a process whose contract is "I refuse to start" must not mutate the
+// data dir on its way out. A refused boot writes neither a shape nor a cutover.
+{
+  const target = shapeTarget();
+  // DD-015, the inference rule: more than one user has ANSWERED THE QUESTION BY EXISTING.
+  // Stamp `team`, silently, never ask — every deployed team install sails past this with no
+  // modal, and SB-098's first-run question never has to render a refusal it cannot resolve.
+  //
+  // Keyed on `source === 'default'`, NOT on the user count alone. `env`, `env-locked` and
+  // `setting` are all installs that have already answered, and re-answering one underneath its
+  // operator would turn the loud direction-3 boot refusal into silence — someone who types
+  // TT_SHAPE=personal at a five-user data dir must still be refused, not quietly overruled.
+  //
+  // `default` + one user is the OPEN state, and it deliberately stays open: SB-098 ships the
+  // asking, and a row written here would answer the question before anyone was asked.
+  if (target.source === 'default' && db.listUsers().length > 1) {
+    store.putSettings({ shape: 'team' });
+    console.log(
+      `[time-turtle] inferred shape: team — this data dir holds ${db.listUsers().length} users, which answers it (DD-015)`,
+    );
+  }
+  // DD-016, the cutover: the instant this install became `personal`. Stamped for the EFFECTIVE
+  // shape rather than only for a stored one, because `TT_SHAPE=personal` reaches the same live
+  // vault without ever writing a setting — and an unstamped vault store has no pre-cutover
+  // history at all, i.e. every entry eligible, which is DD-016's hazard inverted.
+  //
+  // It stamps the DATE, not the shape: the row written here must never turn an env choice into
+  // a stored one, or TT_SHAPE would stop being how you change your mind.
+  //
+  // Idempotent and first-stamp-wins. ENFORCING it — no vault write, no DD-012 adoption for
+  // entries dated before it — is SB-057's, because that is where a vault write first exists.
+  if (target.shape === 'personal') {
+    const at = store.stampVaultCutover();
+    console.log(`[time-turtle] vault cutover: ${at} — entries dated before it stay in SQLite (DD-016)`);
+  }
+}
+
 // SB-056 / DD-011: the one-shot boot sweep. NOT optional and not redundant with the sweep
 // store.mirror does on every save — an install switched by `TT_SHAPE=personal` alone never
 // fires a settings write, so without this the mirror files would sit next to the daily notes

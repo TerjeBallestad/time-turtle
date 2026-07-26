@@ -231,7 +231,38 @@ export function getStoredShape() {
   if (!row || !TT.SHAPES.includes(/** @type {any} */ (row.value))) return null;
   return /** @type {any} */ (row.value);
 }
-/** @param {Settings} settings */
+/**
+ * SB-100 / DD-016: stamp the moment this install became `personal`, if it has not been
+ * stamped. Idempotent, and the FIRST stamp always wins — a round trip through `team` and back
+ * must not re-stamp, because a later date silently re-opens history that was already excluded.
+ *
+ * An ISO INSTANT, not a bare day: DD-016 words the cutover as an instant, and SB-057 (which
+ * owns the write filter) can take `slice(0, 10)` for a day-grained comparison against
+ * `Entry.date`. Storing the coarser value would throw away information SB-057 cannot recover.
+ *
+ * Called from two places, because there are two ways into the personal shape: `putSettings`
+ * when the shape is stored, and the boot (server/src/index.js) when `TT_SHAPE=personal`
+ * supplies it without ever storing anything. An unstamped vault store is one with NO
+ * pre-cutover history at all — every entry eligible — which is the hazard inverted.
+ * @returns {string} the cutover in force
+ */
+export function stampVaultCutover() {
+  const row = /** @type {{ value: string } | undefined} */ (
+    db.prepare('SELECT value FROM settings WHERE key = ?').get('vaultCutover')
+  );
+  if (row && row.value) return row.value;
+  const at = new Date().toISOString();
+  db.prepare(
+    'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
+  ).run('vaultCutover', at);
+  return at;
+}
+/**
+ * Writes ONLY the keys that are present, which is what makes a partial legal and always has
+ * been — the route hands it whatever the client PUT, and SB-100's boot-time inference hands it
+ * `{ shape: 'team' }` and nothing else. The type says so now; the body already did.
+ * @param {Partial<Settings>} settings
+ */
 export function putSettings(settings) {
   const upsert = db.prepare(
     'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
@@ -245,7 +276,16 @@ export function putSettings(settings) {
   // SB-100: same enum discipline. An unrecognised shape name must never reach the table —
   // TT.shapeCapabilities would resolve it to the safe `team` row and the operator would be
   // looking at a stored `persona` believing the vault was live. The vocabulary lives in core.js.
-  if (settings.shape != null && TT.SHAPES.includes(settings.shape)) upsert.run('shape', settings.shape);
+  if (settings.shape != null && TT.SHAPES.includes(settings.shape)) {
+    upsert.run('shape', settings.shape);
+    // DD-016: the same save that stores `personal` stamps the cutover. HERE and not in the
+    // route, so nothing that can store the shape can skip it.
+    if (settings.shape === 'personal') stampVaultCutover();
+  }
+  // `vaultCutover` is deliberately NOT read off `settings`. It is SERVER-OWNED (DD-016): the
+  // client PUTs the whole settings object back on every save, so a stamp a client can move is
+  // a stamp a client can erase — and the date it would erase is the one deciding which of the
+  // user's days may reach the vault at all. See stampVaultCutover.
   // SB-056: `vaultPaths` is validated by RECONSTRUCTION rather than by inspection — the stored
   // value is built key by key from the default, taking only known keys whose value is a string.
   // An unknown key is dropped and a non-string is ignored, so nothing a caller invents can end
