@@ -36,6 +36,13 @@ export function mirrorDir() {
   return mirrorTarget().dir;
 }
 
+// SB-088 — THE ONE TT.slug CALLER THAT READS AN EXISTING VALUE. This path is DERIVED on
+// every write, never stored, so a user called "Bærum" mirrors to `timesheet-b-rum.md` today
+// and to `timesheet-baerum.md` after the transliteration fix — the next save writes the new
+// file and the old one simply stops being updated. Nothing is renamed, moved or deleted, and
+// no bytes are lost: the old path is still a key in the guard ledger, so `retireMirrors`
+// still sweeps it on a backend switch. The same fork already happens whenever a user changes
+// their display name, which is why it is left alone rather than migrated.
 /** Where one user's mirror file lives right now. @param {import('../../shared/types.ts').User} user */
 export function mirrorPath(user) {
   return join(mirrorDir(), 'timesheet-' + TT.slug(user.name || user.email.split('@')[0]) + '.md');

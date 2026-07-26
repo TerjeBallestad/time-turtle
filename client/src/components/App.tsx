@@ -29,22 +29,6 @@ function sameBlock(a: MirrorBlock | null | undefined, b: MirrorBlock | null | un
   return a.path === b.path && a.detectedAt === b.detectedAt;
 }
 
-function makeCode(name: string): string {
-  const words = name
-    .trim()
-    .toUpperCase()
-    .replace(/[^A-Z0-9 ]/g, '')
-    .split(/\s+/);
-  let code =
-    words.length > 1
-      ? words
-          .map((word) => word.slice(0, 4))
-          .slice(0, 2)
-          .join('-')
-      : words[0].slice(0, 8);
-  return code || 'PROJ';
-}
-
 export function App() {
   const { state, setState, load } = useSession();
   const { toasts, toast } = useToasts();
@@ -284,7 +268,7 @@ export function App() {
         };
       }),
     createProject: (name) => {
-      let code = makeCode(name);
+      let code = TT.projectCode(name);
       updateState((current) => {
         while (current.projects.some((project) => project.code === code)) code = code + '2';
         return {

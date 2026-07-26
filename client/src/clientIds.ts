@@ -10,6 +10,8 @@
 // without a DOM — the collision bug it fixes lived in `App.tsx` where no test rung
 // below `browser` could reach it.
 
+import TT from '../../shared/core.js';
+
 /** The only shape of a client this module needs. */
 export type ClientRow = { id: string; name: string };
 /** The only shape of a project this module needs — `clientId` is the sole reference to a client. */
@@ -47,34 +49,20 @@ export function nextClientId(clients: readonly ClientRow[]): string {
 }
 
 /**
- * Nordic letters that carry no combining mark, so NFD cannot decompose them. Without
- * this "Bærum" would slug to `b-rum` and "Sør-Norge" to `s-r-norge` — mangled ids in a
- * Norwegian catalog, in a column Terje reads.
- */
-const TRANSLITERATE: Record<string, string> = { æ: 'ae', ø: 'o', ð: 'd', þ: 'th', ß: 'ss' };
-
-/**
  * A readable id derived from a client name: lowercase, ASCII, dash-separated, capped.
  *
- * Deliberately the same shape as `TT.slug` (shared/core.js) — lowercase, non-alphanumerics
- * to dashes, trimmed, 24 chars — plus the transliteration above and WITHOUT `TT.slug`'s
- * `|| 'task'` fallback: an unusable name must be distinguishable from a usable one here,
- * because the caller's answer is "wait, don't derive yet", not "invent something".
- * Folding the transliteration back into `TT.slug` is a follow-up; shared/core.js is being
- * edited by another session as this lands.
+ * SB-088: this IS `TT.slug` now. SB-067 had to keep a second, transliterating copy of the
+ * rule here because `shared/core.js` was held by another session at that moment, which left
+ * two slug rules disagreeing about the language the catalog is written in — "Bærum" was
+ * `baerum` here and `b-rum` there. The transliteration has moved into `TT.slug`; the only
+ * thing left on this side is the empty FALLBACK, because an unusable name must stay
+ * distinguishable from a usable one: the caller's answer is "wait, don't derive yet", not
+ * "invent something".
  *
  * Returns '' when the name has nothing sluggable in it.
  */
 export function makeClientId(name: string): string {
-  return name
-    .toLowerCase()
-    .replace(/[æøðþß]/g, (ch) => TRANSLITERATE[ch])
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '') // å → a, é → e — the combining marks NFD split off
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 24)
-    .replace(/-+$/g, ''); // the cap can land mid-dash
+  return TT.slug(name, '');
 }
 
 /**

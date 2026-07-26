@@ -289,12 +289,75 @@ TT.projectBillable = function (state, code) {
 TT.entryProjectCode = function (state, entry) {
   return entry.project ?? null;
 };
-TT.slug = (s) =>
+// SB-088: the letters NFD cannot help with. Æ/Ø/Ð/Þ/ß carry no combining mark, so
+// decomposition leaves them whole and the `[^a-z0-9]` sweep below then DELETES them —
+// "Bærum" came out `b-rum` and "Sør-Norge" `s-r-norge`, a dropped letter rather than a
+// transliterated one, in a catalog that is mostly Norwegian. Every other accented letter
+// (å, é, ö, ú) is a base letter plus a combining mark, which NFD does split.
+const TRANSLITERATE = /** @type {Record<string, string>} */ ({
+  æ: 'ae',
+  ø: 'o',
+  ð: 'd',
+  þ: 'th',
+  ß: 'ss',
+  Æ: 'AE',
+  Ø: 'O',
+  Ð: 'D',
+  Þ: 'TH',
+});
+/**
+ * ASCII-fold a name: transliterate the mark-less letters, then let NFD strip the marks
+ * off the rest. Case is preserved, because the project-code rule wants upper and the slug
+ * rule wants lower. This is the ONE place either of them learns about Norwegian.
+ * @param {string} s
+ */
+const asciiFold = (s) =>
   s
+    .replace(/[æøðþßÆØÐÞ]/g, (ch) => TRANSLITERATE[ch])
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, ''); // å → a, é → e — the marks NFD split off
+// SB-088: ONE slug rule. `makeClientId` (client/src/clientIds.ts) had to carry a second,
+// transliterating copy of this because shared/core.js was held by another session when
+// SB-067 landed; it now calls straight through here, passing '' as the fallback.
+//
+// This changes what NEW ids look like. It does NOT rename anything already stored, and
+// nothing re-derives an id for an existing row — see the note on TT.projectCode.
+/** @param {string} s @param {string} [fallback] what an unsluggable name becomes */
+TT.slug = (s, fallback = 'task') =>
+  asciiFold(s)
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '')
-    .slice(0, 24) || 'task';
+    .slice(0, 24)
+    .replace(/-+$/g, '') || fallback; // the 24-cap can land mid-dash
+// The project code derived from a project's name at creation (`createProject`). Two
+// words or more → first four letters of the first two, joined by a dash (FJEL-NETT);
+// one word → its first eight. Lives here beside TT.slug because it is the same kind of
+// rule — a persisted identifier derived from a name — and because in App.tsx it was
+// reachable only from a React callback, i.e. only by the browser rung.
+//
+// SB-088: it had the same defect one function over, and worse — it never went through
+// TT.slug at all, so `[^A-Z0-9 ]` deleted Æ/Ø/Å outright and "Bærum Bygg" became
+// BRUM-BYGG. Folding first is the whole fix.
+//
+// NOT A MIGRATION: this is what a NEWLY created project is called. Every stored code
+// keeps its exact bytes — no code, client id or task id is re-derived anywhere, and a
+// rename stays the deliberate, server-reconciled act PLAN-006 made it (DC-005).
+TT.projectCode = (name) => {
+  const words = asciiFold(name)
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9 ]/g, '')
+    .split(/\s+/);
+  const code =
+    words.length > 1
+      ? words
+          .map((word) => word.slice(0, 4))
+          .slice(0, 2)
+          .join('-')
+      : words[0].slice(0, 8);
+  return code || 'PROJ';
+};
 TT.clientOf = (state, project) =>
   project && project.clientId ? state.clients.find((client) => client.id === project.clientId) || null : null;
 TT.rateOf = function (state, code) {
@@ -1750,6 +1813,12 @@ TT.serializeMd = function (state) {
 function migrateV1(state) {
   // legacy fixup: an entry ref that is a project code (not a task id) becomes a
   // "general" template on that project (preserves the pre-v2 behaviour).
+  //
+  // SB-088: this slugs a value that already exists (a v1 project code), but it MINTS a
+  // template id inside this one parse and points the entry at it in the same breath, so
+  // the new rule cannot orphan a reference — both sides of the join move together. A v1
+  // file could only hold a non-ASCII code if it was hand-written; the old makeCode
+  // deleted those letters before they ever reached a file.
   state.entries.forEach((entry) => {
     if (
       entry._task &&
