@@ -87,17 +87,26 @@ let lastCheckpointDay = null;
 let checkpointHook = () => {};
 /**
  * SB-066 ruled that TT takes its own vault checkpoint — `git add -A` plus a `tt checkpoint: <ts>`
- * commit — before TT's first vault write of any calendar day, at most once per day. SB-068 fills
- * this in; the default is a no-op and the seam is complete without it.
+ * commit — before TT's first vault write of any calendar day, at most once per day. SB-068 filled
+ * it in: `server/src/vault-checkpoint.js` is the implementation and `server/src/index.js` is the
+ * one caller of this setter. The default stays a no-op, so the writer is correct with no hook at
+ * all — which is what keeps every in-process test of this module free of a subprocess.
  *
  * THE TRIGGER IS THE WRITE PATH, NOT THE PROCESS LIFECYCLE, and that is the whole reason this hook
  * is here rather than at boot: `tt serve` spawns detached and `unref`'d (bin/tt.mjs:88-93), so a
  * per-boot hook on a server that runs for a fortnight would mean a per-FORTNIGHT checkpoint. That
  * is also why SB-068 is `blockedBy` this ticket.
+ *
+ * INSTALLING A HOOK CLEARS THE DAY GATE, because the new hook has taken no checkpoint — the gate
+ * records what the CURRENT hook has already done, and carrying it across a re-point would mean a
+ * newly-installed checkpoint silently skipping its first day. In production this is a distinction
+ * without a difference (index.js calls this once, at module load, when the gate is already null);
+ * it is what lets a test drive more than one checkpoint through the seam in one process.
  * @param {(day: string) => void} fn
  */
 export function setVaultCheckpointHook(fn) {
   checkpointHook = typeof fn === 'function' ? fn : () => {};
+  lastCheckpointDay = null;
 }
 /** Called immediately before the first `writeVaultFile` of a calendar day. Never throws. */
 function checkpointIfFirstWriteOfDay() {
