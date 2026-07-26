@@ -12,7 +12,7 @@ Route every piece of work to the **cheapest judge that can actually validate it*
 | Rung | Invocation | Proves | Cannot prove |
 |---|---|---|---|
 | **build** | `npm run build` (client bundles) · `node --check server/src/*.js shared/*.js` | it parses and bundles | any behavior |
-| **unit** | `npm test` (vitest) — **suite not yet set up (see backlog)**; until it lands, targeted `node -e` scripts over `shared/core.js` | pure logic: time parsing, ISO weeks, billing rounding, markdown round-trip | anything HTTP or rendered |
+| **unit** | `npm test` (vitest, `tests/`) — the always-green gate; **372 tests on `main` @ `c6dfefa`**. State the baseline count you started from, and never let it drop | pure logic: time parsing, ISO weeks, billing rounding, markdown round-trip, the vault block codec | anything HTTP or rendered |
 | **api** | `curl` against `localhost:3001` with a cookie jar (login → act → assert JSON/status). Role checks are the canon: employee gets 403 on catalog writes, rates come back null | server behavior incl. auth, roles, persistence, mirror writes | anything the user sees |
 | **browser** | **two instruments, one rung** (DD-013) — `npm run test:browser` (playwright, chromium, headless, against the real built client the API server already serves) · claude-in-chrome on `localhost:5173` — click through the real flow, read console (`read_console_messages`), screenshot the result | it renders, the interaction completes, state survives reload — and, for a committed Playwright flow, keeps doing so | feel, ergonomics-in-daily-use |
 | **terje** | a playable question: *Question / Least build / ≤5-min session / Answer feeds* | feel, keyboard ergonomics, legibility, pitch-readiness | — (the only Track F oracle) |
