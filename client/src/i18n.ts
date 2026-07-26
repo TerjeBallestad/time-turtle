@@ -35,6 +35,66 @@ const NO: Record<string, string> = {
   // here — see the note in the review commit.
   'a vault belongs to one person, so the personal shape allows exactly one user (DD-006): there is no answer to whose daily note a second person’s hours would land in. Switch to the team shape to add users.':
     'et hvelv tilhører én person, så den personlige formen tillater nøyaktig én bruker (DD-006): det finnes ikke noe svar på hvilket dagsnotat en person nummer to sine timer skulle havne i. Bytt til lagform for å legge til brukere.',
+  // SB-057 task 8: the quarantine surface. The English side of every reason key is
+  // TT.vaultQuarantineText's text VERBATIM (shared/core.js) — same discipline as the capability
+  // refusals above: the CLAIM must match, not the bytes, and a reason this map does not know falls
+  // back to the generic line rather than rendering blank (SB-090 will move reason names).
+  //
+  // None of these say the hours were corrupted, in either language. Two of the commonest reasons
+  // are not damage at all — an adopted note's missing digest (SB-091 rider 3), and a table editor
+  // reflowing cell padding (SB-080) — and crying wolf about someone's hours is the worse error.
+  'Notes paused': 'Notater satt på pause',
+  paused: 'satt på pause',
+  'Time Turtle cannot prove it wrote this block, so it has stopped writing to this note.':
+    'Time Turtle kan ikke bevise at den skrev denne blokken, så den har sluttet å skrive til dette notatet.',
+  'Time Turtle refused this note and did not say why in words this version knows.':
+    'Time Turtle avviste dette notatet og forklarte det ikke med ord denne versjonen kjenner.',
+  'the Time Log heading is not in this note.': 'Time Log-overskriften finnes ikke i dette notatet.',
+  'this note uses Windows line endings, which Time Turtle will not rewrite.':
+    'dette notatet bruker Windows-linjeskift, som Time Turtle ikke skriver om.',
+  'this note has more than one Time Log heading, so nothing can say which is the day’s.':
+    'dette notatet har mer enn én Time Log-overskrift, så ingenting kan si hvilken som er dagens.',
+  'the block has no revision line, and its contents are not ones Time Turtle can describe.':
+    'blokken har ingen revisjonslinje, og innholdet er ikke noe Time Turtle kan beskrive.',
+  'the revision line is there but Time Turtle cannot read it — its short fingerprint is damaged.':
+    'revisjonslinjen er der, men Time Turtle kan ikke lese den — det korte fingeravtrykket er skadet.',
+  'the revision line sits in a later section, so the block has no end Time Turtle trusts.':
+    'revisjonslinjen ligger i en senere seksjon, så blokken har ingen slutt Time Turtle stoler på.',
+  'the block has more than one revision line.': 'blokken har mer enn én revisjonslinje.',
+  'there is no table under the heading.': 'det finnes ingen tabell under overskriften.',
+  'there is something under the heading that is not part of the table.':
+    'det står noe under overskriften som ikke er en del av tabellen.',
+  'the block’s fingerprint does not match the table it labels. Often this is only a table editor reflowing the spacing; it can also mean another machine’s edit was merged in.':
+    'blokkens fingeravtrykk stemmer ikke med tabellen det merker. Ofte er dette bare en tabellredigerer som endrer mellomrommene; det kan også bety at en endring fra en annen maskin er flettet inn.',
+  'the table has a column Time Turtle does not know.': 'tabellen har en kolonne Time Turtle ikke kjenner.',
+  'the table has the same column twice.': 'tabellen har samme kolonne to ganger.',
+  'a row has a different number of cells than the header.': 'en rad har et annet antall celler enn overskriftsraden.',
+  'a Time cell is not one Time Turtle can read.': 'en Time-celle er ikke en Time Turtle kan lese.',
+  'a Bill cell is neither a check mark nor blank, and that cell decides money.':
+    'en Bill-celle er verken et hakemerke eller tom, og den cellen avgjør penger.',
+  'what Time Turtle would write here is something it could not read back.':
+    'det Time Turtle ville skrevet her er noe den ikke kunne lest tilbake.',
+  'this note went back to an earlier revision with contents Time Turtle did not write — a restore from history, or another editor.':
+    'dette notatet gikk tilbake til en tidligere revisjon med innhold Time Turtle ikke skrev — en gjenoppretting fra historikken, eller en annen redigerer.',
+  'this note’s revision is older than the one Time Turtle recorded, and Time Turtle has no record of it — so it cannot tell an out-of-date copy from a deliberate restore.':
+    'revisjonen i dette notatet er eldre enn den Time Turtle har notert, og Time Turtle har ingen oppføring av den — så den kan ikke skille en utdatert kopi fra en bevisst gjenoppretting.',
+  // SB-098 item 4: the first-run question (ShapeChoice.tsx). SHAPE LANGUAGE IN BOTH LANGUAGES —
+  // never `sqlite`, never `vault` as an engine name. DD-015's point is that an install chooses
+  // what it IS and the storage falls out of that, and someone opening Time Turtle for the first
+  // time can answer "mine or my company's" without knowing either word.
+  //
+  // 'Hvelv' is already this surface's established Norwegian for the Obsidian vault (see 'Vault'
+  // below and 'Hvelvmappe'), so the closing line points at the section the answer can be changed
+  // in using the name that section actually carries in the sidebar.
+  'Whose hours will this Time Turtle keep?': 'Hvem sine timer skal denne Time Turtle holde styr på?',
+  'My own Obsidian-backed timesheet': 'Min egen Obsidian-baserte timeliste',
+  'One person, no sign-in. Your Obsidian vault keeps the hours — Time Turtle writes them into your daily notes and reads back the edits you make there.':
+    'Én person, ingen innlogging. Obsidian-hvelvet ditt holder timene — Time Turtle skriver dem inn i dagsnotatene dine og leser tilbake endringene du gjør der.',
+  'My company’s': 'Bedriften min',
+  'Several people, each signing in, with roles and a review step before hours are invoiced. Time Turtle keeps the hours and mirrors every save to markdown.':
+    'Flere personer som logger inn hver for seg, med roller og et godkjenningssteg før timene faktureres. Time Turtle holder timene og speiler hver lagring til markdown.',
+  'Asked once. You can change the answer later under Settings → Vault.':
+    'Spørsmålet stilles én gang. Du kan endre svaret senere under Innstillinger → Hvelv.',
   Vault: 'Hvelv',
   'Instance shape': 'Instansform',
   Team: 'Lag',
@@ -44,8 +104,8 @@ const NO: Record<string, string> = {
     'serveren har låst instansformen (TT_SHAPE_LOCK) — endre den i servermiljøet.',
   'A team install keeps SQLite as the source of truth and mirrors every save to markdown. A personal install is one person, with an Obsidian vault as the source of truth instead.':
     'En laginstallasjon har SQLite som fasit og speiler hver lagring til markdown. En personlig installasjon er én person, med et Obsidian-hvelv som fasit i stedet.',
-  'The personal shape is not finished: the markdown mirror is off (the files it wrote are retired), committing is off until weekly notes land, and markdown paste-back is off. Nothing syncs these paths yet.':
-    'Den personlige formen er ikke ferdig: markdown-speilet er av (filene den skrev er pensjonert), innsending er av til ukenotatene kommer, og tilbakeliming av markdown er av. Ingenting synkroniserer disse stiene ennå.',
+  'The personal shape is not finished: the markdown mirror is off (the files it wrote are retired), committing is off until weekly notes land, and markdown paste-back is off. Daily notes DO sync — hours you log here are written into them, and edits made elsewhere are read back.':
+    'Den personlige formen er ikke ferdig: markdown-speilet er av (filene det skrev er pensjonert), innsending er av til ukenotater kommer, og markdown-tilbakeliming er av. Dagsnotatene synkroniseres — timer du fører her skrives inn i dem, og endringer gjort andre steder leses tilbake.',
   'Vault folder': 'Hvelvmappe',
   'e.g. ~/Obsidian/ballestad': 'f.eks. ~/Obsidian/ballestad',
   'the vault root — every path below is relative to it.': 'roten i hvelvet — alle stiene under er relative til den.',
@@ -195,6 +255,12 @@ const NO: Record<string, string> = {
   'Password updated': 'Passord oppdatert',
   'saving…': 'lagrer…',
   synced: 'synkronisert',
+  // SB-134: the sidebar's settled state under `personal`, where the markdown mirror is off and
+  // the vault is the storage — `synced → md` claimed a write that does not happen there. Kept as
+  // ONE key rather than composing `synced` with a bare `vault`: `→ md` is a file-format token
+  // that survives translation, `hvelv` is a word, and 'Hvelv' is already this surface's
+  // established Norwegian for the Obsidian vault (see the `Vault` key above).
+  'synced → vault': 'synkronisert → hvelv',
   'offline — retrying': 'frakoblet — prøver igjen',
   'someone else saved first — reloaded': 'noen andre lagret først — hentet på nytt',
   // SB-034: admin cross-user edit hit a stale-write 409 — the sheet was reloaded fresh.
@@ -210,9 +276,14 @@ const NO: Record<string, string> = {
   'locked to the server default': 'låst til serverstandarden',
   'the server pins the mirror folder (TT_MD_DIR_LOCK) — change it in the server environment.':
     'serveren låser speilmappen (TT_MD_DIR_LOCK) — endre den i servermiljøet.',
-  // SB-085: the standing mirror refusal (SB-065's guard) in the Mirror folder row. The two
-  // `reason` strings are the server's own wording, translated here by exact match.
-  'mirror paused — see Settings → Mirror folder': 'speiling satt på pause — se Innstillinger → Speilmappe',
+  // SB-085: the standing mirror refusal (SB-065's guard). The two `reason` strings are the
+  // server's own wording, translated here by exact match.
+  //
+  // SB-095 moved the notice OUT of the admin-only Mirror folder row into a section of its own
+  // that every user sees, so the toast had to stop pointing at a row a non-admin cannot reach:
+  // it names the new section ('Mirror' / 'Speil') instead.
+  Mirror: 'Speil',
+  'mirror paused — see Settings → Mirror': 'speiling satt på pause — se Innstillinger → Speil',
   'mirror unblocked — the next save overwrites the file': 'speiling gjenåpnet — neste lagring overskriver filen',
   'Mirror paused': 'Speiling satt på pause',
   'the file changed on disk since Time Turtle last wrote it':
@@ -223,6 +294,12 @@ const NO: Record<string, string> = {
   'never written by Time Turtle': 'aldri skrevet av Time Turtle',
   'Time Turtle will not overwrite a file it did not write, so it has stopped mirroring this timesheet. Everything you log is still saved here — only the markdown file is frozen. Copy it somewhere safe if it holds changes you need.':
     'Time Turtle overskriver ikke en fil den ikke har skrevet selv, så speilingen av denne timelisten er stanset. Alt du fører opp lagres fortsatt her — det er bare markdown-filen som er frosset. Ta en kopi av den et trygt sted hvis den inneholder endringer du trenger.',
+  // SB-095: the same notice, about SOMEBODY ELSE's mirror, shown to an admin. Second person
+  // is wrong there — the hours are not the reader's — so the heading and the body differ while
+  // the two buttons and the red confirm line are shared.
+  'Mirror paused for ': 'Speiling satt på pause for ',
+  'Time Turtle will not overwrite a file it did not write, so it has stopped mirroring this person’s timesheet. Their hours are still saved here — only the markdown file is frozen. Copy it somewhere safe before you adopt it.':
+    'Time Turtle overskriver ikke en fil den ikke har skrevet selv, så speilingen av denne personens timeliste er stanset. Timene deres lagres fortsatt her — det er bare markdown-filen som er frosset. Ta en kopi av den et trygt sted før du overtar den.',
   'Adopt the file on disk…': 'Overta filen på disken…',
   'Nothing is merged: Time Turtle adopts the file exactly as it stands right now, and the next save replaces its contents with the data in this app.':
     'Ingenting slås sammen: Time Turtle overtar filen nøyaktig slik den står nå, og neste lagring erstatter innholdet med dataene i denne appen.',

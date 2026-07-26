@@ -9,8 +9,11 @@ import type {
   OkResponse,
   ClientRenameResponse,
   MirrorAcknowledgeResponse,
+  MirrorBlocksResponse,
   ProjectRenameResponse,
+  ShapeChoiceResponse,
   TeamReportResponse,
+  Shape,
   User,
   Settings,
   Client,
@@ -72,6 +75,17 @@ export const api = {
   getState: () => request<StateResponse>('GET', '/api/state'),
   putState: (patch: StatePatch) => request<PutStateResponse>('PUT', '/api/state', patch),
   /**
+   * SB-098 / SB-139 — choose what this install IS. The dedicated channel, not a settings edit:
+   * it carries one field instead of round-tripping the whole settings object (the class of bug
+   * SB-133 closed), and it can store an answer EQUAL to the shape already in force, which the
+   * Settings selector's early return deliberately cannot.
+   *
+   * Nothing debounced or retried goes through here, so its refusals are real refusals — a 403
+   * from the lock or from DD-006's single-user guard surfaces as a toast and cannot wedge
+   * `useServerSync` the way one on `PUT /api/state` would.
+   */
+  setShape: (shape: Shape) => request<ShapeChoiceResponse>('POST', '/api/shape', { shape }),
+  /**
    * SB-065: clear a standing mirror refusal. This is NOT a dismiss — it ADOPTS the bytes
    * currently on disk as TT's stamp, which is consent for the next save to overwrite them.
    * Nothing is written here, so an acknowledgement made by mistake costs nothing until the
@@ -79,6 +93,13 @@ export const api = {
    */
   acknowledgeMirror: (userId?: number) =>
     request<MirrorAcknowledgeResponse>('POST', '/api/mirror/acknowledge', userId === undefined ? {} : { userId }),
+  /**
+   * SB-095 — admin only: every standing mirror refusal on the instance, the caller's own
+   * included. `/api/state` reports only the session user's, so this is the only way an admin
+   * learns an employee's mirror has stopped. The list shape is SB-086's (`mirrorBlocks`),
+   * plus the `userId` each block needs for `acknowledgeMirror`.
+   */
+  mirrorBlocks: () => request<MirrorBlocksResponse>('GET', '/api/mirror/blocks'),
   listUsers: () => request<UsersResponse>('GET', '/api/users'),
   createUser: (u: UserCreateRequest) => request<UserResponse>('POST', '/api/users', u),
   deleteUser: (id: number) => request<OkResponse>('DELETE', '/api/users/' + id),

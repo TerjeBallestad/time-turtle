@@ -3,7 +3,7 @@ import express from 'express';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
-import { PORT, MD_DIR_LOCKED } from './config.js';
+import { PORT, HOST, MD_DIR_LOCKED, isLoopbackHost } from './config.js';
 import { shapeTarget, activeShape, shapeLocked } from './backend.js';
 import { verifyPassword, makeToken, readSessionCookie, sessionCookie, clearCookie } from './auth.js';
 // SB-056: the split is at the import site on purpose. `db` is IDENTITY ONLY here — users,
@@ -15,6 +15,33 @@ import * as store from './store.js';
 // SB-056: `writeMirror` is NOT imported here any more — every mirror write goes through
 // `store.mirror`, which is off under `vault` (DD-011). See store.js.
 import { mirrorTarget, mirrorPath, mirrorBlockFor, acknowledgeMirrorBlock, retireMirrors } from './markdown.js';
+// SB-057: the sync engine. Imported here and nowhere else in the API layer — the routes have no
+// business knowing the vault is being watched, and the only thing this file does with it is start
+// it once the server is answering.
+import { startVaultSync, scanVault, vaultSyncConfig, forgetOwnWrites, setVaultRewriter } from './vault-sync.js';
+import { rewriteVaultDate, setVaultCheckpointHook } from './vault-write.js';
+import { vaultCheckpoint } from './vault-checkpoint.js';
+
+// SB-057: the two arbitration verdicts that need a WRITE are handed back to the writer HERE, at
+// the one place that already imports both. The engine never imports the writer, so the dependency
+// runs one way: store → vault-write → vault-sync → db.
+setVaultRewriter((date, rev) => {
+  const config = vaultSyncConfig();
+  if (config) rewriteVaultDate(config.userId, date, rev);
+});
+
+// SB-068: and the same trick for the checkpoint. The writer owns the WHEN (its first write of a
+// calendar day, which is the only place that moment exists — `tt serve` runs detached for weeks,
+// so a per-boot hook would mean a per-fortnight checkpoint); this module owns the WHAT.
+//
+// Wired at module load and not inside `app.listen`, because the trigger is a write and not a
+// boot: a save arriving during the boot scan must find the hook already in place. Resolving the
+// config PER CALL rather than closing over one is what makes the checkpoint follow the vault when
+// Settings → Vault re-points it — the same reason the rewriter above does.
+setVaultCheckpointHook((day) => {
+  const config = vaultSyncConfig();
+  if (config) vaultCheckpoint(config.root, day);
+});
 import { teamReport } from './reports.js';
 import TT from '../../shared/core.js';
 
@@ -60,6 +87,69 @@ const shapeSwitchRefusal = (count) =>
 function singleUserShape() {
   return activeShape() === 'personal';
 }
+
+/**
+ * SB-098 item 4: DD-015's OPEN STATE — the one install configuration where the shape question
+ * has two real answers and nobody has given one, so the app asks (`AppState.shapeOpen`).
+ *
+ * All three conditions, and each rules out a different install that must NOT be asked:
+ *   `source === 'default'` — nothing stored, no TT_SHAPE, no TT_SHAPE_LOCK. An install that
+ *      answered by env or by lock has answered; re-asking would let a modal overwrite what
+ *      its operator typed on the command line. This one condition also subsumes the lock,
+ *      which is why there is no separate `shapeLocked()` term.
+ *   exactly one user — more than one has ANSWERED BY EXISTING (DD-015), and the boot rule
+ *      above stamps those `team` silently. The count is re-checked HERE, per request, because
+ *      the boot rule runs once: an open-state install that adds a second user mid-session
+ *      leaves the open state the moment it does, without waiting for a restart.
+ *   the caller is an admin — "ask at first admin login". Under the open state the single user
+ *      IS the admin, so this never fires today; it is here so that the modal can never appear
+ *      to an employee if some later path opens the state on a multi-user box.
+ *
+ * Resolved SERVER-SIDE, like every other shape decision. The client renders the question; it
+ * does not get to decide whether it is being asked.
+ * @param {User} user @returns {boolean}
+ */
+function shapeQuestionOpen(user) {
+  return shapeTarget().source === 'default' && db.listUsers().length === 1 && user.role === 'admin';
+}
+
+// ---- SB-098 / DD-015: the loopback bind, and it is NOT best-effort ----
+//
+// The personal shape serves a person's timesheet with NO AUTHENTICATION (item 1 below, in
+// requireUser). Two things make that acceptable and both are load-bearing; this is the second.
+// Bound to 0.0.0.0, "no login" means no login for anyone on the same wifi — every colleague on
+// the office network reads and WRITES the vault owner's hours by typing an IP.
+//
+// So a non-loopback TT_HOST under `personal` REFUSES TO START rather than being ignored or
+// quietly overridden. The alternatives were considered and are both worse. Ignoring it leaves
+// an operator believing the box is reachable when it is not — annoying but safe — while
+// HONOURING it is the catastrophe, and "clamp it to loopback and log a line" is the same
+// silent-divergence failure this whole map exists to kill, on the one setting where being
+// wrong is unrecoverable: bytes served to the wrong network cannot be recalled.
+//
+// IT IS THE FIRST THING THAT RUNS, ahead even of `seedIfEmpty` — further ahead than the
+// ordering rule below strictly demands, because it can be: it needs the shape and the env and
+// nothing else. A boot refused here has not created an admin user, not seeded demo data, not
+// stamped a shape or a cutover and not swept a mirror. The one refusal whose subject is "the
+// wrong people can read this" should leave the least behind.
+//
+// It is a shape decision resolved SERVER-SIDE (shapeTarget: env, lock, stored row) — nothing a
+// client sends reaches it, and there is no request in flight when it runs.
+if (singleUserShape() && HOST && !isLoopbackHost(HOST)) {
+  console.error(
+    `[time-turtle] refusing to start: the personal shape has no login (DD-015), so it may only bind loopback — but TT_HOST=${JSON.stringify(HOST)} is not a loopback address.`,
+  );
+  console.error('[time-turtle] serving an unauthenticated timesheet on a reachable interface hands it to the network.');
+  console.error(`[time-turtle] recover with:  unset TT_HOST   (or run the team shape:  ${SHAPE_RECOVERY})`);
+  process.exit(1);
+}
+/**
+ * The address `app.listen` binds. Under `personal` it is loopback, always — the refusal above
+ * has already rejected every TT_HOST that is not, so an explicit loopback TT_HOST is honoured
+ * (`::1`, say) and an absent one means `127.0.0.1`. Under `team` an absent TT_HOST keeps the
+ * historical every-interface bind exactly as it was.
+ */
+const BIND_HOST = singleUserShape() ? HOST || '127.0.0.1' : HOST || undefined;
 
 db.seedIfEmpty();
 
@@ -136,13 +226,52 @@ const app = express();
 app.use(express.json({ limit: '4mb' }));
 
 // ---- auth middleware ----
-/** @param {Request} req @param {Response} res @param {NextFunction} next */
+/**
+ * SB-098 / DD-015 depth 2, item 1: the implicit local session.
+ *
+ * Under `personal` there is exactly ONE human and the machine is theirs, so the cookie
+ * challenge asks a question with one possible answer. `requireUser` resolves that answer
+ * itself and the Login screen is never rendered. The user RECORD is untouched — `user_id 1`,
+ * the schema, and every `user_id` join stay exactly as they are (depth 3, dropping `user_id`,
+ * was rejected: it would make the two shapes two programs).
+ *
+ * THIS IS THE ONE PLACE AUTHENTICATION CAN BE SKIPPED, and it stays the one place. Two
+ * properties are what make that safe, and neither is negotiable:
+ *
+ *   1. IT KEYS OFF THE EFFECTIVE SHAPE, resolved server-side by `shapeTarget()` from the env,
+ *      the lock and the stored row. Nothing the client sends reaches this decision. A
+ *      client-supplied shape hint here would not be a design smell, it would be a one-line
+ *      auth bypass: any request could claim `personal` and skip the challenge. There is
+ *      deliberately no header, no query parameter and no body field consulted below.
+ *   2. IT IS LOOPBACK-ONLY. The boot block above refuses to start `personal` on a
+ *      non-loopback bind, so "no login" cannot silently mean "no login for the whole office".
+ *
+ * The COUNT CHECK is belt and braces rather than the guarantee: three separate guards already
+ * make >1 user under `personal` unreachable (the boot refusal, the `POST /api/users` refusal
+ * and the switch refusal), but if one of them were ever weakened, the failure mode without
+ * this line is picking an arbitrary person's timesheet for an anonymous caller. With it, the
+ * shape simply falls back to asking who you are, which is the safe direction.
+ *
+ * A REAL COOKIE STILL WINS where there is one — a session that survives a `team → personal`
+ * switch keeps working rather than being silently re-pointed.
+ * @param {Request} req @param {Response} res @param {NextFunction} next
+ */
 function requireUser(req, res, next) {
   const sess = readSessionCookie(req);
   const user = sess ? db.findUserById(sess.userId) : null;
   // SB-013: reject a token whose version is behind the stored one — the cookie was
   // issued before a password change, so its session is no longer trusted.
   if (!sess || !user || sess.tokenVersion !== db.getTokenVersion(user.id)) {
+    if (!TT.shapeCapabilities(activeShape()).identity) {
+      const only = db.listUsers();
+      // `findUserById`, not the list row, so `req.user` is byte-identical to what the cookie
+      // path produces — one session object, one shape, whichever way it was resolved.
+      const local = only.length === 1 ? db.findUserById(only[0].id) : null;
+      if (local) {
+        req.user = local;
+        return next();
+      }
+    }
     return res.status(401).json({ error: 'not authenticated' });
   }
   req.user = user;
@@ -204,6 +333,67 @@ app.post('/api/users/:id/password', requireUser, requireAdmin, (req, res) => {
 });
 
 // ---- state ----
+/**
+ * SB-057: the daily notes TT has stopped writing to. Derived from `vault_index`, so it is sticky
+ * across restarts by construction and needs no ledger of its own.
+ *
+ * The REASON CODE is carried raw and the wording is resolved on the surface
+ * (`TT.vaultQuarantineText`), which is what lets SB-090 move a reason without touching the wire.
+ * @returns {import('../../shared/types.ts').VaultQuarantinedNote[]}
+ */
+function vaultQuarantinedNotes() {
+  // GATED ON THE SHAPE, and this is a privacy check rather than an optimisation. Every other field
+  // in `stateFor` is either stripped for employees, scoped to `user.id`, or admin-gated; this one
+  // would hand any authenticated caller the absolute filesystem paths of the vault owner's daily
+  // notes. Under `team` it happens to be empty today only because nothing writes `vault_index`
+  // there — not because anything checked — and a `personal → team` switch leaves those rows behind.
+  // Under `personal` there is exactly one user (DD-006 consequence 1), so there is nobody to leak to.
+  if (activeShape() !== 'personal') return [];
+  return store
+    .listVaultIndex()
+    .filter((row) => row.state === 'quarantined')
+    .map((row) => ({
+      path: row.path,
+      date: row.date,
+      reason: String(row.quarantineReason || ''),
+      detectedAt: row.quarantinedAt ?? null,
+    }));
+}
+/**
+ * SB-133: the settings object AS IT GOES ON THE WIRE — `shape` is the value that was CHOSEN,
+ * and ABSENT when nobody has chosen one. `getSettings()` keeps defaulting it to `team` for every
+ * server-side reader, which is right (DD-015: `team` is the safe row); what is wrong is putting
+ * that invented value in front of a client that PUTs the whole object back.
+ *
+ * That round trip was a live defect, not a tidiness point. An install started `TT_SHAPE=personal`
+ * with nothing stored received `shape: 'team'` here, echoed it back with the first vault path
+ * typed into Settings, and STORED it — and a stored value beats the env (SB-100's precedence,
+ * working exactly as designed), so the backend derived to `sqlite` and the vault went quiet while
+ * TT went on accepting hours. No error, no toast, no refusal: the silent divergence this whole
+ * map exists to kill, arriving through the settings page.
+ *
+ * THE SEAM IS HERE AND NOT AT THE WRITE EDGE, because the write edge cannot tell the two apart.
+ * An incoming `shape: 'team'` is either a person choosing Team or a client parroting a default it
+ * was handed, and those are the same bytes; a server-side compare could only guess, and guessing
+ * wrong in one direction stores a choice nobody made while guessing wrong in the other silently
+ * swallows a real one. Nothing that was never SENT has to be guessed about. It also fixes the
+ * class rather than the instance: the next instance-local field with a meaningful default would
+ * do this again. (`mdDir` escapes only because its default is `''`, a value nobody can mean —
+ * see the `getStoredShape` comment in db.js, which is the same distinction one field over.)
+ *
+ * The EFFECTIVE shape is not lost by this: it has its own field, `AppState.shape`, which is what
+ * every client capability check already reads, and `shape?: Shape` in the type has said "absent
+ * behaves as `team` AND is distinguishable from a stored `team`" since SB-100.
+ * @returns {import('../../shared/types.ts').Settings & { mdDir: string }}
+ */
+function wireSettings() {
+  const settings = store.getSettings();
+  const stored = store.getStoredShape();
+  if (stored) return { ...settings, shape: stored };
+  const { shape: _defaulted, ...rest } = settings;
+  return /** @type {import('../../shared/types.ts').Settings & { mdDir: string }} */ (rest);
+}
+
 // Employees never see hourly rates: stripped server-side, not just hidden in the UI.
 /** @param {User} user */
 function stateFor(user) {
@@ -228,10 +418,20 @@ function stateFor(user) {
     // BACKEND is not on the wire: it is derived from the shape (DD-015), never chosen.
     shape: activeShape(),
     shapeLocked: shapeLocked(),
+    // SB-098: DD-015's open state. See shapeQuestionOpen — the client renders the question,
+    // it does not decide whether it is being asked.
+    shapeOpen: shapeQuestionOpen(user),
     // SB-065: a standing mirror refusal is STATE, not a log line — a mirror that has
     // quietly stopped updating still looks current, which is the failure this guards.
     mirrorBlocked: mirrorBlockFor(user),
-    settings: store.getSettings(),
+    // SB-057: the same argument, one shape over. Under `personal` the vault IS the storage, so a
+    // silently quarantined day is a day whose hours stop syncing with no signal anywhere. Read-only
+    // and additive; empty under `team`, which has no vault. No resolution ACTION — SB-103 rules
+    // what a human may do about one, and every option there is additive on top of this.
+    vaultQuarantined: vaultQuarantinedNotes(),
+    // SB-133: `wireSettings()`, never `store.getSettings()` — the defaulted `shape` must not
+    // leave the server, because the client PUTs this object straight back.
+    settings: wireSettings(),
     clients: store.getClients().map(strip),
     projects: store.getProjects().map(strip),
     tasks: store.getTasks(user.id),
@@ -669,11 +869,18 @@ app.put('/api/state', requireUser, (req, res) => {
   // the STORED value rather than rejecting the key — the client PUTs the whole settings object
   // on every currency edit, and a blanket 403 would wedge it: `useServerSync` re-queues any
   // non-409 failure and retries every 4 s forever, so an unchanged value has to ride along.
+  //
+  // SB-133: `getStoredShape()`, and now it really is the stored value the sentence above always
+  // claimed. `getSettings().shape` defaults to `team`, so a locked install with nothing stored
+  // used to let an incoming `team` through this guard and STORE it — a row the lock was there to
+  // prevent, invisible until the day someone removed TT_SHAPE_LOCK and the install moved. The
+  // ride-along is untouched: `stateFor` no longer sends a shape nobody chose, so an unchanged
+  // settings object carries no `shape` key at all, and one that does carries the stored value.
   if (
     shapeLocked() &&
     body.settings &&
     body.settings.shape !== undefined &&
-    String(body.settings.shape) !== store.getSettings().shape
+    String(body.settings.shape) !== store.getStoredShape()
   ) {
     return res.status(403).json({ error: 'the instance shape is locked by server configuration (TT_SHAPE_LOCK)' });
   }
@@ -746,6 +953,22 @@ app.put('/api/state', requireUser, (req, res) => {
     if (err instanceof ReferencedDeleteError) return res.status(409).json({ error: err.message, conflict: true });
     return res.status(400).json({ error: 'save failed: ' + /** @type {Error} */ (err).message });
   }
+  // SB-057: the vault the engine watches is a SETTING, so the engine has to be re-pointed when it
+  // moves. Without this, configuring the vault folder for the first time does nothing until the
+  // next restart — a personal install that looks wired up and syncs nothing, which is the exact
+  // "perfect plumbing, no way to reach it" failure SB-063 already cost this repo once.
+  //
+  // `startVaultSync` stops first and is idempotent, so re-pointing at nothing correctly STOPS
+  // watching rather than leaving a watcher on the old folder. The scan that follows is
+  // fire-and-forget for the same reason the boot one is: a cold vault takes minutes and a save
+  // must not wait for it.
+  if (body.settings && (body.settings.vaultPaths !== undefined || body.settings.shape !== undefined)) {
+    forgetOwnWrites(); // echo records are keyed by path, and the paths may have just moved
+    if (startVaultSync())
+      void scanVault().catch((err) =>
+        console.error('[time-turtle] vault re-scan failed:', /** @type {Error} */ (err).message),
+      );
+  }
   /** @type {string | null} */
   let mirror = null;
   /** @type {string | null} */
@@ -764,7 +987,79 @@ app.put('/api/state', requireUser, (req, res) => {
     mirror,
     mirrorError,
     mirrorBlocked: mirrorBlockFor(req.user),
+    // SB-085's lesson, one shape over: the save that TRIPS a quarantine is the moment the client
+    // should learn about it, not the next reload.
+    vaultQuarantined: vaultQuarantinedNotes(),
   });
+});
+
+// ---- SB-098 / SB-139: the deliberate shape-choosing gesture ----
+//
+// Choosing what this install IS is not a settings edit, and this is the channel that says so.
+// SB-098 needed it: the first-run question must store an answer that is EQUAL to the shape
+// already in force (an unstored install resolves to `team`, so "my company's" is the shape the
+// user is already effectively on), and it must do that from a modal that holds no settings
+// object to round-trip. Sending the whole settings object to answer one question is precisely
+// the class of bug SB-133 just closed.
+//
+// WHY A POST AND NOT A 403 ON THE SHARED PUT. `useServerSync` re-queues any non-409 failure and
+// re-arms a 4 s timer forever, so a blanket refusal on `PUT /api/state` wedges the client
+// permanently — SB-139's stated constraint, and the reason the two existing shape guards
+// compare against the stored value instead of rejecting the key. Nothing debounced or retried
+// reaches this route, so it may refuse outright, loudly, the way SB-056 refuses a second user.
+//
+// SB-139 IS NOT CLOSED BY THIS. `PUT /api/state` still accepts `shape`, so a hand-rolled client
+// can still store one without coming through here. Narrowing that is the other half of SB-139
+// and it moves SB-100's guard suites, which this ticket was told to keep green and untouched —
+// see the resolution comment on SB-098. What lands here is the channel, built once.
+app.post('/api/shape', requireUser, requireAdmin, (req, res) => {
+  const { shape } = req.body || {};
+  if (!TT.SHAPES.includes(shape))
+    return res.status(400).json({ error: 'shape must be one of ' + TT.SHAPES.join(', ') });
+  // The same three refusals the shared PUT applies, in the same order — this is a second door
+  // into one decision, never a second decision. DC-002: the lock is env-only and beats a write.
+  if (shapeLocked())
+    return res.status(403).json({ error: 'the instance shape is locked by server configuration (TT_SHAPE_LOCK)' });
+  // DD-006 consequence 1, direction 2. Compared against the EFFECTIVE shape rather than the
+  // stored one, because that is the shape the caller is actually moving away from.
+  if (shape === 'personal' && activeShape() !== 'personal') {
+    const users = db.listUsers().length;
+    if (users > 1) return res.status(403).json({ error: shapeSwitchRefusal(users) });
+  }
+  // NO `bumpCatalogVersion()`, and that is a considered omission rather than a forgotten line.
+  //
+  // `shape` is instance-local: it never travels to the vault or the mirror, it is not one of the
+  // catalog COLLECTIONS DC-001's version guards, and storing it cannot clobber another client's
+  // edit — so there is no lost update for a bump to prevent here.
+  //
+  // Bumping it does real harm, measured: this route's caller reloads afterwards, and a reload
+  // hands `useServerSync` a whole new state object while leaving its cached `versionRef` on the
+  // pre-bump number (it is re-baselined only on the FIRST load and after a 409). Every reference
+  // in the new state differs, so the hook immediately queues a full PUT — carrying the stale
+  // version, straight into a 409. The client recovers by reloading, but the patch it was holding
+  // is dropped by design, so the user's next keystrokes vanish with a "someone else saved first"
+  // toast on a single-user install. The browser suite caught it as an empty markdown mirror.
+  //
+  // That staleness is a pre-existing defect on the `load()`-after-write paths (the Settings shape
+  // toggle, renameProject, renameClient) and it is NOT fixed here: `useServerSync`'s 409 handling
+  // is SB-105, which Terje is ruling separately. This route simply declines to add a new way in.
+  store.transaction(() => {
+    // putSettings stamps the DD-016 cutover for `personal` itself, so nothing that can store
+    // the shape can skip it — including this route.
+    store.putSettings({ shape });
+  });
+  // The vault the engine watches is decided by the shape, so re-point it here for the same
+  // reason the settings PUT does: without this, answering "personal" leaves the sync engine
+  // idle until the next restart.
+  forgetOwnWrites();
+  if (startVaultSync())
+    void scanVault().catch((err) =>
+      console.error('[time-turtle] vault re-scan failed:', /** @type {Error} */ (err).message),
+    );
+  console.log(`[time-turtle] instance shape chosen: ${shape} (stored)`);
+  // The EFFECTIVE shape after the write, not the one that was asked for — they differ if a
+  // lock or an env value is in play, and the caller reloads against what is actually in force.
+  res.json({ ok: true, shape: activeShape(), version: store.getVersions(req.user.id) });
 });
 
 // ---- markdown mirror (SB-065) ----
@@ -781,6 +1076,30 @@ app.post('/api/mirror/acknowledge', requireUser, (req, res) => {
   const path = mirrorPath(target);
   const cleared = acknowledgeMirrorBlock(path);
   res.json({ ok: true, cleared, path });
+});
+
+// SB-095: the cross-user READ that makes the line above reachable. `GET /api/state` reports
+// only the session user's block, so an admin could neither see nor clear an employee's —
+// even though the acknowledge route has taken `{userId}` since SB-065. The write plumbing
+// was built and unreachable; this is the missing read.
+//
+// Shape follows SB-086 rather than inventing a third: several users' blocks come back as a
+// LIST under the plural name (`mirrorBlocks`), where the one-mirror routes carry a singular
+// `mirrorBlocked`. Each block additionally carries `userId`/`userName`, because the guard is
+// keyed by PATH and the acknowledge call is keyed by USER — without the identity the admin
+// has a report it cannot act on.
+//
+// The caller's own block is INCLUDED. "Every block on this instance" is a claim with no
+// exception to remember, and the client already renders its own from /api/state, so it drops
+// the duplicate there — one filter in one place beats a server-side carve-out.
+app.get('/api/mirror/blocks', requireUser, requireAdmin, (req, res) => {
+  /** @type {import('../../shared/types.ts').MirrorBlock[]} */
+  const mirrorBlocks = [];
+  for (const user of db.listUsers()) {
+    const block = mirrorBlockFor(user);
+    if (block) mirrorBlocks.push({ ...block, userId: user.id, userName: user.name });
+  }
+  res.json({ mirrorBlocks });
 });
 
 // ---- team reports (admin) ----
@@ -819,7 +1138,9 @@ app.get('/api/users/:id/timesheet', requireUser, requireAdmin, (req, res) => {
   if (!target) return res.status(404).json({ error: 'no such user' });
   res.json({
     user: target,
-    settings: store.getSettings(),
+    // SB-133: the same rule as `stateFor` — both OUTBOUND seams say what was chosen, so no
+    // client anyone writes against either of them can echo a default back as a decision.
+    settings: wireSettings(),
     clients: store.getClients(),
     projects: store.getProjects(),
     tasks: store.getTasks(id),
@@ -1206,11 +1527,21 @@ const SHAPE_SOURCE = {
   default: 'default',
 };
 
-app.listen(PORT, () => {
+// SB-098: `{ port, host }` rather than `listen(PORT)`. `host: undefined` is the historical
+// every-interface bind, which is what `team` keeps; under `personal` BIND_HOST is loopback and
+// the boot block above has already refused every TT_HOST that would make it anything else.
+app.listen({ port: PORT, host: BIND_HOST }, () => {
   const shape = shapeTarget();
   const target = mirrorTarget();
   console.log(
     `[time-turtle] api on http://localhost:${PORT}  ·  shape: ${shape.shape}  (${SHAPE_SOURCE[shape.source]})  ·  storage: ${shape.backend}`,
+  );
+  // Which interfaces answer is not a detail when there is no login. Said out loud on the first
+  // line of the log, in the same breath as the shape that decided it (SB-073's lesson).
+  console.log(
+    BIND_HOST
+      ? `[time-turtle] bound to ${BIND_HOST} only — this instance is not reachable from other machines`
+      : '[time-turtle] bound to every interface — reachable from other machines on this network',
   );
   if (shape.shadowed)
     console.log(
@@ -1221,8 +1552,28 @@ app.listen(PORT, () => {
   // present tense. The cost is real and is said out loud here rather than discovered.
   if (shape.shape === 'personal')
     console.log(
-      '[time-turtle] personal shape: the markdown mirror is off (DD-011), committing is off until phase 3 (DD-008), markdown paste-back is off, and nothing yet syncs the SQLite index from vault files (SB-057)',
+      '[time-turtle] personal shape: the markdown mirror is off (DD-011), committing is off until phase 3 (DD-008), and markdown paste-back is off',
     );
+  // SB-057: the sync engine starts AFTER the server is answering, deliberately. A cold boot scan
+  // over evicted days is a serial run of ~1 s blocking downloads (SB-052), and `tt serve` spawns
+  // detached — so a scan that ran before `listen` would look exactly like a hang, on a process
+  // nobody can see. The watcher and the interval are started first so a note landing during the
+  // scan is not missed; the scan itself is fire-and-forget.
+  const started = startVaultSync();
+  if (started) {
+    const config = vaultSyncConfig();
+    console.log(`[time-turtle] vault sync → ${config ? config.dailyDir : '?'}  (watch + interval)`);
+    void scanVault()
+      .then((counts) => {
+        const summary = Object.entries(counts)
+          .map(([verdict, n]) => `${n} ${verdict}`)
+          .join(', ');
+        console.log(`[time-turtle] vault boot scan: ${summary || 'no daily notes yet'}`);
+      })
+      .catch((err) => console.error('[time-turtle] vault boot scan failed:', /** @type {Error} */ (err).message));
+  } else if (shape.shape === 'personal') {
+    console.log('[time-turtle] vault sync is idle: no vault folder is configured (Settings → Vault)');
+  }
   console.log(
     `[time-turtle] markdown mirror → ${target.dir}  (${MIRROR_SOURCE[target.source]})${shape.shape === 'personal' ? '  — not written in the personal shape' : ''}`,
   );

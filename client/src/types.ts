@@ -9,6 +9,7 @@ import type {
   User,
   UserCreateRequest,
   ParsedTime,
+  MirrorBlock,
   Shape,
   VaultPaths,
   VaultTimeSeparator,
@@ -55,6 +56,14 @@ export interface UiActions {
    * nobody selects one.
    */
   setShape: (shape: Shape) => void;
+  /**
+   * SB-098 item 4: answer the first-run question. Same channel as `setShape` and the same
+   * reload-don't-guess discipline, MINUS the "you clicked what is already selected" early
+   * return — which is not a detail here but the whole difference. The open state resolves to
+   * an effective `team`, so answering "my company's" IS clicking the shape already in force,
+   * and a compare-first gesture stores nothing and asks again on the next load.
+   */
+  chooseShape: (shape: Shape) => void;
   /** SB-056: where inside the vault TT reads and writes. */
   setVaultPaths: (patch: Partial<VaultPaths>) => void;
   /** SB-063: which characters the vault daily note writes between a start and an end time. */
@@ -62,8 +71,18 @@ export interface UiActions {
   /**
    * SB-065/SB-085: clear the standing mirror refusal — consent for the next save to
    * overwrite whatever is on disk. Resolves false (and toasts) when the server said no.
+   *
+   * SB-095: `userId` clears ANOTHER user's block (admin only, refused server-side otherwise).
+   * Omitted it means your own, and only then is the session's `mirrorBlocked` cleared locally —
+   * an admin adopting an employee's file has not touched their own mirror.
    */
-  acknowledgeMirror: () => Promise<boolean>;
+  acknowledgeMirror: (userId?: number) => Promise<boolean>;
+  /**
+   * SB-095: every standing mirror refusal on the instance (admin only), so the admin surface
+   * can see and clear a block that is not its own. `/api/state` carries only the session
+   * user's. Resolves [] when the server refuses, so the section simply renders nothing.
+   */
+  mirrorBlocks: () => Promise<MirrorBlock[]>;
   importMd: (md: string) => boolean;
   openProject: (code: string) => void;
   /** SDD-002 ruling 4: attest a (week∩month) segment — the server freezes its money. */

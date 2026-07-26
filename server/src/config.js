@@ -45,6 +45,28 @@ export const SHAPE_FROM_ENV = !!process.env.TT_SHAPE;
 export const SHAPE_LOCKED = !!process.env.TT_SHAPE_LOCK && process.env.TT_SHAPE_LOCK !== '0';
 
 export const PORT = +(process.env.PORT || 3001);
+// ---- SB-098: which interfaces the server answers on ----
+//
+// Unset means what `app.listen(PORT)` has always meant — every interface — and that stays the
+// `team` default: a company install is reached from other machines by definition.
+//
+// It exists at all because the personal shape has no login (DD-015 depth 2), and "no login"
+// on 0.0.0.0 means no login FOR ANYONE ON THE SAME WIFI. Under `personal` the bind is forced
+// to loopback, and a TT_HOST that names anything else is a REFUSAL TO START rather than a
+// silently ignored value — see the boot block in index.js. Ignoring it would be the worse
+// reading: an operator who typed TT_HOST=0.0.0.0 believes the box is reachable, and the one
+// thing they must not be wrong about is who can reach an unauthenticated timesheet.
+export const HOST = process.env.TT_HOST || '';
+/**
+ * Whether an address is loopback — the only bind the personal shape permits. `localhost` is
+ * included because it is what a person types; it resolves to 127.0.0.1/::1 and nothing else.
+ * The `127.` net is loopback in its entirety (RFC 1122), so 127.0.0.2 is as safe as 127.0.0.1.
+ * @param {string} host @returns {boolean}
+ */
+export function isLoopbackHost(host) {
+  const h = String(host).trim().replace(/^\[|\]$/g, '').toLowerCase();
+  return h === 'localhost' || h === '::1' || h === '::ffff:127.0.0.1' || /^127\./.test(h);
+}
 export const ADMIN_EMAIL = process.env.TT_ADMIN_EMAIL || 'admin@timeturtle.local';
 export const ADMIN_PASSWORD = process.env.TT_ADMIN_PASSWORD || 'turtle';
 export const SEED_DEMO = process.env.TT_SEED_DEMO !== '0';

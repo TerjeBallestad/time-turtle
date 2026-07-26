@@ -14,13 +14,14 @@ import { ReviewView } from './views/ReviewView';
 import { ProjectPage } from './views/ProjectPage';
 import { SettingsView } from './settings/SettingsView';
 import { Login } from './Login';
+import { ShapeChoice } from './ShapeChoice';
 import { TaskModal } from './TaskModal';
 import { Sidebar } from './Sidebar';
 import { TopBar } from './TopBar';
 import { useSession } from '../hooks/useSession';
 import { useToasts } from '../hooks/useToasts';
 import { useServerSync } from '../hooks/useServerSync';
-import type { AppState, MirrorBlock, VaultPaths } from '../../../shared/types';
+import type { AppState, MirrorBlock, Shape, VaultPaths } from '../../../shared/types';
 import type { UiActions, Route, TaskModalInit } from '../types';
 
 /** Same refusal? Path + first-detection instant identify a block; nothing else changes. */
@@ -60,7 +61,11 @@ export function App() {
   // only and best-effort (a user we cannot read is skipped); refreshed after an approve/
   // release/correction via reviewNonce. isAdminSession is a stable boolean so this does not
   // re-run on every keystroke the way depending on the whole `state` object would.
-  const isAdminSession = !!state && (state as AppState).user?.role === 'admin';
+  // SB-098: AND the install has an identity surface at all. Under `personal` this whole effect
+  // is dead weight — it lists users to count somebody else's pending segments, and there is
+  // nobody else — but more to the point it would fetch for a badge that is no longer rendered.
+  const isAdminSession =
+    !!state && (state as AppState).user?.role === 'admin' && TT.shapeCapabilities((state as AppState).shape).identity;
   const [reviewPending, setReviewPending] = React.useState<number | null>(null);
   const [reviewNonce, setReviewNonce] = React.useState(0);
   React.useEffect(() => {
@@ -107,8 +112,35 @@ export function App() {
     );
 
   TT.lang = lang || state.settings.language || 'en';
+  // SB-098 item 3: whether this install has more than one human in it, read off the SAME
+  // capability table the commit and mirror gates read (DD-011's rule: a capability is a property
+  // of the shape, not of a path captured at switch time). Under `personal` the identity surfaces
+  // are ABSENT, not disabled — a greyed-out Users section still asserts that other users are a
+  // thing here, which is exactly what depth 2 of DD-015 removes.
+  const identity = TT.shapeCapabilities(state.shape).identity;
+  // Role gating is unchanged and still real (the server strips and 403s regardless); it is just
+  // meaningless under `personal`, where the one user is the admin by construction. Everything
+  // below reads `admin && identity` rather than either alone, so a shape with no identity never
+  // renders an admin-only surface and a team employee never gains one.
   const admin = isAdmin(state);
   const updateState = (fn: (current: AppState) => AppState) => setState((current) => fn(current as AppState));
+  // SB-098 / SB-139: storing a shape, once, for both surfaces that can choose one. NOT the
+  // optimistic debounced diff the other settings use — the server can REFUSE this (the lock,
+  // DD-006's single-user guard), so an optimistic flip would show a state that was rejected,
+  // and half the UI below is derived from the EFFECTIVE shape the server reports, which the env
+  // and the lock can both decide. Reload after, never guess.
+  const chooseShape = (shape: Shape) => {
+    void api
+      .setShape(shape)
+      .then((res) => {
+        toast(TT.t('instance shape: ') + res.shape);
+        load();
+      })
+      .catch((err: Error) => {
+        toast(err.message);
+        load(); // re-sync the control back to the server truth on a refusal
+      });
+  };
   const ui: UiActions = {
     toast,
     update: (id, patch) =>
@@ -343,18 +375,34 @@ export function App() {
       // TT_SHAPE alone never fires a settings write"): `state.shape` reads `personal` while
       // `settings.shape` reads its `team` default, so guarding on the stored value made
       // clicking Team a no-op — no request, no toast, no way out of `personal` from the UI.
+      //
+      // SB-133 LOOKED AT THIS LINE AND LEFT IT ALONE, which is worth saying because the ticket
+      // named it. It is not what swallowed the repair: an install wrongly stamped `team` has an
+      // EFFECTIVE `team`, so clicking Personal differs from it, fires, and moves the install —
+      // pinned by 'an install wrongly stamped team can be moved back' in tests/shape-echo.test.js,
+      // which passed before the fix as well as after. The one gesture this does swallow is
+      // clicking the shape you are ALREADY effectively on, to pin it against the env — and that
+      // is the first-run question SB-098 owns (DD-015 keeps the OPEN state deliberately open, so
+      // writing a row here would answer it on the user's behalf). `state.settings.shape` now
+      // carries the STORED shape and is absent when nothing was chosen, so SB-098 has the
+      // distinction it needs the day it wants to offer that.
+      //
+      // SB-098 LEFT THE EARLY RETURN AND MOVED THE TRANSPORT. The guard is still right for a
+      // toggle — clicking the segment that is already lit should not fire a write — and the
+      // ticket that owns the one gesture it swallows is this one, which answers it with a
+      // separate action (`chooseShape` below) rather than by loosening the toggle. What did
+      // change is where the write goes: `POST /api/shape` instead of a whole-settings PUT, so
+      // there is exactly ONE channel that can store a shape from the client (SB-139).
       if (shape === (state.shape ?? 'team')) return;
-      void api
-        .putState({ settings: { ...state.settings, shape } })
-        .then(() => {
-          toast(TT.t('instance shape: ') + shape);
-          load();
-        })
-        .catch((err: Error) => {
-          toast(err.message);
-          load(); // re-sync the toggle back to the server truth on a refusal
-        });
+      chooseShape(shape);
     },
+    // SB-098 item 4: the first-run answer. The SAME channel as the toggle and deliberately
+    // WITHOUT its early return, because the open state resolves to an effective `team`
+    // (DD-015: `team` is the safe row) — so a user answering "my company's" is choosing the
+    // shape they are already effectively on, and a compare-first gesture would silently store
+    // nothing, leave `shapeOpen` true and ask them again. The `personal` half would have
+    // worked, which is exactly what makes that failure easy to ship.
+    chooseShape: (shape) => chooseShape(shape),
     setVaultPaths: (patch) =>
       updateState((current) => ({
         ...current,
@@ -369,11 +417,16 @@ export function App() {
     // and clears the block; nothing is written until the next save. Deliberately NOT a
     // reload — `load()` hands useServerSync a fresh object for every synced key, which would
     // PUT the whole state straight back and turn "acknowledge" into "overwrite now".
-    acknowledgeMirror: () =>
+    //
+    // SB-095: with a `userId` this is an ADMIN clearing someone else's block. Only the
+    // session's own block is mirrored into local state — clearing `mirrorBlocked` for an
+    // employee's adoption would erase the admin's own standing refusal from the screen while
+    // the server still holds it.
+    acknowledgeMirror: (userId) =>
       api
-        .acknowledgeMirror()
+        .acknowledgeMirror(userId)
         .then(() => {
-          setMirrorBlocked(null);
+          if (userId === undefined || userId === state.user.id) setMirrorBlocked(null);
           toast(TT.t('mirror unblocked — the next save overwrites the file'));
           return true;
         })
@@ -381,6 +434,13 @@ export function App() {
           toast(err.message);
           return false;
         }),
+    // SB-095: admin-only. A 403/500 resolves [] rather than throwing — the section is an
+    // extra affordance, and a failed read should leave it drawing nothing, not break Settings.
+    mirrorBlocks: () =>
+      api
+        .mirrorBlocks()
+        .then((r) => r.mirrorBlocks)
+        .catch(() => []),
     importMd: (md) => {
       try {
         const parsed = TT.parseMd(md);
@@ -475,7 +535,10 @@ export function App() {
   else if (route.view === 'week') view = <WeekView state={state} ui={ui} />;
   else if (route.view === 'reports') view = <ReportsView state={state} ui={ui} />;
   else if (route.view === 'invoice' && admin) view = <InvoiceView state={state} ui={ui} />;
-  else if (route.view === 'review' && admin)
+  // SB-098 item 3: the review surface presupposes somebody to review, so `personal` has no
+  // route to it — not a hidden nav item with a live route behind it. The fallback below turns
+  // a stale `review` route into Today, which is exactly the right landing.
+  else if (route.view === 'review' && admin && identity)
     view = <ReviewView state={state} ui={ui} onReviewChanged={() => setReviewNonce((n) => n + 1)} />;
   else if (route.view === 'settings') view = <SettingsView state={state} ui={ui} />;
   else if (route.view === 'project') view = <ProjectPage state={state} ui={ui} code={route.code} />;
@@ -483,9 +546,32 @@ export function App() {
   // an employee signed in) resolves to null above — fall back to Today rather than a blank.
   if (view === null) view = <TodayView state={state} ui={ui} />;
 
-  const syncLabel =
-    sync === 'saving' ? TT.t('saving…') : sync === 'error' ? TT.t('offline — retrying') : TT.t('synced') + ' → md';
-  const syncColor = sync === 'error' ? 'var(--orange)' : 'var(--green)';
+  // SB-134: the sidebar's sync line is a STATUS INDICATOR, so it may only claim a write that is
+  // actually happening. Under `personal` the v2 markdown mirror is off by construction — DD-011
+  // retires it, and DD-015/SB-100 derive the `vault` backend instead — so `synced → md` was a
+  // positive claim about a write that does not occur. Same species as SB-113 (a surface still
+  // speaking the previous architecture), but worse than stale vocabulary: someone watching this
+  // line to know their hours are safe was reading a reassurance that meant nothing.
+  //
+  // THE GATE IS THE CAPABILITY TABLE, never `shape === 'personal'`. DD-011's rule is that a
+  // capability is a property of the SHAPE, and `mirror` is the exact bit that decides whether a
+  // mirror byte is written — so a third shape gets an honest label by adding a row to the table
+  // in shared/core.js, not by finding this line.
+  //
+  // The vault-side state is `state.vaultQuarantined` — the array SB-057 task 8 already puts on
+  // /api/state and renders in Settings → Vault. READ, never re-derived: this line and that panel
+  // are two views of one fact, and a second derivation is how two views come to disagree. The
+  // wording is that panel's own ('Notes paused'), so the sidebar and the place that explains it
+  // use one phrase.
+  const mirrors = TT.shapeCapabilities(state.shape).mirror;
+  const paused = mirrors ? 0 : (state.vaultQuarantined ?? []).length;
+  const settled = paused
+    ? TT.t('Notes paused') + ' (' + paused + ')'
+    : mirrors
+      ? TT.t('synced') + ' → md'
+      : TT.t('synced → vault');
+  const syncLabel = sync === 'saving' ? TT.t('saving…') : sync === 'error' ? TT.t('offline — retrying') : settled;
+  const syncColor = sync === 'error' || paused ? 'var(--orange)' : 'var(--green)';
 
   return (
     <div className={styles.app}>
@@ -497,6 +583,7 @@ export function App() {
         running={running}
         todayEntries={todayEntries}
         admin={admin}
+        identity={identity}
         reviewPending={reviewPending}
         syncLabel={syncLabel}
         syncColor={syncColor}
@@ -511,6 +598,10 @@ export function App() {
         ))}
       </ToastStack>
       {taskModal && <TaskModal state={state} ui={ui} init={taskModal} onClose={() => setTaskModal(null)} />}
+      {/* SB-098 item 4: LAST, so its scrim covers everything including an open task modal, and
+          rendered off `state.shapeOpen` — the server's verdict on whether the question is owed,
+          never a client re-derivation of it (see AppState.shapeOpen). */}
+      {state.shapeOpen && <ShapeChoice ui={ui} />}
     </div>
   );
 }

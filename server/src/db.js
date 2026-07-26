@@ -61,7 +61,67 @@ CREATE TABLE IF NOT EXISTS commits (
   user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
   data TEXT NOT NULL DEFAULT '[]'
 );
+-- SB-057: what TT last read from, and last wrote to, each daily note. One row per PATH.
+--
+-- WHAT THIS TABLE IS FOR, and — just as important — what it is NOT for.
+--
+-- It is NOT the corruption detector. DD-009 deliberately took that job away from an index and
+-- put it ON THE NOTE (the payload digest in the "revision: N · a3f1" anchor), and the deciding
+-- argument was exactly that an on-note digest needs no surviving state: any TT, on any machine,
+-- after any crash or index rebuild, verifies a block against itself. "The index must be durable"
+-- is an argument that was RETIRED. Do not reinstate it here. This table may be deleted, rebuilt
+-- or lost without any block becoming undetectably corrupt.
+--
+-- It IS required for two things that stand on their own merits:
+--   1. the "file rev < index rev" split (design decision 5). Telling "a peer that is simply
+--      behind" from "somebody restored this note from git" needs TT's record of what the note
+--      looked like at the PREVIOUS revision, and no note carries its own history.
+--   2. the own-write echo guard — file_sha is how the watcher recognises TT's own write and
+--      declines to re-import it.
+--
+-- CREATE TABLE IF NOT EXISTS, no migration, and an existing DB starts EMPTY. That is not a gap:
+-- an empty index reads as "nothing known yet", which is the correct cold-start state, and under
+-- the write scope rule (design decision 2) it licenses no writes at all until a scan has read
+-- something.
+--
+-- state is known | unknown | quarantined, and only known licenses a write. That is what
+-- makes invariant 1 ("unreadable or absent → unknown, never empty") mean something on the WRITE
+-- side rather than being a comment on the read side.
+--
+-- TWO HASHES, TWO JOBS (design decision 3), and they must never be collapsed into one:
+--   file_sha       — sha256 over the WHOLE FILE (node:crypto, server-side). Answers "did this
+--                      file change at all", which is the cheap skip that makes the interval scan
+--                      free on a quiet day. It moves when Terje edits "## Captures", so it is
+--                      useless as an arbitration input.
+--   payload_digest — TT.vaultPayloadDigest, the SAME 16-bit FNV the bottom anchor carries.
+--                      Answers "is this the payload TT recorded at that rev". It has to be the
+--                      anchor's hash or the rev-regression split compares against a number no
+--                      note ever contained.
+CREATE TABLE IF NOT EXISTS vault_index (
+  path TEXT PRIMARY KEY,
+  date TEXT NOT NULL,
+  state TEXT NOT NULL,
+  rev INTEGER,
+  payload_digest TEXT,
+  prev_rev INTEGER,
+  prev_payload_digest TEXT,
+  file_sha TEXT,
+  verified INTEGER,
+  quarantine_reason TEXT,
+  quarantined_at TEXT,
+  seen_at TEXT,
+  written_at TEXT
+);
 `);
+
+// The post-commit queue's state, declared HERE — above every caller, not beside `transaction` at
+// the bottom of the file. `let`/`const` are hoisted but left uninitialised, so a reference from a
+// function CALLED before the declaration is evaluated throws a TDZ `ReferenceError`; and
+// `migrateToSdd002()` a few lines down runs `transaction()` during module init, which is exactly
+// that case. See `afterCommit` beside `transaction` for what the queue is for.
+let inTransaction = false;
+/** @type {(() => void)[]} */
+const afterCommitQueue = [];
 
 // ---- migrations ----
 // CREATE TABLE IF NOT EXISTS never touches a table that already exists, so every
@@ -122,6 +182,11 @@ addColumnIfMissing('users', 'mirror_slug', "TEXT NOT NULL DEFAULT ''");
   const pin = db.prepare('UPDATE users SET mirror_slug = ? WHERE id = ?');
   for (const row of unpinned) pin.run(deriveMirrorSlug(row), row.id);
 }
+// SB-057 task 8: when a path FIRST quarantined, as opposed to when it was last looked at. The
+// surface says "detected <when>" and that has to be sticky — `seen_at` moves on every scan pass,
+// including the cheap skip, so it answers a different question. Guarded, because a DB created
+// between this plan's task 2 and task 8 already has the table without the column.
+addColumnIfMissing('vault_index', 'quarantined_at', 'TEXT');
 
 // One-shot v1→v2 data migration (idempotent — guarded by a schema version marker).
 // For every entry: resolve its old task_id against the (old, shared) tasks table and
@@ -616,6 +681,147 @@ export function putCommits(userId, commits) {
   ).run(userId, JSON.stringify(Array.isArray(commits) ? commits : []));
 }
 
+// ---- vault index (SB-057) ----
+// See the DDL above for what this table is and is not. These are the only accessors; nothing
+// else may touch `vault_index`, because `putVaultIndex` owns a rule no caller can be trusted to
+// reproduce (the previous-pair roll-forward below).
+/** @typedef {import('../../shared/types.ts').VaultIndexRow} VaultIndexRow */
+
+/** The three legal `state` values. Only `known` licenses a write (design decision 2). */
+const VAULT_INDEX_STATES = ['known', 'unknown', 'quarantined'];
+
+/**
+ * The raw SQLite row as the model shape. `verified` is stored as 0/1/NULL and comes back as a
+ * boolean or null — null means "TT has not parsed this file", which is a third thing and not
+ * `false` ("parsed, digest-less, therefore unverified").
+ * @param {any} row @returns {VaultIndexRow | null}
+ */
+function vaultIndexRow(row) {
+  if (!row) return null;
+  return {
+    path: row.path,
+    date: row.date,
+    state: row.state,
+    rev: row.rev,
+    payloadDigest: row.payload_digest,
+    prevRev: row.prev_rev,
+    prevPayloadDigest: row.prev_payload_digest,
+    fileSha: row.file_sha,
+    verified: row.verified == null ? null : !!row.verified,
+    quarantineReason: row.quarantine_reason,
+    quarantinedAt: row.quarantined_at,
+    seenAt: row.seen_at,
+    writtenAt: row.written_at,
+  };
+}
+const VAULT_INDEX_SELECT =
+  'SELECT path, date, state, rev, payload_digest, prev_rev, prev_payload_digest, file_sha, verified, quarantine_reason, quarantined_at, seen_at, written_at FROM vault_index';
+
+/** @param {string} path @returns {VaultIndexRow | null} */
+export function getVaultIndex(path) {
+  return vaultIndexRow(db.prepare(VAULT_INDEX_SELECT + ' WHERE path = ?').get(String(path)));
+}
+/**
+ * Every row TT holds for one calendar date. A LIST and not a single row: the daily folder is a
+ * setting, so re-pointing it leaves rows for two paths that mean the same day, and a caller that
+ * assumed one row would silently pick whichever SQLite handed back first.
+ * @param {string} date @returns {VaultIndexRow[]}
+ */
+export function getVaultIndexByDate(date) {
+  return /** @type {VaultIndexRow[]} */ (
+    db
+      .prepare(VAULT_INDEX_SELECT + ' WHERE date = ? ORDER BY path')
+      .all(String(date))
+      .map(vaultIndexRow)
+  );
+}
+/** @returns {VaultIndexRow[]} */
+export function listVaultIndex() {
+  return /** @type {VaultIndexRow[]} */ (
+    db
+      .prepare(VAULT_INDEX_SELECT + ' ORDER BY path')
+      .all()
+      .map(vaultIndexRow)
+  );
+}
+/**
+ * Record what TT now knows about a path. THE ONE PLACE `prevRev`/`prevPayloadDigest` are set —
+ * they are rolled forward from the row's CURRENT pair and are deliberately not readable off the
+ * argument. A caller that could set them would eventually set them to something that never was
+ * on disk, and the rev-regression split (design decision 5) would then vouch for a payload TT
+ * never wrote, which is the silent-undo SB-061 filed.
+ *
+ * The roll happens only when the incoming `(rev, payloadDigest)` DIFFERS from the stored pair.
+ * An idempotent re-put — the interval scan touching `seenAt` on a file that has not moved — must
+ * not shift `(rev, digest)` into `prev_*`, because that would overwrite the genuine previous
+ * revision with the current one and turn a legitimate stale peer into a quarantine. "Exactly one
+ * previous pair" means one previous DISTINCT pair.
+ *
+ * An unrecognised `state` degrades to `unknown` rather than throwing or being stored verbatim.
+ * `unknown` is the safe row: it licenses no write, so a junk value costs a re-read and never a
+ * byte. Same discipline `putSettings` applies to `shape`.
+ * @param {VaultIndexRow} row
+ */
+export function putVaultIndex(row) {
+  const path = String(row.path);
+  const current = getVaultIndex(path);
+  const rev = row.rev == null ? null : +row.rev;
+  const payloadDigest = row.payloadDigest == null ? null : String(row.payloadDigest);
+  const changed = !current || current.rev !== rev || current.payloadDigest !== payloadDigest;
+  const prevRev = current ? (changed ? current.rev : current.prevRev) : null;
+  const prevDigest = current ? (changed ? current.payloadDigest : current.prevPayloadDigest) : null;
+  const state = VAULT_INDEX_STATES.includes(String(row.state)) ? String(row.state) : 'unknown';
+  // `quarantinedAt` is OWNED here for the same reason the previous pair is: it is the moment the
+  // refusal STARTED, and a caller that could set it could make a standing quarantine look new on
+  // every scan pass. Stamped on the transition INTO `quarantined`, preserved while it stays there,
+  // and cleared when the note recovers.
+  const quarantinedAt =
+    state !== 'quarantined' ? null : current && current.state === 'quarantined' && current.quarantinedAt ? current.quarantinedAt : new Date().toISOString(); // prettier-ignore
+  // …and the REASON is tied to the state for the same reason, in the same place. A scan pass that
+  // takes the cheap `file_sha` exit re-puts the row without re-deriving why it was refused — and a
+  // quarantine with no reason renders as the generic "did not say why" line, which is a surface
+  // that has stopped telling the truth about a note that has stopped syncing. Caught by looking at
+  // the screen, not by a test. Absent + still quarantined ⇒ keep what was there; not quarantined ⇒
+  // always null, so a recovered note cannot carry a stale reason.
+  const quarantineReason =
+    state !== 'quarantined'
+      ? null
+      : row.quarantineReason != null
+        ? String(row.quarantineReason)
+        : current && current.quarantineReason
+          ? current.quarantineReason
+          : null;
+  db.prepare(
+    `INSERT INTO vault_index (path, date, state, rev, payload_digest, prev_rev, prev_payload_digest, file_sha, verified, quarantine_reason, quarantined_at, seen_at, written_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(path) DO UPDATE SET
+       date = excluded.date, state = excluded.state, rev = excluded.rev,
+       payload_digest = excluded.payload_digest, prev_rev = excluded.prev_rev,
+       prev_payload_digest = excluded.prev_payload_digest, file_sha = excluded.file_sha,
+       verified = excluded.verified, quarantine_reason = excluded.quarantine_reason,
+       quarantined_at = excluded.quarantined_at, seen_at = excluded.seen_at,
+       written_at = excluded.written_at`,
+  ).run(
+    path,
+    String(row.date ?? ''),
+    state,
+    rev,
+    payloadDigest,
+    prevRev,
+    prevDigest,
+    row.fileSha == null ? null : String(row.fileSha),
+    row.verified == null ? null : row.verified ? 1 : 0,
+    quarantineReason,
+    quarantinedAt,
+    row.seenAt == null ? null : String(row.seenAt),
+    row.writtenAt == null ? null : String(row.writtenAt),
+  );
+}
+/** @param {string} path */
+export function deleteVaultIndex(path) {
+  db.prepare('DELETE FROM vault_index WHERE path = ?').run(String(path));
+}
+
 // ---- versions (DC-001: optimistic concurrency) ----
 // Two scopes: 'catalog' for the shared collections, 'entries:<userId>' for one
 // user's own entries. A missing row reads as 0, so an existing database starts
@@ -737,13 +943,62 @@ export function deleteUser(id) {
  */
 export function transaction(fn) {
   db.exec('BEGIN');
+  inTransaction = true;
   try {
     const r = fn();
     db.exec('COMMIT');
+    inTransaction = false;
+    // AFTER the COMMIT, never inside it. See `afterCommit` below.
+    flushAfterCommit();
     return r;
   } catch (err) {
     db.exec('ROLLBACK');
+    inTransaction = false;
+    // A rolled-back write never happened, so neither may its side effects. Dropping the queue is
+    // the whole reason it exists: the alternative is daily notes on disk describing entries the
+    // database no longer holds.
+    afterCommitQueue.length = 0;
     throw err;
+  }
+}
+
+// ---- side effects that must not run inside a transaction (SB-057) ----
+//
+// The vault fan-out writes FILES — an fsync of the note, an fsync of its directory, and (once
+// SB-068 lands) a `git add -A` over the whole vault. None of that may happen while a SQLite write
+// transaction is open, for two reasons and the first is the serious one:
+//
+//   • ROLLBACK. `store.putEntries` is called from inside `store.transaction(...)` in the API layer,
+//     and the transaction continues after it (`putCommits`, the version bumps). A throw anywhere
+//     after the fan-out would roll SQLite back while the daily notes — and TT's own git checkpoint
+//     — are already on disk and fsynced. The vault would then describe entries the index does not
+//     hold, which is the one direction DD-006's "SQLite is the derived index" cannot survive.
+//   • HOLD TIME. Two fsyncs per touched date, with a write transaction held open throughout.
+//
+// So the fan-out is QUEUED here and flushed after the COMMIT — the same position in the sequence
+// the markdown mirror already occupies (the routes call `store.mirror` after the transaction), and
+// the reason is identical. Called outside a transaction it simply runs, so a caller that is not in
+// one is not silently deferred forever.
+//
+// A queued effect that throws is logged and the rest still run: by then the save HAS committed, and
+// "you cannot save at all" is a strictly worse failure than a note that has stopped syncing
+// (SB-065's posture).
+/** @param {() => void} fn */
+export function afterCommit(fn) {
+  if (!inTransaction) {
+    fn();
+    return;
+  }
+  afterCommitQueue.push(fn);
+}
+function flushAfterCommit() {
+  const queued = afterCommitQueue.splice(0, afterCommitQueue.length);
+  for (const fn of queued) {
+    try {
+      fn();
+    } catch (err) {
+      console.error('[time-turtle] post-commit side effect failed:', /** @type {Error} */ (err).message);
+    }
   }
 }
 

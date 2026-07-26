@@ -52,19 +52,37 @@ const DEFAULT_PORT = +(process.env.PORT || 3001);
 
 const port = () => +opt('port', DEFAULT_PORT);
 
-/** The live server {pid, port}, or null (clearing a stale pid file on the way). */
-function live() {
+/** What the pid file says: {pid, port, alive}, or null when there is no readable one. */
+function readPid() {
   if (!existsSync(PID_FILE)) return null;
   const [pidStr, portStr] = readFileSync(PID_FILE, 'utf8').trim().split(/\s+/);
   const pid = +pidStr;
   if (!pid) return null;
+  let alive = true;
   try {
     process.kill(pid, 0); // signal 0 = existence check
-    return { pid, port: +portStr || DEFAULT_PORT };
   } catch {
-    unlinkSync(PID_FILE); // process is gone; the pid file was stale
-    return null;
+    alive = false; // process is gone; the pid file is stale
   }
+  return { pid, port: +portStr || DEFAULT_PORT, alive };
+}
+/** The live server {pid, port}, or null. Pure: reading never touches the pid file. */
+function live() {
+  const p = readPid();
+  return p && p.alive ? { pid: p.pid, port: p.port } : null;
+}
+/**
+ * Delete a pid file that names no live process; returns the stale pid, or null.
+ * Only the commands that already write the data dir call this — `status` is a
+ * query and leaves the dir byte-identical (SB-108).
+ */
+function pruneStalePid() {
+  const p = readPid();
+  if (p && !p.alive) {
+    unlinkSync(PID_FILE);
+    return p.pid;
+  }
+  return null;
 }
 /** Resolve true if something is already listening on the port. */
 const portBusy = (p) =>
@@ -97,6 +115,7 @@ async function serve() {
     console.log(`already running · pid ${running.pid} · http://localhost:${running.port}  (use: tt restart)`);
     return;
   }
+  pruneStalePid(); // serve writes this dir anyway — the hygiene lives here, not in status
   if (await portBusy(p)) {
     console.error(`✗ port ${p} is already in use — is \`npm run dev\` running? Stop it, or: tt serve --port <N>`);
     process.exit(1);
@@ -119,15 +138,28 @@ async function serve() {
     console.error(`✗ server did not come up within 10s — check the log:\n  ${LOG_FILE}`);
     process.exit(1);
   }
-  console.log(
-    `✓ Time Turtle · http://localhost:${p} · pid ${child.pid}\n  data: ${DATA}\n  log: ${LOG_FILE}`,
-  );
+  console.log(`✓ Time Turtle · http://localhost:${p} · pid ${child.pid}\n  data: ${DATA}\n  log: ${LOG_FILE}`);
+}
+
+/**
+ * Name the instance the command just answered for. With two instances in play an
+ * unqualified answer is ambiguous (SB-099, SB-108). `hint` adds the sibling caveat,
+ * which only a *negative* answer needs — and it stays a static line, never a scan
+ * (DD-015 — no process manager over instances).
+ */
+function where({ hint = false } = {}) {
+  console.log(`data: ${DATA}`);
+  if (hint && !DATA_CHOSEN) {
+    console.log('(this is the default data dir — other instances may be running under their own --data dirs)');
+  }
 }
 
 function stop() {
   const s = live();
   if (!s) {
-    console.log('not running');
+    const stalePid = pruneStalePid();
+    console.log(stalePid ? `not running · cleared a stale pid file (pid ${stalePid})` : 'not running');
+    where({ hint: true });
     return;
   }
   try {
@@ -137,18 +169,17 @@ function stop() {
   }
   if (existsSync(PID_FILE)) unlinkSync(PID_FILE);
   console.log(`stopped · pid ${s.pid}`);
+  where();
 }
 
 function status() {
-  const s = live();
-  if (s) console.log(`running · pid ${s.pid} · http://localhost:${s.port}`);
+  // A query: it reports a stale pid file, it does not delete one. The sweep belongs
+  // to the commands that already write the data dir — serve / stop / restart (SB-108).
+  const p = readPid();
+  if (p && p.alive) console.log(`running · pid ${p.pid} · http://localhost:${p.port}`);
+  else if (p) console.log(`stopped · stale pid file (pid ${p.pid}) — the next serve/stop/restart clears it`);
   else console.log('stopped');
-  console.log(`data: ${DATA}`);
-  // Status is per data dir and nothing more. A static hint, deliberately: the runner
-  // does not go looking for its siblings (DD-015 — no process manager over instances).
-  if (!DATA_CHOSEN) {
-    console.log('(this is the default data dir — other instances may be running under their own --data dirs)');
-  }
+  where({ hint: true });
 }
 
 function logs() {

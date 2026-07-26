@@ -115,12 +115,14 @@ TT.TIME_SEPARATOR_VALUES = /** @type {string[]} */ (Object.keys(TIME_SEPARATORS)
 /** @type {Record<string, import('./types.ts').ShapeCapabilities>} */
 const SHAPE_CAPABILITIES = {
   // The repo default and the company deployment. Everything on; SB-069 froze these bytes.
-  team: { mirror: true, committing: true, mdImport: true },
+  team: { mirror: true, committing: true, mdImport: true, identity: true },
   // DD-006/DD-008/DD-011. The vault's daily notes are the markdown surface, so the v2
   // `|`-mirror stops (and is retired — see retireMirrors in server/src/markdown.js) and
   // paste-back, a WRITE path into the store from mirror bytes, goes with it. Committing is
   // off until phase 3 lands the weekly-note rollup that gives the ledger somewhere to live.
-  personal: { mirror: false, committing: false, mdImport: false },
+  // SB-098 adds `identity`: DD-015 depth 2 — one human, so there is nobody to be told apart
+  // from, no role to hold and no session to sign out of.
+  personal: { mirror: false, committing: false, mdImport: false, identity: false },
 };
 /** DD-015: the backend each shape DERIVES. Nobody selects a backend; this is the whole map. */
 const SHAPE_BACKEND = /** @type {Record<string, import('./types.ts').Backend>} */ ({
@@ -145,6 +147,103 @@ TT.shapeCapabilities = (shape) => (shape && SHAPE_CAPABILITIES[shape]) || SHAPE_
  * @param {string | null} [shape] @returns {import('./types.ts').Backend}
  */
 TT.backendFor = (shape) => (shape && SHAPE_BACKEND[shape]) || SHAPE_BACKEND.team;
+
+// ---- why a note stopped syncing, in words a person can act on (SB-057 task 8) ----
+//
+// THE FRAME, and it is the whole point: *Time Turtle cannot prove it wrote this block, so it has
+// stopped writing to this note.* It never says the hours were corrupted, because two of the
+// commonest reasons are not damage at all:
+//
+//   • `verified: false` on an ADOPTED note is not damage (SB-091 rider 3). The adopted anchor
+//     deliberately carries no digest — one computed at adoption time would be taken over the very
+//     bytes it is meant to check.
+//   • `digest-mismatch` after Obsidian's table editor reflows cell padding is not damage either
+//     (SB-080's stated trade-off). The digest is over RAW LINE BYTES on purpose, so a purely
+//     cosmetic reflow trips it. The line below says "does not match" and offers the reflow as the
+//     first explanation, in that order, because crying wolf about someone's hours is worse than
+//     being vague.
+//
+// English, because the server has no locale — the Norwegian UI translates these in
+// client/src/i18n.ts, where the CLAIM must match rather than the bytes (the SHAPE_OFF_REASONS
+// discipline). A reason the map does not know degrades to a GENERIC line rather than a blank:
+// SB-090 already moved eight goldens onto a new reason name, and a surface that renders nothing
+// for an unfamiliar code is a note that silently stops syncing — which is the failure this whole
+// task exists to prevent. Catalog-only reasons are deliberately absent and take the fallback: no
+// daily-note row can carry one until the catalog is wired to the engine.
+/** @type {Record<string, string>} */
+const VAULT_QUARANTINE_REASONS = {
+  'no-heading': 'the Time Log heading is not in this note.',
+  'crlf-line-endings': 'this note uses Windows line endings, which Time Turtle will not rewrite.',
+  'multiple-headings': 'this note has more than one Time Log heading, so nothing can say which is the day’s.',
+  'no-revision': 'the block has no revision line, and its contents are not ones Time Turtle can describe.',
+  'malformed-revision': 'the revision line is there but Time Turtle cannot read it — its short fingerprint is damaged.',
+  'revision-past-next-heading':
+    'the revision line sits in a later section, so the block has no end Time Turtle trusts.',
+  'multiple-revisions': 'the block has more than one revision line.',
+  'no-table': 'there is no table under the heading.',
+  'unexpected-content-in-block': 'there is something under the heading that is not part of the table.',
+  'digest-mismatch':
+    'the block’s fingerprint does not match the table it labels. Often this is only a table editor reflowing the spacing; it can also mean another machine’s edit was merged in.',
+  'unknown-header': 'the table has a column Time Turtle does not know.',
+  'duplicate-header': 'the table has the same column twice.',
+  'row-cell-count': 'a row has a different number of cells than the header.',
+  'unparseable-time': 'a Time cell is not one Time Turtle can read.',
+  'bad-bill-cell': 'a Bill cell is neither a check mark nor blank, and that cell decides money.',
+  'write-would-corrupt': 'what Time Turtle would write here is something it could not read back.',
+  // the two arbitration verdicts (server/src/vault-arbitrate.js)
+  'external-rewrite':
+    'this note went back to an earlier revision with contents Time Turtle did not write — a restore from history, or another editor.',
+  'unprovable-staleness':
+    'this note’s revision is older than the one Time Turtle recorded, and Time Turtle has no record of it — so it cannot tell an out-of-date copy from a deliberate restore.',
+};
+/** The line every quarantine opens with. One home, so the server and the screen cannot drift. */
+TT.VAULT_QUARANTINE_HEADLINE = 'Time Turtle cannot prove it wrote this block, so it has stopped writing to this note.';
+/** The generic line for a reason this build does not know — never a blank. */
+TT.VAULT_QUARANTINE_FALLBACK = 'Time Turtle refused this note and did not say why in words this version knows.';
+/**
+ * Why this note stopped syncing, as a sentence. Never throws and never returns an empty string:
+ * an unknown reason takes the generic line.
+ * @param {string | null | undefined} reason @returns {string}
+ */
+TT.vaultQuarantineText = (reason) => (reason && VAULT_QUARANTINE_REASONS[reason]) || TT.VAULT_QUARANTINE_FALLBACK;
+
+/**
+ * IS THIS ENTRY THE VAULT'S? — DD-016 + DD-017, and SB-100 hands it to SB-057 by name.
+ *
+ * A non-vault-bound entry is written to SQLite and NEVER to a daily note, and never triggers
+ * DD-012 adoption on its behalf. Three conditions, and each one closes a specific hazard:
+ *
+ *   1. THE SHAPE. Only `personal` has a vault at all.
+ *   2. THE CUTOVER (DD-016). `TT.seedMd()` dates its demo entries relative to FIRST BOOT — `T`,
+ *      `T-1`, `T-2`, `T-7`, `T-8`, `T-9` (see the seed below) — so without this a fresh personal
+ *      install ADOPTS six of Terje's real daily notes and writes Fjellheim AS demo hours into
+ *      them. The cutover is stored as an ISO instant and compared day-grained, because
+ *      `Entry.date` is a day; `stampVaultCutover` stores the finer value precisely so this can
+ *      choose, and `''` (never stamped) means no history is excluded.
+ *   3. THE LEDGER (DD-017). `TT.weekSegments` cuts on (ISO week ∩ month) and NEVER on a date, so
+ *      committing the current week and then switching mid-week leaves a frozen money snapshot
+ *      astride the cutover. A committed segment stays whole: not one of its days reaches a note.
+ *
+ * ONE HOME, deliberately. SB-102 wants the same predicate; whoever lands first writes it and the
+ * second consumes it. A second copy is a rule that agrees today and diverges on the first ruling.
+ *
+ * SKIPPED, NOT REFUSED, at the call site: `useServerSync` re-queues any non-409 failure and
+ * retries every 4 s forever, so turning this into a 403 would be a permanent toast loop for
+ * anyone with pre-cutover history.
+ * @param {Entry} entry
+ * @param {{ shape?: string | null, vaultCutover?: string | null, commits?: import('./types.ts').CommitSegment[] }} context
+ * @returns {boolean}
+ */
+TT.vaultBound = function (entry, context) {
+  const ctx = context || {};
+  if (ctx.shape !== 'personal') return false;
+  if (!entry || typeof entry.date !== 'string') return false;
+  const cutoverDay = String(ctx.vaultCutover || '').slice(0, 10);
+  if (cutoverDay && entry.date < cutoverDay) return false;
+  const key = TT.segmentKey(entry.date);
+  for (const segment of ctx.commits || []) if (segment && segment.key === key) return false;
+  return true;
+};
 
 /**
  * Where inside the vault TT reads and writes, when nothing has been chosen. HERE, not in
@@ -174,6 +273,13 @@ TT.VAULT_PATHS_DEFAULT = {
 //
 // English, because the server has no locale. The Norwegian UI translates these in i18n.ts;
 // the CLAIM is what must match, not the bytes.
+//
+// `identity` DELIBERATELY HAS NO ENTRY, and that is not an omission. Every reason here explains
+// a verb that is VISIBLY MISSING from a surface that still exists — the commit button, the
+// apply-markdown button. `identity: false` removes the surfaces themselves (DD-015 depth 2:
+// Users, roles, passwords, review, the login screen), so there is no control left to carry an
+// explanation, and nobody to read one: under `personal` the one human already knows they are
+// the only one. `TT.shapeOffReason('identity')` therefore reads null, which is the honest answer.
 /** @type {Record<string, string>} */
 const SHAPE_OFF_REASONS = {
   committing:
@@ -2073,7 +2179,22 @@ TT.serializeVaultCatalogSection = function (section, rows, opts) {
  * @returns {import('./types.ts').VaultCatalogSectionResult}
  */
 TT.parseVaultCatalogSection = function (md, section) {
-  const spec = CATALOG_SECTIONS[section];
+  // `hasOwnProperty`, not a truthiness test on the lookup: `CATALOG_SECTIONS['__proto__']` resolves
+  // to `Object.prototype`, which is TRUTHY and has no `heading` — so a bare `if (!spec)` would let
+  // that one name through to report `no-heading` about a section that does not exist. An untrusted
+  // string really does take that shape, which is the whole reason this check is here.
+  const spec = Object.prototype.hasOwnProperty.call(CATALOG_SECTIONS, section) ? CATALOG_SECTIONS[section] : null;
+  // SB-124: REFUSE, DO NOT THROW. Every other vault codec here is documented as never throwing —
+  // it returns a verdict, because SB-083's posture is "TT refuses, but it says why" and a refusal
+  // a caller can inspect is the mechanism that makes that true. A throw is not a refusal: it skips
+  // the quarantine reporting entirely and hands a human a stack trace, or a dead boot scan, instead
+  // of a line explaining what TT could not read.
+  //
+  // The TYPE guards TypeScript callers and stays — but `server/src/` is plain JS, and SB-057's sync
+  // engine is the first caller that hands this function a section name derived from a note a HUMAN
+  // typed rather than a typed literal. That is exactly the untrusted-input direction the type
+  // system does not defend. Before this, an unknown name reached `spec.heading` on `undefined`.
+  if (!spec) return { quarantine: true, reason: 'catalog-unknown-section', section };
   const loc = TT.locateVaultBlock(md, { heading: spec.heading });
   // propagated UNCHANGED, plus the section name — the locator owns its reasons, and a shared
   // reason like 'no-heading' only becomes actionable once you know WHICH heading
@@ -2579,6 +2700,92 @@ TT.writeVaultCatalog = function (md, catalog, opts) {
 // - Rule 4's consequence — editing a row changes its key, so a committed entry that is later edited
 //   loses its `commitSnapshot` link. Filed as SB-079 rather than decided here, because whether
 //   phase 3 needs identity to survive an edit is SB-057's arbitration question, not this spec's.
+
+// ---- id preservation across an import (SB-117, DD-019 ruling 3) ----
+//
+// WHAT THIS IS FOR. `TimeGrid` keys every grid row `key={entry.id}` and DD-008 makes the runtime id
+// EPHEMERAL — re-minted by every parse. So an import of day D used to change every id on day D, and
+// the refresh that followed remounted every row on that day. `NoteCell` holds the sentence you are
+// typing in local component state until blur, so a remount destroyed it and ejected the caret. With
+// ids preserved, a 409 reload is very nearly invisible: unchanged rows do not remount, and only
+// genuinely-changed rows flicker.
+//
+// THIS IS NOT DD-008's PERSISTENCE KEY, and must not be mistaken for it. Nothing is hashed and
+// nothing is stored — rule 10 stays phase 3's to choose. This is field equality between an incoming
+// parsed row and a row already in the index, computed in memory and thrown away in the same tick.
+//
+// THE FIELD SET IS DD-008 rule 2's ORDER WITH TWO SLOTS DELIBERATELY EMPTY — `mode` (field 3) and
+// the passthrough columns (field 8+). Not an oversight, and not a disagreement with the spec: the
+// SQLite index has no `tags` column and no `vaultCells` column (see `getEntries` in server/src/db.js,
+// where the `Omit` says so out loud), so the stored side of this comparison can never carry either.
+// Including them would make every Mode-bearing row fail to match its own unchanged self and mint a
+// fresh id — turning this off for exactly the rows Terje puts tags on.
+//
+// The cost of leaving them out, stated rather than discovered: a row whose ONLY change is its Mode
+// cell reads as unchanged and keeps its id. That is the benign direction. Keeping the id means React
+// updates the row in place with the new tags instead of remounting it, which is the outcome this
+// ticket wants anyway; the harm the ticket is about is the remount, not the id.
+//
+// TRIM ON BOTH SIDES. `putEntries` trims `label` and `note` on the way in, so an untrimmed parsed
+// row would otherwise never match the trimmed copy of itself that the previous import stored.
+/**
+ * The field-equality key two rows must share to count as the same row. In-memory only.
+ * @param {Entry} entry @returns {string}
+ */
+TT.entryMatchKey = function (entry) {
+  // DD-008 rule 4's three legal shapes plus the empty cell. Minutes since midnight; the emitted
+  // separator is not part of it, so flipping `vaultTimeSeparator` (SB-063) re-keys nothing.
+  const time =
+    entry.start != null && entry.end != null
+      ? 'range:' + entry.start + '-' + entry.end
+      : entry.start != null
+        ? 'running:' + entry.start
+        : entry.durMin != null
+          ? 'duration:' + entry.durMin
+          : 'none';
+  // Rule 3's join: U+001F, which no markdown table cell can carry through TT's parser, so empty
+  // fields stay unambiguous without rule 5 needing a placeholder.
+  return [
+    entry.date || '',
+    time,
+    entry.project == null ? '' : String(entry.project),
+    String(entry.label ?? '').trim(),
+    String(entry.note ?? '').trim(),
+    entry.billable ? '1' : '0', // rule 7: no Bill column at all parses to billable, so it keys as `1`
+  ].join('\u001F');
+};
+
+/**
+ * Give each incoming row the id its unchanged counterpart already holds in the index.
+ *
+ * DUPLICATES ARE MATCHED IN ROW ORDER — DD-008 rule 9's answer to the same problem. Two identical
+ * rows on one day share a key, so their ids form a pool that is drawn from top to bottom. Which of
+ * the two gets which id is unobservable by construction: the rows are identical.
+ *
+ * `existing` arrives in `getEntries` order (`ORDER BY date, id`), which is NOT the note's row order.
+ * That only matters for duplicates, where by the paragraph above it does not matter at all.
+ *
+ * Pure: returns new objects and mutates neither argument.
+ * @param {Entry[]} incoming rows just parsed out of the note, in the note's row order
+ * @param {Entry[]} existing rows the index already holds for that day
+ * @returns {Entry[]} `incoming`, with ids reused wherever the content is unchanged
+ */
+TT.preserveEntryIds = function (incoming, existing) {
+  /** @type {Map<string, string[]>} */
+  const pool = new Map();
+  for (const entry of existing || []) {
+    const key = TT.entryMatchKey(entry);
+    const ids = pool.get(key);
+    if (ids) ids.push(entry.id);
+    else pool.set(key, [entry.id]);
+  }
+  return (incoming || []).map((entry) => {
+    const ids = pool.get(TT.entryMatchKey(entry));
+    const id = ids && ids.length ? ids.shift() : null;
+    // A genuinely-changed row keeps the id its parse just minted — the remount is correct there.
+    return id == null ? entry : { ...entry, id };
+  });
+};
 
 TT.serializeMd = function (state) {
   const lines = [
