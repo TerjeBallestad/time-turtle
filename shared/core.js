@@ -93,41 +93,56 @@ TT.timeSeparator = (name) => (name && TIME_SEPARATORS[name]) || TIME_SEPARATOR_D
 /** The legal `Settings.vaultTimeSeparator` values, default first. The ONE home of this list. */
 TT.TIME_SEPARATOR_VALUES = /** @type {string[]} */ (Object.keys(TIME_SEPARATORS));
 
-// ---- SB-056: the storage backends, and what each is allowed to do ----
+// ---- SB-056 / SB-100: the instance shapes, and what each is allowed to do ----
 //
 // THE CAPABILITY TABLE LIVES HERE, in shared code, because both sides consult it: the server
 // guards that REFUSE the operation (server/src/index.js) and the client surfaces that explain
 // why the verb is missing (WeekView, Settings → Markdown backend). One table read at CALL TIME
-// is what makes DD-011's ruling structural — "the rule is a property of the BACKEND, not of a
+// is what makes DD-011's ruling structural — "the rule is a property of the SHAPE, not of a
 // path captured at switch time" — instead of a convention repeated in six places that drift.
 //
 // ADD A NEW CAPABILITY HERE FIRST, then the guard, then the surface. A capability that exists
 // only at the guard is a rule the UI cannot explain, which is the exact failure DD-008's
-// comment names ("switching backends silently losing a shipped feature reads as a bug months
+// comment names ("switching shapes silently losing a shipped feature reads as a bug months
 // later").
-/** @type {Record<string, import('./types.ts').BackendCapabilities>} */
-const BACKEND_CAPABILITIES = {
+//
+// DD-015 KEYS THIS ON THE SHAPE AND NOT THE BACKEND. If "personal but not an Obsidian user"
+// ever turns up it is a third SHAPE — one more row here — never a second axis, because
+// shape × backend as orthogonal fields would legitimise team + vault: a shared server writing
+// every employee's hours into one person's vault.
+/** @type {Record<string, import('./types.ts').ShapeCapabilities>} */
+const SHAPE_CAPABILITIES = {
   // The repo default and the company deployment. Everything on; SB-069 froze these bytes.
-  sqlite: { mirror: true, committing: true, mdImport: true },
+  team: { mirror: true, committing: true, mdImport: true },
   // DD-006/DD-008/DD-011. The vault's daily notes are the markdown surface, so the v2
   // `|`-mirror stops (and is retired — see retireMirrors in server/src/markdown.js) and
   // paste-back, a WRITE path into the store from mirror bytes, goes with it. Committing is
   // off until phase 3 lands the weekly-note rollup that gives the ledger somewhere to live.
-  vault: { mirror: false, committing: false, mdImport: false },
+  personal: { mirror: false, committing: false, mdImport: false },
 };
-/** The legal `Settings.backend` values, safe default first. The ONE home of this list. */
-TT.BACKENDS = /** @type {import('./types.ts').Backend[]} */ (
-  /** @type {unknown} */ (Object.keys(BACKEND_CAPABILITIES))
-);
+/** DD-015: the backend each shape DERIVES. Nobody selects a backend; this is the whole map. */
+const SHAPE_BACKEND = /** @type {Record<string, import('./types.ts').Backend>} */ ({
+  team: 'sqlite',
+  personal: 'vault',
+});
+/** The legal `Settings.shape` values, safe default (`team`) first. The ONE home of this list. */
+TT.SHAPES = /** @type {import('./types.ts').Shape[]} */ (/** @type {unknown} */ (Object.keys(SHAPE_CAPABILITIES)));
 /**
- * What this backend may do. An UNKNOWN name resolves to the `sqlite` row rather than throwing:
+ * What this shape may do. An UNKNOWN name resolves to the `team` row rather than throwing:
  * this is read on every render and in every guard, and a settings value from a newer TT (or a
  * hand-edited row) must degrade to today's shipped behaviour, never blank the Week view or
  * 500 a save. The place an unknown value is REJECTED is the write — `putSettings` whitelists
- * against TT.BACKENDS — so a bad name cannot get in here through the app in the first place.
- * @param {string | null} [backend] @returns {import('./types.ts').BackendCapabilities}
+ * against TT.SHAPES — so a bad name cannot get in here through the app in the first place.
+ * @param {string | null} [shape] @returns {import('./types.ts').ShapeCapabilities}
  */
-TT.backendCapabilities = (backend) => (backend && BACKEND_CAPABILITIES[backend]) || BACKEND_CAPABILITIES.sqlite;
+TT.shapeCapabilities = (shape) => (shape && SHAPE_CAPABILITIES[shape]) || SHAPE_CAPABILITIES.team;
+/**
+ * The storage backend this shape derives (DD-015). Same safe-row rule as the capabilities: an
+ * unknown name reads as `team`'s `sqlite` rather than throwing, because the alternative on a
+ * hand-edited row is a server that will not boot.
+ * @param {string | null} [shape] @returns {import('./types.ts').Backend}
+ */
+TT.backendFor = (shape) => (shape && SHAPE_BACKEND[shape]) || SHAPE_BACKEND.team;
 
 /**
  * Where inside the vault TT reads and writes, when nothing has been chosen. HERE, not in
@@ -147,34 +162,38 @@ TT.VAULT_PATHS_DEFAULT = {
 // WHY a capability is off, worded ONCE. The server puts this in the 403 body and the client
 // puts it on screen where the verb used to be, so the two cannot drift in what they claim —
 // and drift here is not cosmetic. SB-056's ruling is that this must not be a hidden disabled
-// button: "switching backends silently losing a shipped feature is the kind of thing that
+// button: "switching shapes silently losing a shipped feature is the kind of thing that
 // reads as a bug months later. Whatever form it takes, it should say WHY it is off and that
 // phase 3 restores it."
+//
+// The recovery each one names is a SHAPE and not a backend (DD-015): "switch back to the
+// sqlite backend" is an instruction nobody can follow any more, because there is no control
+// that selects a backend.
 //
 // English, because the server has no locale. The Norwegian UI translates these in i18n.ts;
 // the CLAIM is what must match, not the bytes.
 /** @type {Record<string, string>} */
-const BACKEND_OFF_REASONS = {
+const SHAPE_OFF_REASONS = {
   committing:
-    'committing is off under the vault backend: the commit ledger lives in weekly notes, which phase 3 adds — a per-machine SQLite ledger would diverge silently (DD-008). Switch back to the sqlite backend to commit.',
+    'committing is off in the personal shape: the commit ledger lives in weekly notes, which phase 3 adds — a per-machine SQLite ledger would diverge silently (DD-008). Switch back to the team shape to commit.',
   mdImport:
-    'applying markdown edits is off under the vault backend: the vault’s daily notes are the markdown surface now, and the v2 mirror files this would restore from are no longer maintained (DD-011). Copy and download still work.',
+    'applying markdown edits is off in the personal shape: the vault’s daily notes are the markdown surface now, and the v2 mirror files this would restore from are no longer maintained (DD-011). Copy and download still work.',
   mirror:
-    'the markdown mirror is off under the vault backend: the vault’s daily notes are the markdown surface, and two markdown copies of the same hours in one vault is what this avoids (DD-011).',
+    'the markdown mirror is off in the personal shape: the vault’s daily notes are the markdown surface, and two markdown copies of the same hours in one vault is what this avoids (DD-011).',
 };
 /**
- * Why a capability is unavailable under this backend, or null when it IS available.
- * @param {keyof import('./types.ts').BackendCapabilities} capability
- * @param {string | null} [backend] @returns {string | null}
+ * Why a capability is unavailable under this shape, or null when it IS available.
+ * @param {keyof import('./types.ts').ShapeCapabilities} capability
+ * @param {string | null} [shape] @returns {string | null}
  */
-TT.backendOffReason = (capability, backend) =>
-  TT.backendCapabilities(backend)[capability] ? null : (BACKEND_OFF_REASONS[capability] ?? null);
+TT.shapeOffReason = (capability, shape) =>
+  TT.shapeCapabilities(shape)[capability] ? null : (SHAPE_OFF_REASONS[capability] ?? null);
 /**
  * @param {Entry} entry
  * @param {VaultTimeSeparator} [separator] a `Settings.vaultTimeSeparator` value name. Defaults to
  *   `unicode`, which is what every NON-vault caller wants and must keep getting: this
  *   formatter also serves the v2 mirror's entry lines, whose bytes SB-069 froze
- *   (`backend=sqlite` comes out of the vault effort byte-for-byte identical), and the app's
+ *   (the `team` shape comes out of the vault effort byte-for-byte identical), and the app's
  *   own UI has no daily note to match. Only TT.serializeVaultBlock passes this.
  * @returns {string}
  */
@@ -397,7 +416,7 @@ function applyParsed(entry, parsed) {
 // as `refactored the` with billable falsely flipped off. These primitives are shared: SB-055's
 // vault block format calls them on its table cells (SB-045), and THERE no authoritative DB sits
 // behind the file, so a corrupting round-trip is data loss rather than a recoverable rewrite.
-// The v2 `|`-mirror below is not that file — it is written by the `backend=sqlite` path
+// The v2 `|`-mirror below is not that file — it is written by the `team` shape's path
 // (server/src/markdown.js) and always has the DB behind it. Getting these right matters for
 // the mirror; it matters more for what SB-055 builds on top of them.
 //
@@ -1462,7 +1481,7 @@ TT.writeVaultBlock = function (md, entries, opts) {
 };
 
 // ---- canonical row string (DD-008 spec obligation — nothing computes this in phase 1) ----
-// Phase 1 computes and stores nothing. Committing is off for `backend=vault` under phase 1+2, so the
+// Phase 1 computes and stores nothing. Committing is off in the `personal` shape under phase 1+2, so the
 // derived persistence key has no consumer yet and no code in PLAN-009 produces one. What phase 1 owes is
 // this spec, because it is cheap now and expensive to retrofit: phase 3 computes the key from it, and if
 // the string is undefined until then, phase 3 has to invent it against a year of already-written notes.

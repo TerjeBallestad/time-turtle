@@ -343,25 +343,25 @@ export function App() {
     },
     setCurrency: (currency) => updateState((current) => ({ ...current, settings: { ...current.settings, currency } })),
     setMdDir: (dir) => updateState((current) => ({ ...current, settings: { ...current.settings, mdDir: dir } })),
-    // SB-056: the backend switch does NOT go through the optimistic debounced diff the other
+    // SB-100: the shape switch does NOT go through the optimistic debounced diff the other
     // settings use. It goes straight to the server and then reloads — the renameProject /
     // renameClient shape — for two reasons the others do not have. The server can REFUSE it
-    // (TT_BACKEND_LOCK, or the single-user guard with more than one user), so an optimistic
+    // (TT_SHAPE_LOCK, or the single-user guard with more than one user), so an optimistic
     // toggle would sit there showing a state that was rejected; and half the UI below is
-    // derived from the EFFECTIVE backend the server reports, which the env and the lock can
+    // derived from the EFFECTIVE shape the server reports, which the env and the lock can
     // both decide, so guessing it locally is guessing.
-    setBackend: (backend) => {
-      // Compare against the EFFECTIVE backend — the one the toggle is showing — not the stored
-      // one. They differ exactly when `TT_BACKEND` supplied the backend and nothing is stored,
+    setShape: (shape) => {
+      // Compare against the EFFECTIVE shape — the one the toggle is showing — not the stored
+      // one. They differ exactly when `TT_SHAPE` supplied the shape and nothing is stored,
       // which is the configuration this plan names most often ("an install switched by
-      // TT_BACKEND alone never fires a settings write"): `state.backend` reads `vault` while
-      // `settings.backend` reads its `sqlite` default, so guarding on the stored value made
-      // clicking SQLite a no-op — no request, no toast, no way out of `vault` from the UI.
-      if (backend === (state.backend ?? 'sqlite')) return;
+      // TT_SHAPE alone never fires a settings write"): `state.shape` reads `personal` while
+      // `settings.shape` reads its `team` default, so guarding on the stored value made
+      // clicking Team a no-op — no request, no toast, no way out of `personal` from the UI.
+      if (shape === (state.shape ?? 'team')) return;
       void api
-        .putState({ settings: { ...state.settings, backend } })
+        .putState({ settings: { ...state.settings, shape } })
         .then(() => {
-          toast(TT.t('storage backend: ') + backend);
+          toast(TT.t('instance shape: ') + shape);
           load();
         })
         .catch((err: Error) => {

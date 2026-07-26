@@ -157,18 +157,20 @@ migrateToSdd002();
 // reaches no mirror byte — TT.serializeMd writes only `currency:`/`language:`/`format:`, the
 // same reason `mdDir` has always been invisible there.
 //
-// SB-056: `backend` is stored the same way and defaults to `sqlite` on read, so an untouched
-// install behaves exactly as it did before the setting existed. INSTANCE-LOCAL: it, `mdDir`
-// and `vaultPaths` stay in these SQLite rows under BOTH backends and must never be serialized
-// into the catalog note (SB-058) — they are how TT finds the catalog, so putting them there
-// would be a bootstrap loop. Like `mdDir` it reaches no mirror byte.
+// SB-056 / SB-100: `shape` is stored the same way and defaults to `team` on read, so an
+// untouched install behaves exactly as it did before the setting existed. INSTANCE-LOCAL: it,
+// `mdDir` and `vaultPaths` stay in these SQLite rows under BOTH shapes and must never be
+// serialized into the catalog note (SB-058) — they are how TT finds the catalog, so putting
+// them there would be a bootstrap loop. Like `mdDir` it reaches no mirror byte.
+//
+// SB-100 / DD-016: `vaultCutover` rides beside it and is SERVER-OWNED — see putSettings.
 //
 // SB-056: `vaultPaths` is the one settings key that is not a scalar. It rides the same
 // key/value table as ONE JSON value rather than five keys, because it is one decision — where
 // the vault is — and reading it back as a partial (root set, daily missing) would be a shape
 // no caller wants to handle. Defaulted on read, validated on write; SB-057/SB-058 may extend
 // the shape additively, and an older row missing a newer key simply takes that key's default.
-// The defaults live in shared/core.js, next to TT.BACKENDS and TT.TIME_SEPARATOR_VALUES — this
+// The defaults live in shared/core.js, next to TT.SHAPES and TT.TIME_SEPARATOR_VALUES — this
 // is model vocabulary, and SB-057/SB-058 will extend the shape, so a second copy here would
 // quietly start producing a VaultPaths missing their new key.
 const VAULT_PATHS_DEFAULT = TT.VAULT_PATHS_DEFAULT;
@@ -194,32 +196,39 @@ export function getSettings() {
     language: 'en',
     mdDir: '',
     vaultTimeSeparator: 'unicode',
-    backend: 'sqlite',
+    shape: 'team',
+    // DD-016: `''` is "no cutover has happened", a value nobody can mean — the same trick
+    // `mdDir` uses, and the reason this one does NOT need a getStored* twin.
+    vaultCutover: '',
     vaultPaths: { ...VAULT_PATHS_DEFAULT },
   };
   for (const row of rows) {
     if (row.key === 'vaultPaths') settings.vaultPaths = parseVaultPaths(row.value);
-    else settings[/** @type {'currency'|'language'|'mdDir'|'vaultTimeSeparator'|'backend'} */ (row.key)] = row.value;
+    else
+      settings[/** @type {'currency'|'language'|'mdDir'|'vaultTimeSeparator'|'shape'|'vaultCutover'} */ (row.key)] =
+        row.value;
   }
   return /** @type {Settings & { mdDir: string }} */ (/** @type {unknown} */ (settings));
 }
 /**
- * SB-056: the backend AS STORED — the raw row, or null when nothing has been stored.
+ * SB-100: the shape AS STORED — the raw row, or null when nothing has been stored.
  *
- * `getSettings().backend` cannot answer this. It defaults to `sqlite`, which is also a real
- * choice, so "the setting says sqlite" and "there is no setting" are indistinguishable there —
- * and telling them apart is the whole of `backendTarget()`'s job, since TT_BACKEND is supposed
- * to win exactly when nothing is stored. (`mdDir` has no such problem: its default is `''`, a
- * value nobody can mean, which is why `mirrorTarget()` gets away with reading the defaulted
- * object.) An unrecognised row reads as null, so a hand-edited value falls through to the env
- * rather than being trusted.
- * @returns {import('../../shared/types.ts').Backend | null}
+ * `getSettings().shape` cannot answer this. It defaults to `team`, which is also a real
+ * choice, so "the setting says team" and "there is no setting" are indistinguishable there —
+ * and telling them apart is the whole of `shapeTarget()`'s job, since TT_SHAPE is supposed
+ * to win exactly when nothing is stored. It is also what makes the OPEN state (DD-015: one
+ * user, unlocked, nothing stored) visible to the boot-time inference rule and to SB-098's
+ * first-run question. (`mdDir` has no such problem: its default is `''`, a value nobody can
+ * mean, which is why `mirrorTarget()` gets away with reading the defaulted object.) An
+ * unrecognised row reads as null, so a hand-edited value falls through to the env rather than
+ * being trusted.
+ * @returns {import('../../shared/types.ts').Shape | null}
  */
-export function getStoredBackend() {
+export function getStoredShape() {
   const row = /** @type {{ value: string } | undefined} */ (
-    db.prepare('SELECT value FROM settings WHERE key = ?').get('backend')
+    db.prepare('SELECT value FROM settings WHERE key = ?').get('shape')
   );
-  if (!row || !TT.BACKENDS.includes(/** @type {any} */ (row.value))) return null;
+  if (!row || !TT.SHAPES.includes(/** @type {any} */ (row.value))) return null;
   return /** @type {any} */ (row.value);
 }
 /** @param {Settings} settings */
@@ -233,10 +242,10 @@ export function putSettings(settings) {
   // though TT.timeSeparator would safely emit `→` for it. The vocabulary lives in core.js.
   if (settings.vaultTimeSeparator != null && TT.TIME_SEPARATOR_VALUES.includes(settings.vaultTimeSeparator))
     upsert.run('vaultTimeSeparator', settings.vaultTimeSeparator);
-  // SB-056: same enum discipline. An unrecognised backend name must never reach the table —
-  // TT.backendCapabilities would resolve it to the safe sqlite row and the operator would be
-  // looking at a stored `valut` believing the vault was live. The vocabulary lives in core.js.
-  if (settings.backend != null && TT.BACKENDS.includes(settings.backend)) upsert.run('backend', settings.backend);
+  // SB-100: same enum discipline. An unrecognised shape name must never reach the table —
+  // TT.shapeCapabilities would resolve it to the safe `team` row and the operator would be
+  // looking at a stored `persona` believing the vault was live. The vocabulary lives in core.js.
+  if (settings.shape != null && TT.SHAPES.includes(settings.shape)) upsert.run('shape', settings.shape);
   // SB-056: `vaultPaths` is validated by RECONSTRUCTION rather than by inspection — the stored
   // value is built key by key from the default, taking only known keys whose value is a string.
   // An unknown key is dropped and a non-string is ignored, so nothing a caller invents can end

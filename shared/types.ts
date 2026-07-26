@@ -144,31 +144,47 @@ export interface Entry {
  */
 export type VaultTimeSeparator = 'unicode' | 'ascii' | 'hyphen';
 
-// ---- storage backend (SB-056 / SDD-003) ----
+// ---- the instance shape, and the backend it derives (SB-100 / DD-015 / SDD-003) ----
 /**
- * Which store holds the timesheet. `sqlite` is the repo default and the company deployment;
- * `vault` (DD-006) makes an Obsidian vault the source of truth, with SQLite demoted to a
- * derived index. Resolved server-side by `backendTarget()` — see `AppState.backend`.
+ * What an install IS. `team` (the repo default and the company deployment) has several
+ * humans, roles, review and invoicing; `personal` (DD-006) is one human, no login, an
+ * Obsidian vault as truth. Stored as `Settings.shape`, resolved server-side by `shapeTarget()`
+ * — see `AppState.shape`.
+ *
+ * DD-015: this and NOT the storage engine is what an install chooses. The choice decides
+ * whether there is a login screen, whether roles exist, whether the Users section renders and
+ * whether the server binds loopback; naming the field `backend` made the codebase say *the
+ * storage engine decides whether you log in*, which is false enough that someone would
+ * eventually "fix" it in the wrong direction.
+ */
+export type Shape = 'personal' | 'team';
+
+/**
+ * Which store holds the timesheet. DERIVED from the shape (`team` → `sqlite`, `personal` →
+ * `vault`) by `TT.backendFor`, and NEVER selected: `shape` × `backend` as orthogonal fields
+ * would legitimise team + vault, a shared server writing every employee's hours into one
+ * person's vault, which is precisely what the single-user guard exists to refuse (DD-015 —
+ * better unrepresentable than guarded).
  */
 export type Backend = 'sqlite' | 'vault';
 
 /**
- * What a backend is ALLOWED to do. Read at call time from `TT.backendCapabilities`, by the
- * server guards and the client surfaces alike, so a rule is a property of the BACKEND and
+ * What a shape is ALLOWED to do. Read at call time from `TT.shapeCapabilities`, by the
+ * server guards and the client surfaces alike, so a rule is a property of the SHAPE and
  * never of a path captured at switch time (DD-011).
  *
- *   `mirror`    — write the v2 `|`-delimited `timesheet-<user>.md`. Off under `vault`
+ *   `mirror`    — write the v2 `|`-delimited `timesheet-<user>.md`. Off under `personal`
  *                 (DD-011): the vault's daily notes are the markdown surface, and two
  *                 markdown representations of the same hours in one vault is the silent
  *                 divergence this map exists to kill.
- *   `committing`— freeze a week's money into the commit ledger. Off under `vault` (DD-008):
- *                 the ledger belongs in weekly notes, which are phase 3, and a per-machine
- *                 SQLite ledger under `vault` would diverge silently. Phase 3 restores it.
+ *   `committing`— freeze a week's money into the commit ledger. Off under `personal`
+ *                 (DD-008): the ledger belongs in weekly notes, which are phase 3, and a
+ *                 per-machine SQLite ledger there would diverge silently. Phase 3 restores it.
  *   `mdImport`  — paste a v2 mirror back INTO the database (Settings → Markdown backend).
- *                 Off under `vault` (DD-011) because it is a WRITE path into the store from
+ *                 Off under `personal` (DD-011) because it is a WRITE path into the store from
  *                 mirror bytes, and those bytes stop being maintained.
  */
-export interface BackendCapabilities {
+export interface ShapeCapabilities {
   mirror: boolean;
   committing: boolean;
   mdImport: boolean;
@@ -203,24 +219,39 @@ export interface Settings {
   /** markdown mirror directory; only present server-side / for admins */
   mdDir?: string;
   /**
-   * SB-056: which store holds the timesheet. INSTANCE-LOCAL — it, `mdDir` and `vaultPaths`
-   * stay in SQLite under BOTH backends and must never be serialized into the catalog note
-   * (SB-058), because they are how TT FINDS the catalog: putting them there is a bootstrap
-   * loop.
+   * SB-100 / DD-015: what this install IS, and therefore which store holds the timesheet.
+   * INSTANCE-LOCAL — it, `mdDir` and `vaultPaths` stay in SQLite under BOTH shapes and must
+   * never be serialized into the catalog note (SB-058), because they are how TT FINDS the
+   * catalog: putting them there is a bootstrap loop.
    *
    * Reaches NO MIRROR BYTE. `TT.serializeMd` emits `currency:` / `language:` / `format: 2`
    * and nothing else — the same reason `mdDir` and `vaultTimeSeparator` have always been
    * invisible there — so no `format: 3` bump is in play (SB-069 stays intact) and a
    * paste-back that drops the key is harmless (`putSettings` writes only present keys).
    *
-   * Absent behaves as `sqlite`. `TT_BACKEND` supplies the default and this stored value
-   * beats it; `TT_BACKEND_LOCK` freezes the env value and rejects a change with 403 (DC-002,
-   * the same shape as `TT_MD_DIR_LOCK`).
+   * Absent behaves as `team` AND is distinguishable from a stored `team`: nothing stored is
+   * the OPEN state the inference rule and SB-098's first-run question key off. `TT_SHAPE`
+   * supplies the default and this stored value beats it; `TT_SHAPE_LOCK` freezes the env
+   * value and rejects a change with 403 (DC-002, the same shape as `TT_MD_DIR_LOCK`).
    */
-  backend?: Backend;
+  shape?: Shape;
+  /**
+   * SB-100 / DD-016: the instant `shape: 'personal'` was stored — SERVER-STAMPED, once, by
+   * `putSettings`, and never moved by a client echoing it back. The vault never receives
+   * entries dated before it: they stay in SQLite, are never written to a daily note and never
+   * trigger DD-012 adoption. Empty means no cutover has happened.
+   *
+   * Stamping is SB-100's; ENFORCING it is SB-057's, because that is where a vault write first
+   * exists at all. Stamping early is what makes the date honest — a switch that happens before
+   * enforcement exists still records when it happened.
+   *
+   * An ISO instant rather than a bare day: DD-016 words it as an instant, and a day-grained
+   * comparison against `Entry.date` is `vaultCutover.slice(0, 10)`.
+   */
+  vaultCutover?: string;
   /**
    * SB-056: where inside the vault TT reads and writes. INSTANCE-LOCAL for the same reason as
-   * `backend` — these paths are how TT FINDS the catalog note, so serializing them INTO it
+   * `shape` — these paths are how TT FINDS the catalog note, so serializing them INTO it
    * (SB-058) would be a bootstrap loop. Stored as one JSON value; defaulted on read.
    */
   vaultPaths?: VaultPaths;
@@ -310,18 +341,19 @@ export interface AppState extends Catalog {
   /** SB-065: this user's mirror file changed under TT, so TT has stopped writing it. */
   mirrorBlocked?: MirrorBlock | null;
   /**
-   * SB-056: the EFFECTIVE backend — what `backendTarget()` resolved, not what is stored. Read
-   * by every client capability check (`TT.backendCapabilities(state.backend)`), which is why
-   * it is reported rather than left to the client to re-derive from `settings.backend`: the
+   * SB-100: the EFFECTIVE shape — what `shapeTarget()` resolved, not what is stored. Read
+   * by every client capability check (`TT.shapeCapabilities(state.shape)`), which is why
+   * it is reported rather than left to the client to re-derive from `settings.shape`: the
    * env and the lock can both beat the stored value.
    *
-   * Additive and read-only. It is the one wire change SB-056 makes — "`backend=sqlite` comes
+   * Additive and read-only. It is the one wire change SB-056 makes — "the `team` shape comes
    * out byte-for-byte unchanged" is a claim about the DB and the mirror bytes, NOT the
-   * envelope. Absent (an older server) behaves as `sqlite`.
+   * envelope. Absent (an older server) behaves as `team`. The BACKEND is not on the wire at
+   * all: it is derived from this by `TT.backendFor` and never chosen (DD-015).
    */
-  backend?: Backend;
-  /** DC-002: TT_BACKEND_LOCK is set, so the backend is env-only and read-only in the UI. */
-  backendLocked?: boolean;
+  shape?: Shape;
+  /** DC-002: TT_SHAPE_LOCK is set, so the shape is env-only and read-only in the UI. */
+  shapeLocked?: boolean;
 }
 
 /**
@@ -657,18 +689,20 @@ export interface TTModule {
   timeSeparator(name?: string | null): string;
   /** SB-063: the legal Settings.vaultTimeSeparator values, default first. */
   TIME_SEPARATOR_VALUES: string[];
-  // backend capabilities (SB-056)
-  /** SB-056: the legal Settings.backend values, safe default first. The ONE home of this list. */
-  BACKENDS: Backend[];
+  // shape capabilities (SB-056 / SB-100)
+  /** SB-100: the legal Settings.shape values, safe default (`team`) first. The ONE home of this list. */
+  SHAPES: Shape[];
   /** SB-056: the default vault paths. The ONE home — SB-057/SB-058 extend the shape additively. */
   VAULT_PATHS_DEFAULT: VaultPaths;
-  /** SB-056: what a backend may do. Consulted at CALL TIME by server guards and client surfaces alike. */
-  backendCapabilities(backend?: string | null): BackendCapabilities;
+  /** SB-100: what a shape may do. Consulted at CALL TIME by server guards and client surfaces alike. */
+  shapeCapabilities(shape?: string | null): ShapeCapabilities;
+  /** SB-100 / DD-015: the backend this shape DERIVES. Never selected; unknown → the safe `sqlite`. */
+  backendFor(shape?: string | null): Backend;
   /**
-   * SB-056: why a capability is off under this backend, or null when it is on. Worded once so
+   * SB-100: why a capability is off under this shape, or null when it is on. Worded once so
    * the server's 403 body and the client's on-screen explanation cannot drift.
    */
-  backendOffReason(capability: keyof BackendCapabilities, backend?: string | null): string | null;
+  shapeOffReason(capability: keyof ShapeCapabilities, shape?: string | null): string | null;
   nowMin(): number;
   isRunning(entry: Entry): boolean;
   entryMinutes(entry: Entry): number;

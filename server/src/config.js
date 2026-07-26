@@ -19,29 +19,30 @@ export const MD_DIR_FROM_ENV = !!process.env.TT_MD_DIR;
 // freeze the mirror at MD_DIR: the stored setting is then ignored and rejected on write.
 export const MD_DIR_LOCKED = !!process.env.TT_MD_DIR_LOCK && process.env.TT_MD_DIR_LOCK !== '0';
 
-// ---- SB-056: the storage backend, modelled line for line on MD_DIR above (DC-002) ----
-// TT_BACKEND supplies the DEFAULT; a stored `Settings.backend` beats it; TT_BACKEND_LOCK
-// freezes the env value so the stored setting is both ignored and rejected on write. See
-// backendTarget() in ./backend.js for the resolution, which is mirrorTarget()'s twin.
+// ---- SB-056 / SB-100: the instance SHAPE, modelled line for line on MD_DIR above (DC-002) ----
+// TT_SHAPE supplies the DEFAULT; a stored `Settings.shape` beats it; TT_SHAPE_LOCK freezes the
+// env value so the stored setting is both ignored and rejected on write. See shapeTarget() in
+// ./backend.js for the resolution, which is mirrorTarget()'s twin. The storage backend is
+// DERIVED from the shape (DD-015) and has no env var of its own — there is nothing to select.
 //
-// An unrecognised TT_BACKEND fails LOUDLY here rather than falling back to sqlite. A typo
-// (`TT_BACKEND=valut`) that silently means sqlite is the worst possible reading: the operator
+// An unrecognised TT_SHAPE fails LOUDLY here rather than falling back to `team`. A typo
+// (`TT_SHAPE=persona`) that silently means `team` is the worst possible reading: the operator
 // believes the vault is live, the mirror keeps writing into the vault, and nothing says so.
-if (process.env.TT_BACKEND && !TT.BACKENDS.includes(/** @type {any} */ (process.env.TT_BACKEND))) {
+if (process.env.TT_SHAPE && !TT.SHAPES.includes(/** @type {any} */ (process.env.TT_SHAPE))) {
   console.error(
-    `[time-turtle] TT_BACKEND=${JSON.stringify(process.env.TT_BACKEND)} is not a storage backend — expected one of ${TT.BACKENDS.join(', ')}`,
+    `[time-turtle] TT_SHAPE=${JSON.stringify(process.env.TT_SHAPE)} is not an instance shape — expected one of ${TT.SHAPES.join(', ')}`,
   );
   process.exit(1);
 }
-/** @type {import('../../shared/types.ts').Backend} */
-export const BACKEND = /** @type {any} */ (process.env.TT_BACKEND || 'sqlite');
-/** Whether BACKEND came from TT_BACKEND or is just the default — the banner names the source (SB-073). */
-export const BACKEND_FROM_ENV = !!process.env.TT_BACKEND;
-// DC-002: `TT_BACKEND_LOCK=1 TT_BACKEND=sqlite` is the ONLY way out of an install whose stored
-// setting says `vault` and whose user table says otherwise (a copied data dir, say) — it is the
-// recovery string the boot refusal prints. Do NOT "simplify" the lock into an env default: a
-// default loses to the stored setting, and losing to the stored setting is the wedge.
-export const BACKEND_LOCKED = !!process.env.TT_BACKEND_LOCK && process.env.TT_BACKEND_LOCK !== '0';
+/** @type {import('../../shared/types.ts').Shape} */
+export const SHAPE = /** @type {any} */ (process.env.TT_SHAPE || 'team');
+/** Whether SHAPE came from TT_SHAPE or is just the default — the banner names the source (SB-073). */
+export const SHAPE_FROM_ENV = !!process.env.TT_SHAPE;
+// DC-002: `TT_SHAPE_LOCK=1 TT_SHAPE=team` is the ONLY way out of an install whose stored
+// setting says `personal` and whose user table says otherwise (a copied data dir, say) — it is
+// the recovery string the boot refusal prints. Do NOT "simplify" the lock into an env default:
+// a default loses to the stored setting, and losing to the stored setting is the wedge.
+export const SHAPE_LOCKED = !!process.env.TT_SHAPE_LOCK && process.env.TT_SHAPE_LOCK !== '0';
 
 export const PORT = +(process.env.PORT || 3001);
 export const ADMIN_EMAIL = process.env.TT_ADMIN_EMAIL || 'admin@timeturtle.local';

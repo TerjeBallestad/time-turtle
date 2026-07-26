@@ -9,7 +9,7 @@ import type {
   User,
   UserCreateRequest,
   ParsedTime,
-  Backend,
+  Shape,
   VaultPaths,
   VaultTimeSeparator,
 } from '../../shared/types';
@@ -46,12 +46,15 @@ export interface UiActions {
   setCurrency: (currency: string) => void;
   setMdDir: (dir: string) => void;
   /**
-   * SB-056: switch the storage backend. NOT an optimistic local edit like the others — it goes
-   * straight to the server and then reloads, because the server may refuse it (TT_BACKEND_LOCK,
-   * or the single-user guard) and because half the UI is derived from the EFFECTIVE backend the
+   * SB-100: switch the instance shape. NOT an optimistic local edit like the others — it goes
+   * straight to the server and then reloads, because the server may refuse it (TT_SHAPE_LOCK,
+   * or the single-user guard) and because half the UI is derived from the EFFECTIVE shape the
    * server reports, not from the value we asked for.
+   *
+   * There is deliberately no `setBackend`: the backend is DERIVED from the shape (DD-015) and
+   * nobody selects one.
    */
-  setBackend: (backend: Backend) => void;
+  setShape: (shape: Shape) => void;
   /** SB-056: where inside the vault TT reads and writes. */
   setVaultPaths: (patch: Partial<VaultPaths>) => void;
   /** SB-063: which characters the vault daily note writes between a start and an end time. */

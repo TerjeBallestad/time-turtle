@@ -247,7 +247,7 @@
 .vaultLabel {
   width: 128px;
 }
-/* TT_BACKEND_LOCK: the effective backend, read-only, in the same mono the paths use — a
+/* TT_SHAPE_LOCK: the effective shape, read-only, in the same mono the paths use — a
    disabled SegToggle would read as "you may pick, later". You may not; the server decided. */
 .vaultLocked {
   font-family: var(--mono);

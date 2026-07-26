@@ -105,7 +105,7 @@ export function stopAllServers() {
 
 /**
  * Spawn a server that is EXPECTED TO EXIT, and report how. The boot refusals (an unknown
- * TT_BACKEND; `vault` against a multi-user data dir) are the one class of guard that cannot be
+ * TT_SHAPE; `personal` against a multi-user data dir) are the one class of guard that cannot be
  * observed over HTTP — there is no server to ask — so the evidence is the exit code and what
  * the process said on its way out.
  * @returns {Promise<{ code: number | null, output: string }>} stdout and stderr, concatenated
