@@ -169,7 +169,7 @@ export function setVaultRewriter(fn) {
  *
  * `null` means "there is nothing to sync": not the `personal` shape, or no vault root configured.
  * A missing root is emphatically NOT "scan from the current directory".
- * @returns {{ dailyDir: string, heading: string, cutoverDay: string, userId: number, projects: import('../../shared/types.ts').Project[], timeSeparator: any } | null}
+ * @returns {{ root: string, dailyDir: string, heading: string, cutoverDay: string, userId: number, projects: import('../../shared/types.ts').Project[], timeSeparator: any } | null}
  */
 export function vaultSyncConfig() {
   if (activeBackend() !== 'vault') return null;
@@ -179,6 +179,9 @@ export function vaultSyncConfig() {
   const users = listUsers();
   if (users.length !== 1) return null; // DD-006 consequence 1; the boot guard already refuses this
   return {
+    // SB-068 needs the ROOT, not the daily folder: the checkpoint is `git add -A` against the
+    // whole vault worktree, and a checkpoint of `Calendar/Daily` is not a checkpoint of the vault.
+    root: paths.root,
     dailyDir: join(paths.root, paths.daily),
     heading: paths.timeLogHeading || TT.VAULT_PATHS_DEFAULT.timeLogHeading,
     // DD-016 is worded as an INSTANT and `Entry.date` is a day, so the comparison is day-grained —

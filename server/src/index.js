@@ -19,7 +19,8 @@ import { mirrorTarget, mirrorPath, mirrorBlockFor, acknowledgeMirrorBlock, retir
 // business knowing the vault is being watched, and the only thing this file does with it is start
 // it once the server is answering.
 import { startVaultSync, scanVault, vaultSyncConfig, forgetOwnWrites, setVaultRewriter } from './vault-sync.js';
-import { rewriteVaultDate } from './vault-write.js';
+import { rewriteVaultDate, setVaultCheckpointHook } from './vault-write.js';
+import { vaultCheckpoint } from './vault-checkpoint.js';
 
 // SB-057: the two arbitration verdicts that need a WRITE are handed back to the writer HERE, at
 // the one place that already imports both. The engine never imports the writer, so the dependency
@@ -27,6 +28,19 @@ import { rewriteVaultDate } from './vault-write.js';
 setVaultRewriter((date, rev) => {
   const config = vaultSyncConfig();
   if (config) rewriteVaultDate(config.userId, date, rev);
+});
+
+// SB-068: and the same trick for the checkpoint. The writer owns the WHEN (its first write of a
+// calendar day, which is the only place that moment exists — `tt serve` runs detached for weeks,
+// so a per-boot hook would mean a per-fortnight checkpoint); this module owns the WHAT.
+//
+// Wired at module load and not inside `app.listen`, because the trigger is a write and not a
+// boot: a save arriving during the boot scan must find the hook already in place. Resolving the
+// config PER CALL rather than closing over one is what makes the checkpoint follow the vault when
+// Settings → Vault re-points it — the same reason the rewriter above does.
+setVaultCheckpointHook((day) => {
+  const config = vaultSyncConfig();
+  if (config) vaultCheckpoint(config.root, day);
 });
 import { teamReport } from './reports.js';
 import TT from '../../shared/core.js';
