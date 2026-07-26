@@ -1253,6 +1253,19 @@ app.put('/api/users/:id/entries', requireUser, requireAdmin, (req, res) => {
   // too, so a piped id corrupts the target's frozen money exactly the same way.
   const badId = entryIdError(body.entries);
   if (badId) return res.status(400).json({ error: badId });
+  // SB-102 / DD-017 §1 — END-GATE REVIEW FINDING, DELIBERATELY NOT FIXED HERE. See SB-149.
+  //
+  // This route writes entries and does NOT consult `frozenEntryRefusal`, so under `personal` a
+  // hand-rolled PUT changes a pre-vault or frozen day that `PUT /api/state` refuses. Measured
+  // against a live server: the guarded route said 403, this one said 200 and stored the edit.
+  // `requireAdmin` gates nothing here — the one user IS the seeded admin (DD-015 depth 2).
+  //
+  // It is left open on purpose rather than overlooked. Closing it means reversing the ruling
+  // written out at the ledger-write site below — "the ENTRY edit still lands… It is the ledger
+  // that is frozen, not the timesheet" — which a previous end-gate review put there with its
+  // reasoning, and which `tests/shape-committing.test.js` asserts. DD-017 §1 says the opposite
+  // for `personal`. Two recorded rulings disagree, and picking the winner is not a call an
+  // executing agent gets to make quietly, so it is filed with the evidence instead.
   // DC-001 optimistic concurrency (mirrors the self path's optional-version shape): a
   // `version` (StateVersion, the entries scope) makes the write conditional — if the
   // target's entries moved since the Review tab loaded (the employee logged an hour, or a
@@ -1344,6 +1357,11 @@ app.put('/api/users/:id/entries', requireUser, requireAdmin, (req, res) => {
       // was ever committed, which is the same failure the ride-along exists to prevent. It is
       // the ledger that is frozen, not the timesheet. (Whether pre-switch segments should still
       // be rendered at all is SB-093, not this guard.)
+      //
+      // SB-102 / DD-017 §1 CONTRADICTS THE SENTENCE ABOVE for `personal`, where editable ⇔
+      // vault-bound makes the timesheet frozen too. Both rulings are currently in the repo and
+      // one of them has to be withdrawn in writing. SB-149 carries the evidence and the choice;
+      // until it is ruled, this route behaves exactly as it did before PLAN-015.
       if (commitsChanged && !TT.shapeOffReason('committing', activeShape())) store.putCommits(id, reFrozen);
       store.bumpEntriesVersion(id);
     });

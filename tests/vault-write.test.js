@@ -263,9 +263,19 @@ describe('the vault writer (api)', () => {
 //     × writes no note for ANY day of a frozen segment — including the ones after the cutover
 //       AssertionError: a POST-cutover day of a frozen segment got a note: 2026-07-27:
 //       expected true to be false
-//     × does not ADOPT a frozen segment’s post-cutover note either, when one already exists
+//     x does not ADOPT a frozen segment’s post-cutover note either, when one already exists
 //       AssertionError: expected '# 2026-07-27\n\n## Time Log\n\n| Time…' to be
-//       '# 2026-07-27\n\n## Time Log\n\n| Time…'   (the note was rewritten with TT's own block)
+//       '# 2026-07-27\n\n## Time Log\n\n| Time…'
+//       (i.e. the note no longer matched the bytes written to it. What replaced them is not
+//       claimed here — the assertion is byte-equality with `his` and that is all it can say.)
+//
+//   PLAN-015's end-gate SPEC reviewer argued this second case cannot discriminate, on the
+//   reasoning that the note is unindexed so `writeEligibility` returns 'unread' and refuses
+//   before `vaultBound` is consulted. That was tested rather than argued: the inversion was run
+//   THREE MORE TIMES and this case failed on all three. The reasoning does not match what the
+//   code does here. It is recorded because the reviewer's related point IS live and is filed as
+//   SB-150 — the vault READ side has no ledger clause at all, so a frozen segment's post-cutover
+//   note is still scannable and importable by the watcher. This case is about the writer.
 //   The CONTRAST half — the uncommitted post-cutover day's note — stays green throughout, which
 //   is what makes the absences above mean something rather than "the writer was broken".
 //   Restored: 11 passed.

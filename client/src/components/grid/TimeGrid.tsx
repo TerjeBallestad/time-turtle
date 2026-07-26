@@ -41,9 +41,11 @@ export function TimeGrid({ date, entries, state, ui, compact }: TimeGridProps) {
   };
   const locked = TT.readOnlyDay(date, ctx);
   // WHY the day is locked, kept apart, because the banner below has to say different things and
-  // a personal user must never be pointed at a verb their week header does not have.
-  const preVault = TT.preCutover(date, ctx); // both are false under `team` by construction,
-  const frozen = TT.frozenSegment(date, ctx); // so every branch below falls through to today's
+  // a personal user must never be pointed at a verb their week header does not have. Both of
+  // these are false under `team` by construction — each one checks the shape itself — so every
+  // branch of the banner falls through to the chip and hint it has always rendered there.
+  const preVault = TT.preCutover(date, ctx);
+  const frozen = TT.frozenSegment(date, ctx);
   // SDD-002 ruling 5 (SB-025): an APPROVED segment is not just committed — it is locked by
   // the admin, so the "reopen from the week header" affordance is gone. A `team` concept: under
   // `personal` there is no admin over you, so an approval stamped before a shape switch does not

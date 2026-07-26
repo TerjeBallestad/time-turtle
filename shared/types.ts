@@ -1084,24 +1084,29 @@ export interface TTModule {
    * SQLite and never reaches a daily note — and never triggers DD-012 adoption on its behalf.
    * The one home of the predicate; SB-102 consumes this rather than adding a second copy.
    */
-  vaultBound(
-    entry: Entry,
-    context: { shape?: string | null; vaultCutover?: string | null; commits?: CommitSegment[] },
-  ): boolean;
+  vaultBound(entry: Entry, context: VaultRuleContext): boolean;
+  /**
+   * SB-102 / DD-017 §1+§4: why a frozen day refused an edit. The server's 403 body and the
+   * client's toast are the same string; i18n.ts carries the Norwegian against this English.
+   */
+  FROZEN_ENTRY_REFUSAL: string;
+  /**
+   * SB-102: does the ledger hold this day's segment? The one MEMBERSHIP scan the read-only rule
+   * family shares — shape-blind and role-blind on purpose, so each rule gates it rather than
+   * writing the walk again. (`isApproved`, `commitSnapshot` and `monthSegments` also walk the
+   * ledger; they ask different questions and are deliberately not routed through this.)
+   */
+  committedOn(date: string, commits?: CommitSegment[] | null): boolean;
+  /** SB-102 / DD-016: is this day older than the vault? `vaultBound`'s cutover clause, alone. */
+  preCutover(date: string, context: VaultRuleContext): boolean;
+  /** SB-102 / DD-017 §2: is this day inside a frozen segment? `vaultBound`'s ledger clause, alone. */
+  frozenSegment(date: string, context: VaultRuleContext): boolean;
   /**
    * SB-102 / DD-017 §1: the read-only rule, DERIVED from `vaultBound` rather than written beside
    * it. Day-grained on purpose — the lock is a property of the day the grid renders, and
    * `segmentKey` already takes a date. Under `personal`, `readOnlyDay` is the exact complement of
    * `vaultBound`; `context.admin` is read by the `team` branch and nowhere else.
    */
-  /**
-   * SB-102 / DD-017 §1+§4: why a frozen day refused an edit. The server's 403 body and the
-   * client's toast are the same string; i18n.ts carries the Norwegian against this English.
-   */
-  FROZEN_ENTRY_REFUSAL: string;
-  committedOn(date: string, commits?: CommitSegment[] | null): boolean;
-  preCutover(date: string, context: VaultRuleContext): boolean;
-  frozenSegment(date: string, context: VaultRuleContext): boolean;
   readOnlyDay(date: string, context: VaultRuleContext): boolean;
   /**
    * SB-117: the field-equality key that decides whether an imported row is the row the index

@@ -210,8 +210,11 @@ TT.vaultQuarantineText = (reason) => (reason && VAULT_QUARANTINE_REASONS[reason]
 /**
  * What every rule in this family reads. The SAME object `vaultBound` has always taken, plus an
  * optional `admin` that ONLY `readOnlyDay`'s `team` branch looks at.
- * @typedef {{ shape?: string | null, vaultCutover?: string | null,
- *             commits?: import('./types.ts').CommitSegment[] | null, admin?: boolean }} VaultRuleContext
+ *
+ * IMPORTED, not restated — the shape is declared once, in types.ts, the way this file already
+ * refers to `CommitSegment`. A hand-copied duplicate had already drifted (`commits` nullable here
+ * and not there) before the ink was dry, which is the whole argument in one line.
+ * @typedef {import('./types.ts').VaultRuleContext} VaultRuleContext
  */
 
 /**
@@ -252,13 +255,20 @@ TT.vaultBound = function (entry, context) {
 };
 
 /**
- * DOES THE LEDGER HOLD THIS DAY'S SEGMENT? — the ONE ledger scan in the repo (PLAN-015).
+ * DOES THE LEDGER HOLD THIS DAY'S SEGMENT? — the one MEMBERSHIP scan the read-only rule family
+ * shares (PLAN-015).
  *
  * Deliberately shape-blind and role-blind: it answers a question about the ledger and nothing
- * else. Every rule that cares — `frozenSegment` under `personal`, `readOnlyDay`'s `team` branch
- * (SDD-002 ruling 6), and `client/src/components/grid/TimeGrid.tsx`'s lock expression — gate THIS
- * rather than writing the scan again. Three copies of "derive the segment key, walk the ledger"
- * is three chances for one of them to keep an old answer after a ruling moves.
+ * else. Every rule in the family gates THIS rather than writing the walk again — `frozenSegment`
+ * under `personal`, `readOnlyDay`'s `team` branch (SDD-002 ruling 6), and through `readOnlyDay`
+ * the client's whole lock expression (`TimeGrid.tsx`), which is where the second copy used to be.
+ *
+ * NOT the only code in the repo that walks the ledger, and the narrower claim is the honest one:
+ * `viewUtils.isApproved`, `TT.commitSnapshot` and `TT.monthSegments` walk it too. They ask
+ * different questions — is it approved, what money was frozen, what does the month roll up to —
+ * so routing them through here would couple four rules to make one grep tidier. What must not
+ * exist twice is *this* question, because two answers to "is this day frozen" is a rule that
+ * agrees today and diverges on the first ruling.
  *
  * Null holes are survivable: the server strips the money snapshot per role and a client's ledger
  * has been through JSON both ways.
