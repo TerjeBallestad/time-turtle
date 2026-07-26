@@ -11,6 +11,7 @@ import { UsersSection } from './UsersSection';
 import { PasswordSection } from './PasswordSection';
 import { GeneralSection } from './GeneralSection';
 import { MarkdownSection } from './MarkdownSection';
+import { MirrorSection } from './MirrorSection';
 import { VaultSection } from './VaultSection';
 import type { AppState } from '../../../../shared/types';
 import type { UiActions } from '../../types';
@@ -35,6 +36,12 @@ export function SettingsView({ state, ui }: SettingsProps) {
       {/* SB-056: the vault surface sits ABOVE the markdown one, because the shape selector
           decides whether that section still has a working paste-back at all. */}
       {admin && <VaultSection state={state} ui={ui} />}
+      {/* SB-095: NOT gated on `admin`, and that is the point. A mirror refusal is about one
+          person's own file, so the notice and the adopt action sit in a row every user sees,
+          while the mirror PATH — one setting for the whole install — stays admin-only in
+          MarkdownSection below. The section draws nothing at all unless something is blocked,
+          so a healthy install gains no empty row. */}
+      <MirrorSection state={state} ui={ui} admin={admin} />
       {admin && <MarkdownSection state={state} ui={ui} />}
     </div>
   );

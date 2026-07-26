@@ -210,9 +210,14 @@ const NO: Record<string, string> = {
   'locked to the server default': 'låst til serverstandarden',
   'the server pins the mirror folder (TT_MD_DIR_LOCK) — change it in the server environment.':
     'serveren låser speilmappen (TT_MD_DIR_LOCK) — endre den i servermiljøet.',
-  // SB-085: the standing mirror refusal (SB-065's guard) in the Mirror folder row. The two
-  // `reason` strings are the server's own wording, translated here by exact match.
-  'mirror paused — see Settings → Mirror folder': 'speiling satt på pause — se Innstillinger → Speilmappe',
+  // SB-085: the standing mirror refusal (SB-065's guard). The two `reason` strings are the
+  // server's own wording, translated here by exact match.
+  //
+  // SB-095 moved the notice OUT of the admin-only Mirror folder row into a section of its own
+  // that every user sees, so the toast had to stop pointing at a row a non-admin cannot reach:
+  // it names the new section ('Mirror' / 'Speil') instead.
+  Mirror: 'Speil',
+  'mirror paused — see Settings → Mirror': 'speiling satt på pause — se Innstillinger → Speil',
   'mirror unblocked — the next save overwrites the file': 'speiling gjenåpnet — neste lagring overskriver filen',
   'Mirror paused': 'Speiling satt på pause',
   'the file changed on disk since Time Turtle last wrote it':
@@ -223,6 +228,12 @@ const NO: Record<string, string> = {
   'never written by Time Turtle': 'aldri skrevet av Time Turtle',
   'Time Turtle will not overwrite a file it did not write, so it has stopped mirroring this timesheet. Everything you log is still saved here — only the markdown file is frozen. Copy it somewhere safe if it holds changes you need.':
     'Time Turtle overskriver ikke en fil den ikke har skrevet selv, så speilingen av denne timelisten er stanset. Alt du fører opp lagres fortsatt her — det er bare markdown-filen som er frosset. Ta en kopi av den et trygt sted hvis den inneholder endringer du trenger.',
+  // SB-095: the same notice, about SOMEBODY ELSE's mirror, shown to an admin. Second person
+  // is wrong there — the hours are not the reader's — so the heading and the body differ while
+  // the two buttons and the red confirm line are shared.
+  'Mirror paused for ': 'Speiling satt på pause for ',
+  'Time Turtle will not overwrite a file it did not write, so it has stopped mirroring this person’s timesheet. Their hours are still saved here — only the markdown file is frozen. Copy it somewhere safe before you adopt it.':
+    'Time Turtle overskriver ikke en fil den ikke har skrevet selv, så speilingen av denne personens timeliste er stanset. Timene deres lagres fortsatt her — det er bare markdown-filen som er frosset. Ta en kopi av den et trygt sted før du overtar den.',
   'Adopt the file on disk…': 'Overta filen på disken…',
   'Nothing is merged: Time Turtle adopts the file exactly as it stands right now, and the next save replaces its contents with the data in this app.':
     'Ingenting slås sammen: Time Turtle overtar filen nøyaktig slik den står nå, og neste lagring erstatter innholdet med dataene i denne appen.',

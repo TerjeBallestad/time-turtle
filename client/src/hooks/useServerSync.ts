@@ -72,7 +72,9 @@ export function useServerSync(
         if (res.mirrorBlocked !== undefined) blockedRef.current(res.mirrorBlocked);
         // A guard refusal is not a passing error: point at the place that can clear it
         // rather than dumping the raw server string into a toast that vanishes.
-        if (res.mirrorBlocked) toast(TT.t('mirror paused — see Settings → Mirror folder'));
+        // SB-095: that place is the Mirror SECTION now, not the admin-only Mirror folder row —
+        // for a non-admin the old pointer named a row they could never open.
+        if (res.mirrorBlocked) toast(TT.t('mirror paused — see Settings → Mirror'));
         else if (res.mirrorError) toast(TT.t('markdown mirror failed: ') + res.mirrorError);
       })
       .catch((err: ApiError) => {

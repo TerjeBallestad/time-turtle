@@ -437,4 +437,80 @@ describe('mirror never-clobber guard', () => {
     expect((await admin('GET', '/api/state')).json.mirrorBlocked.path).toBe(adminMirror);
     expect((await emp('GET', '/api/state')).json.mirrorBlocked.path).toBe(empMirror);
   }, 30000);
+
+  // SB-095: `/api/state` reports only the SESSION user's block, so an admin could not see —
+  // and therefore could not clear — an employee's, even though POST /api/mirror/acknowledge
+  // has taken `{userId}` since SB-065. The write was built and unreachable; this is the read.
+  //
+  // The shape is SB-086's on purpose: several users' blocks come back as a LIST under the
+  // plural `mirrorBlocks`, not as a third invention. What it adds is `userId`/`userName`,
+  // because the guard is keyed by PATH and the acknowledge call is keyed by USER — a report
+  // without the identity is one an admin cannot act on.
+  //
+  // ## Verified red-green: 2026-07-26
+  //   With the route renamed away (so GET /api/mirror/blocks 404s, i.e. the state before this
+  //   ticket), it fails on the very first thing it asks — express answering "no such route"
+  //   where the surface has to answer "not for you":
+  //     × an admin can read every user’s block, and an employee cannot  334ms
+  //     AssertionError: expected 404 to be 403 // Object.is equality
+  //     ❯ tests/mirror-guard.test.js:487  expect(refused.status).toBe(403)
+  it('an admin can read every user’s block, and an employee cannot', async () => {
+    const mdDir = mkdtempSync(join(tmpdir(), 'tt-sb95-md-'));
+    const dataDir = mkdtempSync(join(tmpdir(), 'tt-sb95-data-'));
+    const { port } = await startServer({ TT_DATA_DIR: dataDir, TT_MD_DIR: mdDir });
+    const admin = await adminOn(port);
+
+    const created = await admin('POST', '/api/users', {
+      email: 'sb95@timeturtle.local',
+      name: 'Sb Ninetyfive',
+      role: 'employee',
+      password: 'sb95pw',
+    });
+    expect(created.status).toBe(200);
+    const empId = created.json.user.id;
+    const emp = session(port);
+    expect((await emp('POST', '/api/auth/login', { email: 'sb95@timeturtle.local', password: 'sb95pw' })).status).toBe(
+      200,
+    );
+
+    // both mirrors written and stamped, then both changed underneath, then both refused
+    const adminMirror = (await admin('PUT', '/api/state', { entries: [entryWith('a1')] })).json.mirror;
+    const empMirror = (await emp('PUT', '/api/state', { entries: [entryWith('e1')] })).json.mirror;
+    expect(adminMirror).toBeTruthy();
+    expect(empMirror).toBeTruthy();
+    const foreignEmp = FOREIGN + 'employee copy\n';
+    writeFileSync(adminMirror, FOREIGN + 'admin copy\n', 'utf8');
+    writeFileSync(empMirror, foreignEmp, 'utf8');
+    expect((await admin('PUT', '/api/state', { entries: [entryWith('a2')] })).json.mirrorBlocked).toBeTruthy();
+    expect((await emp('PUT', '/api/state', { entries: [entryWith('e2')] })).json.mirrorBlocked).toBeTruthy();
+
+    // 1. the employee may not read across users — the same 403 every admin surface gives
+    const refused = await emp('GET', '/api/mirror/blocks');
+    expect(refused.status).toBe(403);
+
+    // 2. the admin sees BOTH, each carrying who it belongs to
+    const blocks = await admin('GET', '/api/mirror/blocks');
+    expect(blocks.status).toBe(200);
+    expect(Object.keys(blocks.json)).toEqual(['mirrorBlocks']); // SB-086's shape, nothing else
+    expect(blocks.json.mirrorBlocks.map((b) => b.path).sort()).toEqual([adminMirror, empMirror].sort());
+    const empBlock = blocks.json.mirrorBlocks.find((b) => b.path === empMirror);
+    expect(empBlock.userId).toBe(empId);
+    expect(empBlock.userName).toBe('Sb Ninetyfive');
+    expect(empBlock.reason).toMatch(/chang/i);
+    // blind, like the rename report: paths and names, never entry content
+    expect(JSON.stringify(blocks.json)).not.toContain('e2');
+
+    // 3. and the id it reports is the one the acknowledge route takes — the whole point of
+    //    carrying it. Clearing is CONSENT: the employee's file is untouched afterwards.
+    const ack = await admin('POST', '/api/mirror/acknowledge', { userId: empBlock.userId });
+    expect(ack.status).toBe(200);
+    expect(ack.json.cleared).toBe(true);
+    expect(readFileSync(empMirror, 'utf8')).toBe(foreignEmp);
+    expect((await emp('GET', '/api/state')).json.mirrorBlocked).toBe(null);
+
+    // 4. the read now reports only what is still blocked — the admin's own, which stays
+    const after = await admin('GET', '/api/mirror/blocks');
+    expect(after.json.mirrorBlocks.map((b) => b.path)).toEqual([adminMirror]);
+    expect((await admin('GET', '/api/state')).json.mirrorBlocked.path).toBe(adminMirror);
+  }, 30000);
 });
