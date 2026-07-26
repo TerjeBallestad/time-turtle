@@ -145,9 +145,14 @@ describe('committing in the personal shape', () => {
     // that committed a week before the switch — into a permanent toast loop on every hour it
     // logs. The client re-sends the whole ledger on every debounce; here is that debounce.
     const state = await ADMIN('GET', '/api/state');
+    // The new hour is logged on a day WELL AFTER the cutover and in no committed segment. That
+    // is not incidental: PLAN-015/DD-017 §1 makes a frozen day read-only under `personal`, so
+    // adding a row to `DATE` — which is inside the committed segment this suite freezes — is now
+    // a 403 from a different guard entirely (`frozenEntryRefusal`, proved in shape-freeze). This
+    // case is about the LEDGER riding along, and it has to keep being about only that.
     const entry = {
       id: 'e3-personal',
-      date: DATE,
+      date: TT.addDays(TT.todayStr(), 21),
       start: 660,
       end: 720,
       project: null,

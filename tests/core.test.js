@@ -4,6 +4,26 @@
 // ## Verified red-green: 2026-07-23
 // PLAN-007 (SB-025): monthSegments/monthGood/segmentApproved review rollup.
 // ## Verified red-green: 2026-07-24
+//
+// ## Verified red-green: 2026-07-27
+// PLAN-015 (SB-102 / DD-017 §1): the read-only rule. Output TRANSCRIBED from the runs.
+//   (a) `TT.frozenSegment` forced to `return false` — the ledger clause gone. 3 table rows fail:
+//         × personal / cutover 2026-07-15T09:12:33.000Z / ledger / employee / 2026-07-20
+//           AssertionError: expected [ false, false, false ] to deeply equal [ false, true, true ]
+//       (the complement assertion does NOT fail here, and that is correct: `readOnlyDay` and
+//       `vaultBound` both compose the same broken helper, so they stay complements. The thing
+//       that catches it is the table, and — end to end — the vault case in vault-write.test.js.)
+//   (b) `readOnlyDay`'s personal branch re-derived as `return TT.frozenSegment(date, ctx)`,
+//       i.e. it stops deriving and disagrees with `vaultBound`. 4 fail, and the invariant is
+//       the one that names it:
+//         × under `personal`, readOnlyDay is the EXACT complement of vaultBound on every row
+//           AssertionError: personal / cutover 2026-07-15T09:12:33.000Z / no ledger / employee /
+//           2026-07-14: expected false to be true
+//   (c) `preCutover`'s date comparison replaced by `return false`. 3 table rows fail, plus
+//       vault-write's pre-existing case (2):
+//         × (2) an entry dated BEFORE the cutover produces no file and no adoption
+//           AssertionError: a pre-cutover day was given a daily note: expected true to be false
+//   Restored: 129 passed across the two files.
 import { describe, it, expect } from 'vitest';
 import TT from '../shared/core.js';
 
@@ -786,5 +806,100 @@ describe('the wikilink composition is one rule, independent of encodeCell (SB-12
       expect(parsed.quarantine).toBe(false);
       expect(parsed.entries[0].project).toBe('[[Planning [2026]]]');
     });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// DD-017 §1 — the read-only rule, and the fact that it is the exact complement of
+// `TT.vaultBound` rather than a second opinion about the same three conditions.
+//
+// PLAN-015 / SB-102. `TT.vaultBound` already existed (PLAN-012 landed it) and is the one home of
+// shape + cutover + ledger. The three predicates below are DERIVED from the same two clauses, so
+// the repo holds exactly one date comparison and exactly one ledger scan. The invariant that
+// makes DD-017 a rule rather than a coincidence — under `personal`, editable ⇔ vault-bound — is
+// EXECUTED here over the table, not asserted in a comment.
+//
+// The `team` rows are not padding: `readOnlyDay`'s other branch is the whole of SDD-002 ruling 6
+// (the admin exemption), and a table with only `personal` rows would let a broken `team` branch
+// through untouched.
+describe('the read-only rule (DD-017 §1)', () => {
+  const CUTOVER = '2026-07-15T09:12:33.000Z'; // an ISO instant; compared day-grained
+  const BEFORE = '2026-07-14'; // strictly before the cutover DAY
+  const ON = '2026-07-15'; // the cutover day itself is NOT before it
+  const AFTER = '2026-07-20'; // Monday, week 30
+  const AFTER_KEY = TT.segmentKey(AFTER);
+  const COMMITS = [{ key: AFTER_KEY, committedAt: '2026-07-27T00:00:00.000Z' }];
+
+  // Named rows, so a failure prints WHICH row rather than `[object Object]`.
+  // expected = [preCutover, frozenSegment, readOnlyDay]
+  const row = (shape, vaultCutover, commits, admin, date, expected) => ({
+    name: `${shape} / cutover ${vaultCutover || '(never stamped)'} / ${commits.length ? 'ledger' : 'no ledger'} / ${admin ? 'admin' : 'employee'} / ${date}`,
+    shape,
+    vaultCutover,
+    commits,
+    admin,
+    date,
+    expected,
+  });
+  const ROWS = [
+    // personal, cutover stamped, nothing committed
+    row('personal', CUTOVER, [], false, BEFORE, [true, false, true]),
+    row('personal', CUTOVER, [], false, ON, [false, false, false]),
+    row('personal', CUTOVER, [], false, AFTER, [false, false, false]),
+    // personal, cutover stamped, the AFTER segment committed — the ledger wins over the date,
+    // which is DD-017 §2 and the clause a same-side-of-the-cutover table cannot distinguish
+    row('personal', CUTOVER, COMMITS, false, BEFORE, [true, false, true]),
+    row('personal', CUTOVER, COMMITS, false, ON, [false, false, false]),
+    row('personal', CUTOVER, COMMITS, false, AFTER, [false, true, true]),
+    // personal, admin: the flag is READ BY THE TEAM BRANCH ONLY, so it changes nothing here.
+    // This is the DD-015-depth-2 hazard in one row — the personal user IS the seeded admin.
+    row('personal', CUTOVER, COMMITS, true, BEFORE, [true, false, true]),
+    row('personal', CUTOVER, COMMITS, true, AFTER, [false, true, true]),
+    // personal, cutover never stamped (''): no history is excluded
+    row('personal', '', COMMITS, false, BEFORE, [false, false, false]),
+    row('personal', '', COMMITS, false, AFTER, [false, true, true]),
+    // team: no cutover clause at all, and the admin exemption (SDD-002 ruling 6) stands
+    row('team', CUTOVER, COMMITS, false, BEFORE, [false, false, false]),
+    row('team', CUTOVER, COMMITS, false, AFTER, [false, false, true]),
+    row('team', CUTOVER, COMMITS, true, AFTER, [false, false, false]),
+    row('team', CUTOVER, [], false, AFTER, [false, false, false]),
+    // an unknown/absent shape is not `personal`, so it takes the team branch
+    row(null, CUTOVER, COMMITS, false, AFTER, [false, false, true]),
+  ];
+
+  it.each(ROWS)('$name', ({ shape, vaultCutover, commits, admin, date, expected }) => {
+    const ctx = { shape, vaultCutover, commits, admin };
+    expect([TT.preCutover(date, ctx), TT.frozenSegment(date, ctx), TT.readOnlyDay(date, ctx)]).toEqual(expected);
+  });
+
+  it('under `personal`, readOnlyDay is the EXACT complement of vaultBound on every row', () => {
+    // DD-017's whole rule, executed: "editable ⇔ vault-bound". If these two ever disagree the
+    // app can show an editable day whose hours never reach a daily note, which is the silent
+    // divergence the one-home discipline exists to prevent.
+    const personalRows = ROWS.filter((r) => r.shape === 'personal');
+    expect(personalRows.length).toBeGreaterThan(0);
+    for (const { shape, vaultCutover, commits, admin, date, name } of personalRows) {
+      const ctx = { shape, vaultCutover, commits, admin };
+      expect(TT.readOnlyDay(date, ctx), name).toBe(!TT.vaultBound({ date }, ctx));
+    }
+  });
+
+  it('the ledger is scanned in ONE place — committedOn is shape-blind and the others gate it', () => {
+    expect(TT.committedOn(AFTER, COMMITS)).toBe(true);
+    expect(TT.committedOn(BEFORE, COMMITS)).toBe(false);
+    expect(TT.committedOn(AFTER, [])).toBe(false);
+    expect(TT.committedOn(AFTER, undefined)).toBe(false);
+    // a null hole in the ledger array is survivable — the server strips segments per-role
+    expect(TT.committedOn(AFTER, [null, { key: AFTER_KEY }])).toBe(true);
+  });
+
+  it('vaultBound keeps its exact guards: a non-string date and a missing context are false', () => {
+    const ctx = { shape: 'personal', vaultCutover: CUTOVER, commits: COMMITS };
+    expect(TT.vaultBound(null, ctx)).toBe(false);
+    expect(TT.vaultBound({ date: 20260720 }, ctx)).toBe(false);
+    expect(TT.vaultBound({ date: AFTER }, undefined)).toBe(false); // no shape → not personal
+    expect(TT.preCutover(20260714, ctx)).toBe(false);
+    expect(TT.frozenSegment(20260720, ctx)).toBe(false);
+    expect(TT.readOnlyDay(20260720, ctx)).toBe(false);
   });
 });

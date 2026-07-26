@@ -308,6 +308,20 @@ export interface CommitSegment {
   releasedBy?: number;
 }
 
+/**
+ * SB-102 / DD-017 §1: what the read-only rule reads. The SAME object `TT.vaultBound` has always
+ * taken, plus an optional `admin` that ONLY `readOnlyDay`'s `team` branch looks at — the
+ * committed-segment exemption is SDD-002 ruling 6 and is a `team` concept. Under `personal` the
+ * one user IS the seeded admin (DD-015 depth 2), which is precisely why the lock cannot be
+ * role-gated there.
+ */
+export interface VaultRuleContext {
+  shape?: string | null;
+  vaultCutover?: string | null;
+  commits?: CommitSegment[] | null;
+  admin?: boolean;
+}
+
 /** One (ISO week ∩ month) slice of a week: its key, its calendar month, its days in order. */
 export interface WeekSegment {
   key: string;
@@ -1070,10 +1084,30 @@ export interface TTModule {
    * SQLite and never reaches a daily note — and never triggers DD-012 adoption on its behalf.
    * The one home of the predicate; SB-102 consumes this rather than adding a second copy.
    */
-  vaultBound(
-    entry: Entry,
-    context: { shape?: string | null; vaultCutover?: string | null; commits?: CommitSegment[] },
-  ): boolean;
+  vaultBound(entry: Entry, context: VaultRuleContext): boolean;
+  /**
+   * SB-102 / DD-017 §1+§4: why a frozen day refused an edit. The server's 403 body and the
+   * client's toast are the same string; i18n.ts carries the Norwegian against this English.
+   */
+  FROZEN_ENTRY_REFUSAL: string;
+  /**
+   * SB-102: does the ledger hold this day's segment? The one MEMBERSHIP scan the read-only rule
+   * family shares — shape-blind and role-blind on purpose, so each rule gates it rather than
+   * writing the walk again. (`isApproved`, `commitSnapshot` and `monthSegments` also walk the
+   * ledger; they ask different questions and are deliberately not routed through this.)
+   */
+  committedOn(date: string, commits?: CommitSegment[] | null): boolean;
+  /** SB-102 / DD-016: is this day older than the vault? `vaultBound`'s cutover clause, alone. */
+  preCutover(date: string, context: VaultRuleContext): boolean;
+  /** SB-102 / DD-017 §2: is this day inside a frozen segment? `vaultBound`'s ledger clause, alone. */
+  frozenSegment(date: string, context: VaultRuleContext): boolean;
+  /**
+   * SB-102 / DD-017 §1: the read-only rule, DERIVED from `vaultBound` rather than written beside
+   * it. Day-grained on purpose — the lock is a property of the day the grid renders, and
+   * `segmentKey` already takes a date. Under `personal`, `readOnlyDay` is the exact complement of
+   * `vaultBound`; `context.admin` is read by the `team` branch and nowhere else.
+   */
+  readOnlyDay(date: string, context: VaultRuleContext): boolean;
   /**
    * SB-117: the field-equality key that decides whether an imported row is the row the index
    * already holds. NOT DD-008's persistence key — nothing is hashed and nothing is stored, and
