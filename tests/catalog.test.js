@@ -282,13 +282,16 @@ describe('catalog note — Clients and Projects (SB-058 task 1)', () => {
       const reasons = [...union[1].matchAll(/\|\s*'([a-z-]+)'/g)].map((m) => m[1]);
       expect(reasons.length).toBeGreaterThan(0);
       const core = readFileSync(new URL('../shared/core.js', import.meta.url), 'utf8');
-      // reasons the WHOLE-note codec produces, goldened in their own suites in this file
-      const elsewhere = new Set([]);
+      // A golden is either a row of the section-level table above or an assertion anywhere else
+      // in this file — the whole-note reasons (a revision disagreement, a dangling client) can
+      // only be produced by a note with four sections, so they are goldened in the task 3 and 4
+      // suites below rather than here.
+      const self = readFileSync(new URL('./catalog.test.js', import.meta.url), 'utf8');
       const produced = new Set(REFUSALS.map(([, reason]) => reason));
       for (const reason of reasons) {
         expect(core.includes(`'${reason}'`), `reason declared but never emitted: ${reason}`).toBe(true);
-        if (elsewhere.has(reason)) continue;
-        expect(produced.has(reason), `no refusal golden for reason: ${reason}`).toBe(true);
+        const goldened = produced.has(reason) || self.includes(`toBe('${reason}')`);
+        expect(goldened, `no refusal golden for reason: ${reason}`).toBe(true);
       }
       // and the block half must not have quietly acquired a catalog reason
       const block = /export type VaultBlockQuarantineReason =([\s\S]*?);/.exec(types.replace(/\/\*[\s\S]*?\*\//g, ''));
@@ -471,6 +474,249 @@ describe('catalog note — Task templates and Settings (SB-058 task 2)', () => {
       const parsed = parse('settings', region('settings', rows, 1));
       expect(parsed.rows).toEqual(rows);
       expect(TT.vaultCatalogSettings(parsed.rows)).toEqual({});
+    });
+  });
+});
+
+// ## Verified red-green: 2026-07-26
+// Task 3 (TASK-044): the whole note — assemble, splice, and refuse as one unit.
+describe('catalog note — the whole note (SB-058 task 3)', () => {
+  const CATALOG = {
+    clients: [FJELLHEIM, BRYGGA],
+    projects: [NETT, DRIFT, ADMIN],
+    tasks: [{ id: 'checkout', label: 'Checkout flow', project: 'FJH-NETT' }],
+    settings: [
+      { key: 'currency', value: 'kr' },
+      { key: 'language', value: 'en' },
+      { key: 'vaultTimeSeparator', value: 'unicode' },
+    ],
+    revision: 3,
+  };
+  const NOTE = TT.serializeVaultCatalog(CATALOG);
+
+  describe('assemble', () => {
+    it('emits four sections in order under one H1, and nothing else', () => {
+      expect(NOTE.split('\n').filter((line) => line.startsWith('#'))).toEqual([
+        '# Time Turtle',
+        '## Clients',
+        '## Projects',
+        '## Task templates',
+        '## Settings',
+      ]);
+      expect(NOTE.endsWith('\n')).toBe(true);
+    });
+
+    it('writes the SAME N into every section — one catalog-wide counter (SB-104)', () => {
+      const anchors = NOTE.split('\n').filter((line) => line.startsWith('`revision:'));
+      expect(anchors).toHaveLength(4);
+      expect(anchors.every((line) => line.startsWith('`revision: 3 · '))).toBe(true);
+      // …and four DIFFERENT digests, because DD-009's digest is per block. One file-level anchor
+      // over four tables would leave the Projects table undetectably mergeable.
+      expect(new Set(anchors).size).toBe(4);
+    });
+
+    it('round-trips both ways', () => {
+      const parsed = TT.parseVaultCatalog(NOTE);
+      expect(parsed.quarantine).toBe(false);
+      expect(parsed.revision).toBe(3);
+      expect(parsed.verified).toBe(true);
+      expect(parsed.clients).toEqual(CATALOG.clients);
+      expect(parsed.projects).toEqual(CATALOG.projects);
+      expect(parsed.tasks).toEqual(CATALOG.tasks);
+      expect(parsed.settings).toEqual(CATALOG.settings);
+      expect(TT.serializeVaultCatalog(parsed)).toBe(NOTE);
+      expect(TT.writeVaultCatalog(NOTE, CATALOG).md).toBe(NOTE);
+    });
+  });
+
+  describe('splice — everything outside the four regions is Terje’s', () => {
+    // Sections in a DIFFERENT order from the canonical one, with prose above, between and below,
+    // plus a heading of his own. The same guarantee writeVaultBlock gives a daily note.
+    const HAND = [
+      '# Time Turtle',
+      '',
+      'Rates renegotiated with Fjellheim in March. Do not touch the archive project.',
+      '',
+      TT.serializeVaultCatalogSection('settings', CATALOG.settings, { revision: 3 }),
+      '',
+      '## Notes to self',
+      '',
+      'Brygga pays on 30 days, everyone else on 14.',
+      '',
+      TT.serializeVaultCatalogSection('clients', CATALOG.clients, { revision: 3 }),
+      '',
+      TT.serializeVaultCatalogSection('tasks', CATALOG.tasks, { revision: 3 }),
+      '',
+      TT.serializeVaultCatalogSection('projects', CATALOG.projects, { revision: 3 }),
+      '',
+      '## Archive',
+      '',
+      'Old rates live in Time Turtle/2025.md.',
+      '',
+    ].join('\n');
+
+    it('parses a note whose sections are in the author’s order, not TT’s', () => {
+      const parsed = TT.parseVaultCatalog(HAND);
+      expect(parsed.quarantine).toBe(false);
+      expect(parsed.clients).toEqual(CATALOG.clients);
+      expect(parsed.projects).toEqual(CATALOG.projects);
+    });
+
+    it('a write keeps every byte outside the four regions, and each section where it was', () => {
+      const bumped = { ...CATALOG, clients: [{ ...FJELLHEIM, rate: 1400 }, BRYGGA] };
+      const res = TT.writeVaultCatalog(HAND, bumped);
+      expect(res.quarantine).toBe(false);
+      for (const line of [
+        '# Time Turtle',
+        'Rates renegotiated with Fjellheim in March. Do not touch the archive project.',
+        '## Notes to self',
+        'Brygga pays on 30 days, everyone else on 14.',
+        '## Archive',
+        'Old rates live in Time Turtle/2025.md.',
+      ])
+        // prettier-ignore
+        expect(res.md).toContain(line);
+      // the author's section order survives the write
+      expect(res.md.split('\n').filter((line) => line.startsWith('## '))).toEqual([
+        '## Settings',
+        '## Notes to self',
+        '## Clients',
+        '## Task templates',
+        '## Projects',
+        '## Archive',
+      ]);
+      expect(res.md).toContain('| fjellheim | Fjellheim AS | 1400 | 15 |');
+      // and only the one line changed
+      const before = HAND.split('\n');
+      const after = res.md.split('\n');
+      expect(after.length).toBe(before.length);
+      expect(after.filter((line, i) => line !== before[i]).length).toBe(2); // the row, and its anchor
+    });
+
+    it('a section that GAINS or LOSES rows leaves every other section intact', () => {
+      // The case that makes splice ORDER load-bearing: rewriting a section with a different row
+      // count moves every line below it. Splicing top-down would leave the later sections'
+      // offsets stale and eat the wrong lines — and no fixture whose sections keep their row
+      // count can tell the two orders apart.
+      const NORD = { id: 'nord', name: 'Nord Bygg', rate: 800, rounding: 30, archived: false };
+      const changed = { ...CATALOG, clients: [...CATALOG.clients, NORD], tasks: [] };
+      for (const before of [NOTE, HAND]) {
+        const res = TT.writeVaultCatalog(before, changed);
+        expect(res.quarantine).toBe(false);
+        const reparsed = TT.parseVaultCatalog(res.md);
+        expect(reparsed.quarantine).toBe(false);
+        expect(reparsed.clients).toEqual(changed.clients);
+        expect(reparsed.projects).toEqual(changed.projects);
+        expect(reparsed.tasks).toEqual([]);
+        expect(reparsed.settings).toEqual(changed.settings);
+        // and the prose still bounds the sections it bounded before
+        for (const line of before.split('\n').filter((l) => l && !l.startsWith('|') && !l.startsWith('`')))
+          expect(res.md).toContain(line);
+      }
+    });
+
+    it('the revision is not bumped by a write — that is SB-057’s arbitration', () => {
+      expect(TT.parseVaultCatalog(TT.writeVaultCatalog(NOTE, CATALOG).md).revision).toBe(3);
+      const set = TT.writeVaultCatalog(NOTE, CATALOG, { revision: 9 });
+      const reparsed = TT.parseVaultCatalog(set.md);
+      expect(reparsed.revision).toBe(9);
+      expect(set.md.split('\n').filter((line) => line.startsWith('`revision: 9 · '))).toHaveLength(4);
+    });
+  });
+
+  describe('refuse as one unit', () => {
+    /** Damage exactly one section of an otherwise perfect note. */
+    const damage = (section, from, to) => {
+      const bad = sign(edit(TT.serializeVaultCatalogSection(section, CATALOG[section], { revision: 3 }), from, to));
+      return NOTE.replace(TT.serializeVaultCatalogSection(section, CATALOG[section], { revision: 3 }), bad);
+    };
+
+    const CASES = [
+      ['clients', 'catalog-bad-number', damage('clients', '| 1250 |', '| 1,250 |')],
+      ['projects', 'catalog-bad-flag-cell', damage('projects', '| ✓ | [[Nettbutikk rebuild]] |', '| y | [[Nettbutikk rebuild]] |')], // prettier-ignore
+      ['tasks', 'unknown-header', damage('tasks', '| Template | Label | Project |', '| Template | Label | Client |')], // prettier-ignore
+      ['settings', 'catalog-duplicate-id', damage('settings', '| language | en |', '| currency | en |')],
+    ];
+
+    for (const [section, reason, md] of CASES) {
+      it(`one damaged section (${section}: ${reason}) quarantines the WHOLE note`, () => {
+        const parsed = TT.parseVaultCatalog(md);
+        expect(parsed.quarantine).toBe(true);
+        expect(parsed.reason).toBe(reason);
+        expect(parsed.section).toBe(section);
+        // …and NO section is written. A catalog that kept its projects and lost its clients
+        // resolves every rate to 0 with no error anywhere: refused beats partial.
+        const res = TT.writeVaultCatalog(md, CATALOG);
+        expect(res.quarantine).toBe(true);
+        expect(res.reason).toBe(reason);
+        expect(res.section).toBe(section);
+        expect(res.md).toBe(md); // not one byte
+      });
+    }
+
+    it('a partial catalog never escapes the parse — the three healthy sections come back with nothing', () => {
+      const parsed = TT.parseVaultCatalog(CASES[0][2]);
+      expect(parsed.quarantine).toBe(true);
+      for (const key of ['clients', 'projects', 'tasks', 'settings']) expect(key in parsed).toBe(false);
+    });
+
+    it('sections disagreeing on N quarantine — never reconciled to the max (SB-104)', () => {
+      const mixed = NOTE.replace(
+        TT.serializeVaultCatalogSection('projects', CATALOG.projects, { revision: 3 }),
+        TT.serializeVaultCatalogSection('projects', CATALOG.projects, { revision: 4 }),
+      );
+      const parsed = TT.parseVaultCatalog(mixed);
+      expect(parsed.quarantine).toBe(true);
+      expect(parsed.reason).toBe('catalog-revision-mismatch');
+      expect(parsed.section).toBe(null); // a fact about the note, not about one section
+      expect(TT.writeVaultCatalog(mixed, CATALOG).md).toBe(mixed);
+    });
+
+    it('a project naming a client the Clients table does not hold quarantines', () => {
+      const orphan = { ...CATALOG, projects: [...CATALOG.projects, { code: 'GONE-01', name: 'Orphan', clientId: 'vanished', rate: null, billable: true, archived: false }] }; // prettier-ignore
+      const parsed = TT.parseVaultCatalog(TT.serializeVaultCatalog(orphan));
+      expect(parsed.quarantine).toBe(true);
+      expect(parsed.reason).toBe('catalog-dangling-client');
+      expect(parsed.section).toBe('projects');
+    });
+
+    it('a MISSING section is reported, never adopted — DD-012 stops at the daily note', () => {
+      // The catalog is a file TT owns end to end, and a `## Clients` heading in some unrelated
+      // note is not an invitation. Whether to CREATE the note is SB-057's write decision.
+      const noAnchor = ['# Time Turtle', '', '## Clients', '', '| Client | Name |', '|---|---|', '| brygga | Brygga Digital |', ''].join('\n'); // prettier-ignore
+      const parsed = TT.parseVaultCatalog(noAnchor);
+      expect(parsed.quarantine).toBe(true);
+      expect(parsed.reason).toBe('no-revision');
+      expect(parsed.section).toBe('clients');
+      const res = TT.writeVaultCatalog(noAnchor, CATALOG);
+      expect(res.md).toBe(noAnchor); // nothing inserted, no anchor synthesised
+      expect(res.md).not.toContain('`revision:');
+    });
+
+    it('a section absent altogether is `no-heading` for that section', () => {
+      const withoutTasks = NOTE.replace(TT.serializeVaultCatalogSection('tasks', CATALOG.tasks, { revision: 3 }) + '\n\n', ''); // prettier-ignore
+      const parsed = TT.parseVaultCatalog(withoutTasks);
+      expect(parsed.quarantine).toBe(true);
+      expect(parsed.reason).toBe('no-heading');
+      expect(parsed.section).toBe('tasks');
+    });
+
+    it('the OUTPUT is gated too — bytes TT could not read back are refused, not written', () => {
+      // TT.encodeCell escapes `\` and `|`; it does not escape a NEWLINE, so a name carrying one
+      // would split its own row and produce a note TT's own parser refuses — a note frozen
+      // against TT until a human repaired it, reported as a successful write.
+      const res = TT.writeVaultCatalog(NOTE, { ...CATALOG, clients: [{ ...FJELLHEIM, name: 'Fjell\nheim' }, BRYGGA] });
+      expect(res.quarantine).toBe(true);
+      expect(res.reason).toBe('write-would-corrupt');
+      expect(res.md).toBe(NOTE);
+    });
+
+    it('a note TT cannot read is never written to, whatever the caller wants written', () => {
+      // Including "write the fix over it": resolving a quarantine is a human decision surfaced by
+      // SB-057, never something a write silently performs.
+      const res = TT.writeVaultCatalog(CASES[0][2], CATALOG);
+      expect(res.md).toBe(CASES[0][2]);
+      expect(res.md).toContain('| 1,250 |');
     });
   });
 });

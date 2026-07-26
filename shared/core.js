@@ -1960,6 +1960,190 @@ TT.vaultCatalogSettingRows = function (settings, carried) {
   return rows;
 };
 
+// ---- the whole note: assemble, splice, and refuse as one unit ----
+//
+// WHOLE-CATALOG ATOMICITY IS THE POINT OF THIS LAYER. If any single section quarantines,
+// `parseVaultCatalog` returns a quarantine naming the section and the reason, and
+// `writeVaultCatalog` writes NO section and hands the note back byte-identical.
+//
+// The reason is `TT.rateOf`, which resolves project → client → rate. A catalog that returned
+// projects and silently dropped clients would make every rate 0, with no error anywhere and
+// nothing on screen — an invoice for free work. Losing the client/rate catalog is worse than
+// losing a day of entries, so refused beats partial, in both directions.
+//
+// NO ADOPTION HERE (DD-012 is deliberately not extended to this note). The daily note needs
+// adoption because Terje hand-writes daily notes; the catalog is a file TT owns end to end, and a
+// `## Clients` heading in some unrelated note is not an invitation to claim it. A missing section
+// is reported as a missing section — whether to CREATE the note is a write decision, and it is
+// SB-057's, with the bytes already available from `TT.serializeVaultCatalog`.
+/**
+ * The sections, in the order a NEW note is written. An EXISTING note keeps its own order: the
+ * splice puts each section back where it was, so rearranging the note is Terje's to do.
+ * @type {import('./types.ts').VaultCatalogSectionName[]}
+ */
+const CATALOG_ORDER = [
+  CATALOG_SECTION_NAMES.clients,
+  CATALOG_SECTION_NAMES.projects,
+  CATALOG_SECTION_NAMES.tasks,
+  CATALOG_SECTION_NAMES.settings,
+];
+/**
+ * The H1 a note TT creates from scratch opens with. In the registry with everything else SB-106
+ * gates, because whether the note wants a title at all is a taste question and not a parse one —
+ * nothing reads it, the locator's hard stop is unaffected by it, and a note that does not have it
+ * parses exactly the same.
+ */
+const CATALOG_TITLE = '# Time Turtle';
+
+/**
+ * THE ANCHOR READER — the other of the two places that decide how the catalog's revision counter
+ * crosses the bytes (the emitter is `TT.serializeVaultCatalogSection`). SB-104 is open on which
+ * counter a per-file arbiter compares, and this function is where a different ruling lands: today
+ * it demands agreement, and "the file takes the max" would be a one-line change here.
+ *
+ * DISAGREEMENT IS A QUARANTINE, NOT A MAXIMUM. A TT-written catalog cannot carry mixed revisions —
+ * TT writes the note whole, one file, one atomic rename (SB-057's write primitive) — so mixed
+ * revisions mean a merge or a partial hand edit. Reconciling to the max would silently adopt
+ * whichever half won, on the file that holds the rates.
+ *
+ * The counter is NOT bumped anywhere in this file. When a write bumps it is SB-057's arbitration
+ * to rule on, exactly as `TT.writeVaultBlock` leaves it.
+ * @param {import('./types.ts').VaultCatalogSectionParse[]} sections
+ * @returns {{ revision: number } | { reason: 'catalog-revision-mismatch' }}
+ */
+function catalogRevisionOf(sections) {
+  const revision = sections.length ? sections[0].revision : 1;
+  for (const section of sections) if (section.revision !== revision) return { reason: 'catalog-revision-mismatch' };
+  return { revision };
+}
+
+/**
+ * Serialize a whole catalog note — the bytes of a note that does not exist yet. SB-057 needs
+ * exactly this for the first-boot case: producing the bytes is here, writing them is there.
+ *
+ * `catalog.settings` is the ROWS (see `TT.vaultCatalogSettingRows`), not a `Settings` object, so
+ * that the keys this TT does not know survive whatever the caller does with the typed half.
+ * @param {{ clients?: Client[], projects?: Project[], tasks?: Task[], settings?: import('./types.ts').VaultCatalogSettingRow[], revision?: number }} catalog
+ * @param {{ revision?: number }} [opts]
+ * @returns {string}
+ */
+TT.serializeVaultCatalog = function (catalog, opts) {
+  const source = catalog || {};
+  const revision = (opts && opts.revision != null ? opts.revision : source.revision) ?? 1;
+  const lines = [CATALOG_TITLE, ''];
+  for (const section of CATALOG_ORDER) {
+    // THE SAME N INTO EVERY SECTION. One catalog-wide counter, written identically four times —
+    // the catalog is the unit of change and the section is not.
+    lines.push(TT.serializeVaultCatalogSection(section, source[section] || [], { revision }), '');
+  }
+  return lines.join('\n');
+};
+
+/**
+ * Parse a whole catalog note into a model, or refuse — as ONE unit. Any section quarantining
+ * quarantines the note.
+ * @param {string} md @returns {import('./types.ts').VaultCatalogParseResult}
+ */
+TT.parseVaultCatalog = function (md) {
+  const input = String(md == null ? '' : md);
+  /** @type {import('./types.ts').VaultCatalogSectionParse[]} */
+  const sections = [];
+  for (const section of CATALOG_ORDER) {
+    const parsed = TT.parseVaultCatalogSection(input, section);
+    if (parsed.quarantine) return parsed; // named, with its section — no partial catalog escapes
+    sections.push(parsed);
+  }
+  // structural first: a revision disagreement is a fact about the NOTE, and diagnosing a
+  // dangling reference inside a note that has plainly been merged would name the wrong problem
+  const counter = catalogRevisionOf(sections);
+  if ('reason' in counter) return { quarantine: true, reason: counter.reason, section: null };
+
+  const [clients, projects, tasks, settings] = sections.map((section) => section.rows);
+  // THE CROSS-SECTION RULE, and the one this whole ticket exists for. A `Project.clientId` naming
+  // a client the Clients table does not contain round-trips PERFECTLY — the bytes are identical
+  // both ways — while `TT.rateOf` returns 0 for every project on that client. SB-048 taught this
+  // exact blindness the expensive way (a byte-green mirror golden beside a `commitSnapshot` that
+  // returned null), and byte equality is structurally incapable of seeing it.
+  //
+  // A DECISION, not a fall-through: it QUARANTINES. Under the vault shape there is no database to
+  // reconcile a dangling id against — this file IS the database — so the only alternatives are
+  // resolving to 0 (an invoice for free work) or dropping the reference (the same, silently). A
+  // dangling clientId is a catalog a human has to look at.
+  const ids = new Set(/** @type {Client[]} */ (clients).map((client) => client.id));
+  for (const project of /** @type {Project[]} */ (projects))
+    if (project.clientId && !ids.has(project.clientId))
+      return { quarantine: true, reason: 'catalog-dangling-client', section: CATALOG_SECTION_NAMES.projects };
+
+  return {
+    quarantine: false,
+    clients: /** @type {Client[]} */ (clients),
+    projects: /** @type {Project[]} */ (projects),
+    tasks: /** @type {Task[]} */ (tasks),
+    settings: /** @type {import('./types.ts').VaultCatalogSettingRow[]} */ (settings),
+    revision: counter.revision,
+    // one unverified section leaves the NOTE unverified: the catalog is the unit of change, so a
+    // partly-verified catalog is not a thing SB-057's arbitration should be offered
+    verified: sections.every((section) => section.verified),
+  };
+};
+
+/**
+ * Write a catalog into an existing note, leaving every byte outside the four regions untouched —
+ * an H1, prose above the first section, notes between sections, anything below the last one.
+ * The same guarantee `TT.writeVaultBlock` gives a daily note.
+ *
+ * THE GATE IS THE PARSER, NOT JUST THE LOCATOR, and it runs on both sides:
+ *   • the INPUT is parsed whole, so it is impossible to reach a write from a note TT cannot read.
+ *     A quarantined catalog is left exactly as it is for a human to resolve (SB-057's surface),
+ *     which is also why "fix the dangling client by writing over it" is deliberately not a path.
+ *   • the OUTPUT is parsed back before it is returned — the lesson PLAN-009's end-gate review
+ *     paid for. Anything that would not survive the round-trip is refused as `write-would-corrupt`
+ *     with the input handed back untouched, rather than reported as a successful write that froze
+ *     the note against TT until a human repaired it by hand.
+ *
+ * The revision is NOT bumped here: `opts.revision` sets it, and absent, the note's own counter is
+ * re-emitted unchanged. When a write bumps it is SB-057's arbitration.
+ * @param {string} md @param {{ clients?: Client[], projects?: Project[], tasks?: Task[], settings?: import('./types.ts').VaultCatalogSettingRow[], revision?: number }} catalog
+ * @param {{ revision?: number }} [opts]
+ * @returns {import('./types.ts').VaultCatalogWriteResult}
+ */
+TT.writeVaultCatalog = function (md, catalog, opts) {
+  const input = String(md == null ? '' : md);
+  const source = catalog || {};
+  const parsed = TT.parseVaultCatalog(input);
+  if (parsed.quarantine) return { md: input, quarantine: true, reason: parsed.reason, section: parsed.section };
+  const revision = (opts && opts.revision != null ? opts.revision : source.revision) ?? parsed.revision;
+
+  // Re-locating is not redundant: the parse returns values, not line offsets. Collected for ALL
+  // four sections BEFORE anything is spliced, because a locate that failed halfway through would
+  // otherwise leave the note with two sections rewritten and two not — the partial write this
+  // whole layer exists to make impossible.
+  const lines = input.split('\n');
+  /** @type {{ start: number, end: number, region: string }[]} */
+  const splices = [];
+  for (const section of CATALOG_ORDER) {
+    const loc = TT.locateVaultBlock(input, { heading: CATALOG_SECTIONS[section].heading });
+    if (loc.quarantine) return { md: input, quarantine: true, reason: loc.reason, section };
+    splices.push({
+      start: loc.start,
+      end: loc.end,
+      region: TT.serializeVaultCatalogSection(section, source[section] || [], { revision }),
+    });
+  }
+  // BOTTOM-UP, by the position the section actually occupies in THIS note — so a note whose
+  // author put Settings first keeps that order, and every splice's offsets stay valid because
+  // nothing below it has moved yet. The regions cannot overlap: each one ends at its own revision
+  // line, which the locator already proved sits before the next heading of any level.
+  let out = lines;
+  for (const splice of splices.slice().sort((a, b) => b.start - a.start))
+    out = out.slice(0, splice.start).concat(splice.region.split('\n'), out.slice(splice.end + 1));
+  const written = out.join('\n');
+
+  if (TT.parseVaultCatalog(written).quarantine)
+    return { md: input, quarantine: true, reason: 'write-would-corrupt', section: null };
+  return { md: written, quarantine: false, reason: null, section: null };
+};
+
 /**
  * The section's canonical header labels for a given set of rows — every column whose `when` says
  * it applies. ONE definition, so the emitter and anything reasoning about the header set cannot

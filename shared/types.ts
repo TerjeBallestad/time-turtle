@@ -481,7 +481,20 @@ export type VaultCatalogQuarantineReason =
    * constraint behind this file, so the parse is the only place it can be caught. Resolution
    * takes the first match, which would make the second row invisible rather than wrong.
    */
-  | 'catalog-duplicate-id';
+  | 'catalog-duplicate-id'
+  /**
+   * A project names a client the Clients table does not contain. The failure SB-048 taught, in
+   * the catalog's own shape: the bytes round-trip perfectly and `rateOf` silently returns 0 for
+   * every project on that client. Refused rather than resolved, because under the vault shape
+   * there is no database to reconcile the dangling id against.
+   */
+  | 'catalog-dangling-client'
+  /**
+   * The sections disagree about the revision counter. TT writes this note whole, so all four
+   * sections always carry the same N — a disagreement means a merge or a partial hand edit, and
+   * it is refused rather than reconciled to the maximum. See SB-104.
+   */
+  | 'catalog-revision-mismatch';
 
 /**
  * Every refusal TT's vault codecs can produce — what a boot scan records and surfaces, and the
@@ -603,6 +616,47 @@ export interface VaultCatalogSectionParse {
 }
 
 export type VaultCatalogSectionResult = VaultCatalogSectionParse | VaultCatalogQuarantine;
+
+/**
+ * The whole catalog note, as a model. A STRICT SUBSET of `Catalog` — deliberately not that name,
+ * which already means the whole timesheet (settings + clients + projects + tasks + entries +
+ * commits). Reusing it would be a lie the compiler cannot catch: this one holds no entries and no
+ * commit ledger, and never will (DD-017 says the vault never imports the ledger).
+ */
+export interface VaultCatalog {
+  quarantine: false;
+  clients: Client[];
+  projects: Project[];
+  tasks: Task[];
+  /**
+   * The Settings section's rows IN NOTE ORDER, including keys this TT does not know. The typed
+   * projection is `TT.vaultCatalogSettings(catalog.settings)` — kept as rows because the rows are
+   * what the bytes are, and a second derived copy is what would drift.
+   */
+  settings: VaultCatalogSettingRow[];
+  /**
+   * The one counter all four sections carry. Sections disagreeing on it is a quarantine, never a
+   * maximum: TT writes this note whole, so mixed revisions mean a merge or a partial hand edit.
+   * See SB-104.
+   */
+  revision: number;
+  /** every section's DD-009 digest was present and matched — see `VaultBlockRegion.verified` */
+  verified: boolean;
+}
+
+export type VaultCatalogParseResult = VaultCatalog | VaultCatalogQuarantine;
+
+/**
+ * The result of splicing a catalog into a note. On ANY quarantine verdict `md` is the input
+ * byte-identical and NO section was written — whole-catalog atomicity, because a note that keeps
+ * its projects and loses its clients resolves every rate to 0 with no error anywhere.
+ */
+export interface VaultCatalogWriteResult {
+  md: string;
+  quarantine: boolean;
+  reason: VaultQuarantineReason | null;
+  section: VaultCatalogSectionName | null;
+}
 
 // ---- parsed time cell (discriminated union) ----
 export type ParsedTime =
@@ -989,6 +1043,29 @@ export interface TTModule {
    * decided, and where the instance-local exclusion is enforced rather than merely documented.
    */
   vaultCatalogSettingRows(settings: Partial<Settings>, carried?: VaultCatalogSettingRow[]): VaultCatalogSettingRow[];
+  /**
+   * SB-058: the bytes of a whole catalog note that does not exist yet — SB-057's first-boot case.
+   * Producing the bytes is here, writing them is there. All four sections carry the SAME
+   * revision: the catalog is the unit of change, the section is not (SB-104).
+   */
+  serializeVaultCatalog(catalog: Partial<VaultCatalog>, opts?: { revision?: number }): string;
+  /**
+   * SB-058: parse a whole catalog note, or refuse — as ONE unit. Any section quarantining
+   * quarantines the note, because `TT.rateOf` resolves project → client → rate and a catalog that
+   * kept its projects and dropped its clients would resolve every rate to 0 with no error
+   * anywhere. Sections disagreeing on the revision quarantine rather than reconciling to the max,
+   * and a `Project.clientId` naming a client the Clients table does not hold quarantines too —
+   * the one failure byte-equality is structurally blind to.
+   */
+  parseVaultCatalog(md: string): VaultCatalogParseResult;
+  /**
+   * SB-058: splice a catalog into an existing note. Every byte outside the four regions survives,
+   * and each section is put back where THIS note had it. Gated by the parser on both sides — a
+   * note TT cannot read is never written to, and a result TT could not read back is refused as
+   * `write-would-corrupt` with the input handed back untouched. The revision is not bumped here.
+   * No DD-012 adoption: a missing section is reported, never claimed.
+   */
+  writeVaultCatalog(md: string, catalog: Partial<VaultCatalog>, opts?: { revision?: number }): VaultCatalogWriteResult;
   serializeMd(state: Catalog): string;
   newId(): string;
   parseMd(md: string): Catalog;
