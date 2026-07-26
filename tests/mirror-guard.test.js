@@ -335,4 +335,106 @@ describe('mirror never-clobber guard', () => {
     expect(readFileSync(path, 'utf8')).toBe(FOREIGN);
     expect(existsSync(join(mdDir, 'timesheet-admin.md.tmp'))).toBe(false);
   }, 30000);
+
+  // SB-086: `POST /api/projects/:code/rename` writes SEVERAL users' mirrors in one request.
+  // It used to swallow every failure into a console.error and answer a bare `{ ok: true }`,
+  // so under the SB-065 guard a single rename could put TWO users' mirrors into the sticky
+  // blocked state while the caller saw nothing but success. Both halves are asserted here:
+  // the response names both blocks, and — the claim that actually matters — neither of the
+  // two tampered files was clobbered.
+  //
+  // ## Verified red-green: 2026-07-26
+  //   Against the pre-SB-086 endpoint (`res.json({ ok: true })` with a bare console.error in
+  //   the catch), this fails on the report while the file assertions still pass — which is
+  //   precisely the bug: the mirrors were already protected, the CALLER was not told.
+  //     AssertionError: Target cannot be null or undefined.
+  //     ❯ expect(rename.json.mirrorBlocks).toHaveLength(2)   // the field did not exist
+  it('a project rename reports EVERY user’s mirror it could not write, and clobbers none', async () => {
+    const mdDir = mkdtempSync(join(tmpdir(), 'tt-sb86-md-'));
+    const dataDir = mkdtempSync(join(tmpdir(), 'tt-sb86-data-'));
+    const { port } = await startServer({ TT_DATA_DIR: dataDir, TT_MD_DIR: mdDir });
+    const admin = await adminOn(port);
+
+    // a second user, so the rename really does span two mirrors
+    expect(
+      (
+        await admin('POST', '/api/users', {
+          email: 'sb86@timeturtle.local',
+          name: 'Sb Eightsix',
+          role: 'employee',
+          password: 'sb86pw',
+        })
+      ).status,
+    ).toBe(200);
+    const emp = session(port);
+    expect((await emp('POST', '/api/auth/login', { email: 'sb86@timeturtle.local', password: 'sb86pw' })).status).toBe(
+      200,
+    );
+
+    const OLD = 'SB86-OLD';
+    const NEW = 'SB86-NEW';
+    const st = await admin('GET', '/api/state');
+    expect(
+      (
+        await admin('PUT', '/api/state', {
+          projects: [...st.json.projects, { code: OLD, name: 'Old', clientId: null, rate: null, billable: true }],
+        })
+      ).status,
+    ).toBe(200);
+
+    // BOTH users log on it, so both are "affected" and both mirrors get written (and stamped)
+    const line = (id, date) => ({
+      id,
+      date,
+      start: 540,
+      end: 600,
+      durMin: null,
+      project: OLD,
+      label: 'w',
+      note: id,
+      billable: true,
+    });
+    expect((await admin('PUT', '/api/state', { entries: [line('sb86-a', '2026-12-01')] })).json.mirrorError).toBe(null);
+    expect((await emp('PUT', '/api/state', { entries: [line('sb86-b', '2026-12-02')] })).json.mirrorError).toBe(null);
+
+    const adminMirror = join(mdDir, 'timesheet-admin.md');
+    const empMirror = join(mdDir, 'timesheet-sb-eightsix.md');
+    expect(existsSync(adminMirror)).toBe(true);
+    expect(existsSync(empMirror)).toBe(true);
+
+    // out-of-band tampering on BOTH — a second machine, or a human in Obsidian
+    const foreignA = FOREIGN + 'admin copy\n';
+    const foreignB = FOREIGN + 'employee copy\n';
+    writeFileSync(adminMirror, foreignA, 'utf8');
+    writeFileSync(empMirror, foreignB, 'utf8');
+
+    const rename = await admin('POST', `/api/projects/${OLD}/rename`, { to: NEW });
+
+    // 1. the rename ITSELF succeeded — a refused mirror never fails the request, and the
+    //    cross-user reconcile still happened in full
+    expect(rename.status).toBe(200);
+    expect(rename.json.ok).toBe(true);
+    expect((await admin('GET', '/api/state')).json.projects.some((p) => p.code === NEW)).toBe(true);
+    expect((await emp('GET', '/api/state')).json.entries.find((e) => e.id === 'sb86-b').project).toBe(NEW);
+
+    // 2. …and it SAID SO: both users' blocks are on the response, not only in a log line
+    expect(rename.json.mirrorBlocks).toHaveLength(2);
+    expect(rename.json.mirrorBlocks.map((b) => b.path).sort()).toEqual([adminMirror, empMirror].sort());
+    for (const block of rename.json.mirrorBlocks) {
+      expect(block.reason).toMatch(/chang/i);
+      expect(typeof block.detectedAt).toBe('string');
+    }
+    expect(rename.json.mirrorErrors).toHaveLength(2);
+    for (const message of rename.json.mirrorErrors) expect(message).toMatch(/mirror refused/i);
+    // blind reconcile: the report names paths, never entry content
+    expect(JSON.stringify(rename.json)).not.toContain('sb86-b');
+
+    // 3. THE assertion the ticket exists for: neither file was clobbered — the bytes on disk
+    expect(readFileSync(adminMirror, 'utf8')).toBe(foreignA);
+    expect(readFileSync(empMirror, 'utf8')).toBe(foreignB);
+
+    // 4. and the blocks are sticky per user, reported to each of them by /api/state
+    expect((await admin('GET', '/api/state')).json.mirrorBlocked.path).toBe(adminMirror);
+    expect((await emp('GET', '/api/state')).json.mirrorBlocked.path).toBe(empMirror);
+  }, 30000);
 });

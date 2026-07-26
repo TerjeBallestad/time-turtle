@@ -1560,7 +1560,10 @@ describe('DC-005 server-reconciled project-code rename (SDD-002)', () => {
   it('admin rename X→Y reconciles the project row AND B’s entry AND B’s template, returning a bare ok', async () => {
     const r = await admin('POST', `/api/projects/${X}/rename`, { to: Y });
     expect(r.status).toBe(200);
-    expect(r.json).toEqual({ ok: true }); // blind reconcile — no cross-user entry content leaked
+    // Still a blind reconcile — no cross-user entry content leaked. SB-086 widened the bare
+    // `{ ok }` to carry the mirror report; on a healthy run both lists are empty, and the
+    // exact-shape assertion is what keeps entry content from ever creeping in beside them.
+    expect(r.json).toEqual({ ok: true, mirrorBlocks: [], mirrorErrors: [] });
 
     // the project row is renamed
     const st = await admin('GET', '/api/state');

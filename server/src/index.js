@@ -828,8 +828,20 @@ app.post('/api/users/:id/segments/:key/release', requireUser, requireAdmin, segm
 // SDD-002 DC-005 (PLAN-006): the server-reconciled project-code rename. A dedicated
 // admin-only endpoint rewrites every user's entries + templates old→new in ONE transaction
 // (db.renameProjectCode), so a code rename no longer orphans another user's logged history.
-// A BLIND reconcile: it returns a bare { ok } — never another user's entry content — so
-// SB-009's per-user privacy line stays intact. Replaces the old client-only renameProject.
+// A BLIND reconcile: it never returns another user's entry CONTENT — so SB-009's per-user
+// privacy line stays intact. Replaces the old client-only renameProject.
+//
+// SB-086: it used to return a bare { ok } and swallow every mirror failure into a
+// console.error. Before SB-065 that was merely untidy; now each failure records a STICKY
+// mirrorBlocked for that user, so the rename answered a clean success while one or more
+// users' mirrors had silently entered the blocked state — and a blocked mirror still LOOKS
+// current on disk, which is the exact failure the guard exists to make visible. The other
+// three writeMirror call sites all surface mirrorBlocked on their response; this one was the
+// odd path out. It reports now, in a LIST rather than the singular the others carry, because
+// this is the one route that writes SEVERAL users' mirrors in a single request. (The client
+// rename below writes exactly one — a pure catalog change — so it keeps the singular shape.)
+// A path is not entry content: the acting caller is an admin, who can already list users and
+// knows the mirror folder, and the name in the filename is one they can read from /api/users.
 app.post('/api/projects/:code/rename', requireUser, requireAdmin, (req, res) => {
   const from = String(req.params.code);
   const to = req.body && typeof req.body.to === 'string' ? req.body.to.trim() : '';
@@ -848,16 +860,36 @@ app.post('/api/projects/:code/rename', requireUser, requireAdmin, (req, res) => 
   // Rewrite each affected user's mirror (their entries/templates moved) plus the acting
   // admin's, so the markdown reflects the new code. Other stale mirrors refresh on their
   // next write, matching the codebase's existing eventual-consistency stance.
+  //
+  // SB-086: every failure is COLLECTED, not swallowed. One rename can block several users at
+  // once, so the loop keeps going — a refusal on user A's mirror must not cost user B theirs —
+  // and the report comes back as two parallel lists. `mirrorErrors` carries every failure
+  // including ones that are not guard refusals (permissions, a full disk); `mirrorBlocks`
+  // carries only the sticky blocks, which are the ones somebody has to acknowledge. Like the
+  // other three call sites, a mirror refusal never fails the request: the rename transaction
+  // has already committed, and turning a refused mirror into a 500 would leave the caller
+  // believing a rename that DID happen did not.
+  /** @type {import('../../shared/types.ts').MirrorBlock[]} */
+  const mirrorBlocks = [];
+  /** @type {string[]} */
+  const mirrorErrors = [];
   for (const id of new Set([...affected, req.user.id])) {
     const user = db.findUserById(id);
     if (!user) continue;
     try {
       writeMirror(user);
     } catch (err) {
-      console.error('[time-turtle] markdown mirror failed:', /** @type {Error} */ (err).message);
+      const message = /** @type {Error} */ (err).message;
+      mirrorErrors.push(message);
+      console.error('[time-turtle] markdown mirror failed:', message);
+      // Read the STANDING block rather than err.block: it is the same state /api/state
+      // reports and the same state POST /api/mirror/acknowledge clears, so the caller is
+      // never told about a block that a later acknowledgement has already cleared.
+      const block = mirrorBlockFor(user);
+      if (block) mirrorBlocks.push(block);
     }
   }
-  res.json({ ok: true });
+  res.json({ ok: true, mirrorBlocks, mirrorErrors });
 });
 
 /**

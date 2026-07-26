@@ -431,6 +431,23 @@ export interface PutStateResponse {
 }
 
 /**
+ * SB-086 — `POST /api/projects/:code/rename`. The one route that writes SEVERAL users'
+ * mirrors in a single request (every user whose entries or templates moved, plus the acting
+ * admin), so a single rename can leave more than one user's mirror in the sticky blocked
+ * state. Hence a LIST where the one-mirror routes carry a single `mirrorBlocked`.
+ *
+ * Still a BLIND reconcile — no entry content crosses. A mirror path is not entry content:
+ * the caller is an admin, who can already list users and knows the mirror folder.
+ */
+export interface ProjectRenameResponse {
+  ok: boolean;
+  /** the sticky blocks this rename hit, one per user whose mirror TT refused to write */
+  mirrorBlocks: MirrorBlock[];
+  /** every mirror failure, blocks included — a failure that is NOT a block appears only here */
+  mirrorErrors: string[];
+}
+
+/**
  * SB-087 — `POST /api/clients/:id/rename`. A client rename is a pure CATALOG change:
  * `Project.clientId` is the only persisted reference to a client id, so no user's entries
  * or templates move and only the ACTING admin's mirror is rewritten. One mirror written

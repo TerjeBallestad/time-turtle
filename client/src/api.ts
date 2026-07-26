@@ -9,6 +9,7 @@ import type {
   OkResponse,
   ClientRenameResponse,
   MirrorAcknowledgeResponse,
+  ProjectRenameResponse,
   TeamReportResponse,
   User,
   Settings,
@@ -108,11 +109,15 @@ export const api = {
   /**
    * DC-005 (PLAN-006) — rename a project's code across the WHOLE team in one server
    * transaction (every user's entries + templates reconciled old→new). Admin-only; a blind
-   * reconcile that returns a bare ok. The caller reloads afterwards — its projects/entries/
-   * tasks are otherwise stale.
+   * reconcile — no entry content crosses. The caller reloads afterwards — its projects/
+   * entries/tasks are otherwise stale.
+   *
+   * SB-086: the response reports every mirror this rename could not write. It writes
+   * SEVERAL users' mirrors in one request, so the report is a LIST — the routes that write
+   * one mirror carry a single `mirrorBlocked` instead.
    */
   renameProject: (code: string, to: string) =>
-    request<OkResponse>('POST', '/api/projects/' + encodeURIComponent(code) + '/rename', { to }),
+    request<ProjectRenameResponse>('POST', '/api/projects/' + encodeURIComponent(code) + '/rename', { to }),
   /**
    * SB-087 (SB-067 fix 3) — rename a client's ID, re-pointing every project that references
    * it in the SAME transaction. Admin-only. It needs the server because the two halves are
