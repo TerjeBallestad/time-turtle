@@ -66,13 +66,27 @@ export function session(port) {
   };
 }
 
-/** Spawn a server on a free port and wait for it to answer. @returns {Promise<{port: number, child: any}>} */
+/**
+ * Spawn a server on a free port and wait for it to answer.
+ *
+ * `output()` IS THE BOOT BANNER (PLAN-013 / SB-115). `runServerUntilExit` below has always
+ * captured stdout, but only for a process that EXITS — which left the boot lines of a server that
+ * STARTS unobservable, and the stranding lines DD-018 puts in the banner are exactly that. The
+ * accumulating buffer also means stdout is now drained rather than left to fill its pipe.
+ *
+ * POLL IT, never read it once: `startServer` resolves as soon as `/api/me` answers, and that can
+ * beat lines printed from the `app.listen` callback. Lines printed at module top level — which is
+ * where the shape banner lives — are already there, but a caller cannot tell which is which.
+ * @returns {Promise<{port: number, child: any, output: () => string}>}
+ */
 export async function startServer(env) {
   const port = await freePort();
   const child = spawn('node', [SERVER], {
     env: { ...process.env, PORT: String(port), TT_SEED_DEMO: '1', TT_ADMIN_PASSWORD: 'testpw', ...env },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
+  let out = '';
+  child.stdout.on('data', (d) => (out += d));
   child.stderr.on('data', (d) => process.stderr.write(`[server:${port}] ${d}`));
   let exited = null;
   child.on('exit', (code) => {
@@ -83,7 +97,7 @@ export async function startServer(env) {
     if (exited !== null) throw new Error(`server on ${port} exited with code ${exited} before becoming ready`);
     try {
       const res = await fetch(`http://localhost:${port}/api/me`);
-      if (res.status) return { port, child };
+      if (res.status) return { port, child, output: () => out };
     } catch {
       /* not up yet */
     }
