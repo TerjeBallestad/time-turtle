@@ -728,6 +728,22 @@ const VAULT_HEADING = 'Time Log';
 // that would let a near-miss read as verified. Near-misses (`· `, non-hex, no separator) fail
 // the whole match, which is the safe direction — the line stops being an anchor at all.
 const REVISION_RE = /^`revision: (\d+)(?: · ([0-9a-f]{4}))?`$/;
+// …and the price of that strictness, paid in the diagnosis rather than in leniency (SB-090).
+// A near-miss fails the WHOLE match, so before this the locator reported `no-revision` — "the
+// bottom anchor is missing" — about a line the human is looking straight at. Same complaint
+// SB-084 fixed for CRLF, different cause: there a stray `\r` explained the whole file, here a bad
+// digest explains one line. The refusal does not move (SB-083: TT refuses, it does not repair a
+// token it cannot read); only the reason does, so this can never write a byte.
+//
+// WHAT COUNTS AS ANCHOR-SHAPED, and why it is drawn exactly here. The span must OPEN with the
+// canonical `` `revision: <digits> `` and CLOSE at end of line — that is the whole test. Every
+// line inside it is one TT itself could have written and then had damaged: an empty digest, a
+// digest of the wrong length, non-hex, uppercase, the separator missing or misspelt. It is not
+// widened to the SB-045 near-misses (`revision: 8` unbackticked, ``revision: 8``, indented, wrong
+// case, trailing prose, `revision: eight`), because those are lines TT cannot distinguish from
+// prose a human typed, and claiming "your revision line is malformed" about someone's sentence is
+// the same class of lie in the other direction. Those keep `no-revision`.
+const MALFORMED_REVISION_RE = /^`revision: \d+[^`]*`$/;
 /**
  * The digest over a block's table payload. FNV-1a/32 XOR-folded to 16 bits, 4 lowercase hex.
  *
@@ -949,12 +965,26 @@ TT.locateVaultBlock = function (md, opts) {
     if (m) revLines.push({ line: i, revision: +m[1], digest: m[2] || null });
   }
   if (!revLines.length) {
-    // name the dangerous case precisely: the anchor exists, but only in someone else's section
+    // CRLF FIRST, structurally rather than by repetition (SB-084's signal, SB-090's ordering): a
+    // stray `\r` explains the whole file and every anchor in it, a bad digest explains one line,
+    // so the file-wide diagnosis outranks the line-local one. Hoisted out of the two exits below,
+    // which both spelled `crlf ? 'crlf-line-endings' : …` — identical behaviour, and now the
+    // malformed probe added underneath cannot quietly overtake it on a note whose `\r` happens to
+    // sit on some OTHER line than the anchor.
+    if (crlf) return vaultQuarantine('crlf-line-endings');
+    // name the dangerous case precisely: the anchor exists, but only in someone else's section.
+    // This stays AHEAD of the malformed probe: it reports a hazard (a write that could run into
+    // Terje's own section), the malformed probe reports a typo, and the hazard is the one a human
+    // needs to hear first.
     for (let i = stop; i < lines.length; i++) {
-      if (!fenced[i] && REVISION_RE.test(lines[i]))
-        return vaultQuarantine(crlf ? 'crlf-line-endings' : 'revision-past-next-heading');
+      if (!fenced[i] && REVISION_RE.test(lines[i])) return vaultQuarantine('revision-past-next-heading');
     }
-    return vaultQuarantine(crlf ? 'crlf-line-endings' : 'no-revision');
+    // the anchor is right there and TT cannot read it — SB-090. Only inside the region: a
+    // malformed line past the hard stop is not this block's anchor and never was.
+    for (let i = start + 1; i < stop; i++) {
+      if (!fenced[i] && MALFORMED_REVISION_RE.test(lines[i])) return vaultQuarantine('malformed-revision');
+    }
+    return vaultQuarantine('no-revision');
   }
   if (revLines.length > 1) return vaultQuarantine('multiple-revisions'); // found MORE — not CRLF's doing
   const { line: revisionLine, revision, digest } = revLines[0];
