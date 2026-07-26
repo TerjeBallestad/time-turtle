@@ -7,6 +7,7 @@ import type {
   UsersResponse,
   UserResponse,
   OkResponse,
+  ClientRenameResponse,
   MirrorAcknowledgeResponse,
   TeamReportResponse,
   User,
@@ -112,4 +113,13 @@ export const api = {
    */
   renameProject: (code: string, to: string) =>
     request<OkResponse>('POST', '/api/projects/' + encodeURIComponent(code) + '/rename', { to }),
+  /**
+   * SB-087 (SB-067 fix 3) — rename a client's ID, re-pointing every project that references
+   * it in the SAME transaction. Admin-only. It needs the server because the two halves are
+   * refused separately: a collection-replace PUT that drops the old id while projects still
+   * point at it is a referenced delete (409). The caller reloads afterwards — its clients
+   * AND its projects' clientId are both stale.
+   */
+  renameClient: (id: string, to: string) =>
+    request<ClientRenameResponse>('POST', '/api/clients/' + encodeURIComponent(id) + '/rename', { to }),
 };

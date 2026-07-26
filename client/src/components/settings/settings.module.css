@@ -53,8 +53,9 @@
 }
 
 /* section column tracks */
+/* SB-087: the id leads the row, the way the project code does — same 110px track. */
 .colsClients {
-  grid-template-columns: 1fr 130px 110px 26px;
+  grid-template-columns: 110px 1fr 130px 110px 26px;
 }
 .colsProjects {
   grid-template-columns: 110px 1fr 150px 100px 84px 26px;

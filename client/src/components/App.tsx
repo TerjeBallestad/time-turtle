@@ -5,7 +5,7 @@ import { Toast, ToastStack } from '../ds';
 import styles from './App.module.css';
 import { api } from '../api';
 import { isAdmin } from '../roles';
-import { nextClientId, derivedClientId } from '../clientIds';
+import { nextClientId, derivedClientId, makeClientId } from '../clientIds';
 import { TodayView } from './views/TodayView';
 import { WeekView } from './views/WeekView';
 import { ReportsView } from './views/ReportsView';
@@ -229,6 +229,31 @@ export function App() {
           clients: current.clients.map((client) => (client.id === id ? { ...client, id: next } : client)),
         };
       }),
+    // SB-087 (SB-067 fix 3): once a client is REFERENCED, its id can no longer be swapped
+    // by an ordinary catalog PUT — dropping the old id while projects still point at it is
+    // a referenced delete and comes back 409. So a rename is a DELIBERATE, server-reconciled
+    // commit (blur/Enter on the id field, mirroring renameProject below): the endpoint swaps
+    // the client row AND re-points every project's client_id in one transaction. Reload
+    // afterwards, because local state went stale in TWO places at once — the client row and
+    // every project's clientId.
+    //
+    // `makeClientId` normalizes here as well as in the input, so the id the rename asks for
+    // is always the same shape the name-blur derive produces; the server re-validates the
+    // charset anyway, and an out-of-charset id is rejected before anything writes.
+    renameClient: (id, next) => {
+      const to = makeClientId(next);
+      if (!to || to === id) return;
+      void api
+        .renameClient(id, to)
+        .then(() => {
+          toast(id + ' → ' + to);
+          load();
+        })
+        .catch((err: Error) => {
+          toast(err.message);
+          load(); // re-sync the id input back to the server truth on a rejected rename
+        });
+    },
     // SDD-002 ruling 7: archive, never delete. Archiving a client hides it from the
     // creation pickers but leaves its projects' clientId INTACT (the old removeClient
     // nulled them — dropped) and keeps history resolving. Restore just un-archives.

@@ -860,6 +860,85 @@ app.post('/api/projects/:code/rename', requireUser, requireAdmin, (req, res) => 
   res.json({ ok: true });
 });
 
+/**
+ * SB-087 (SB-067 fix 3): the client-id charset, at the API boundary.
+ *
+ * DERIVED FROM THE MINTER, not invented here: this is exactly what `makeClientId`
+ * (client/src/clientIds.ts) produces — lowercase ASCII, digits, single dashes between
+ * segments, no leading/trailing dash, capped at 24. The UI normalizes through that same
+ * function before it calls, so nothing the app can produce is rejected; this is the
+ * reject-before-anything-writes backstop for everything else (SB-070 / SB-074 precedent).
+ *
+ * It matters because a client id is a `|`-delimited CELL in the mirror's `## clients`
+ * section AND the join key in every `## projects` row — the id is the readable identifier
+ * Terje reads in the markdown, so a `|`, a newline or a stray space in it is a corrupt
+ * catalog rather than an ugly one.
+ *
+ * Only the TARGET is validated. Ids already stored (`client7`, a hand-seeded one) are
+ * grandfathered — a rename is how you get OUT of a legacy id, so validating the source
+ * would lock the door from the inside.
+ */
+const CLIENT_ID_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
+const CLIENT_ID_MAX = 24;
+
+// SB-087 (SB-067 fix 3): the server-reconciled CLIENT-ID rename.
+//
+// WHY AN ENDPOINT AND NOT A FATTER PUT. `guardReferencedDeletes` reads the STORED rows
+// before the write, so a single collection-replace that swaps the id AND re-points the
+// projects still 409s `cannot delete client <id>: it has projects` — the old id is absent
+// from the incoming clients while the stored projects still reference it. The drop and the
+// re-point can only meet inside one transaction, which is what `db.renameClientId` is.
+// (Pinned by the SB-067 test in tests/api.test.js, which asserts that exact 409.)
+//
+// MUCH SMALLER THAN THE PROJECT RENAME. `Project.clientId` is the only persisted reference
+// to a client id anywhere, so this is one `UPDATE projects SET client_id` and NO user's
+// entries or templates move. Which is also why only the ACTING admin's mirror is rewritten
+// here, unlike the project rename above: a client rename is a pure CATALOG change, and the
+// codebase already refreshes catalog changes into the actor's mirror only (`PUT /api/state`),
+// every other user's on their next write. Nothing per-user moved, so nobody else's mirror is
+// newly wrong in a way it was not already. That single mirror is why this response carries
+// the singular `mirrorBlocked` the other one-mirror routes carry, rather than SB-086's list.
+app.post('/api/clients/:id/rename', requireUser, requireAdmin, (req, res) => {
+  const from = String(req.params.id);
+  const to = req.body && typeof req.body.to === 'string' ? req.body.to.trim() : '';
+  if (!to) return res.status(400).json({ error: 'a non-empty target id is required' });
+  if (to.length > CLIENT_ID_MAX || !CLIENT_ID_RE.test(to))
+    return res.status(400).json({
+      error:
+        'invalid client id ' +
+        JSON.stringify(to) +
+        ': a client id may contain only lowercase letters, digits and single dashes, and is at most ' +
+        CLIENT_ID_MAX +
+        ' characters',
+    });
+  const clients = db.getClients();
+  if (!clients.some((client) => client.id === from)) return res.status(404).json({ error: 'no such client' });
+  // A READABLE uniqueness error. Without this the PK backstop surfaces as
+  // `400 save failed: … UNIQUE constraint failed: clients.id` — accurate and useless.
+  if (from !== to && clients.some((client) => client.id === to))
+    return res.status(409).json({ error: 'client id ' + to + ' is already in use' });
+  /** @type {number} */
+  let projects;
+  try {
+    projects = db.renameClientId(from, to);
+  } catch (err) {
+    return res.status(400).json({ error: 'rename failed: ' + /** @type {Error} */ (err).message });
+  }
+  /** @type {string | null} */
+  let mirror = null;
+  /** @type {string | null} */
+  let mirrorError = null;
+  try {
+    mirror = writeMirror(req.user);
+  } catch (err) {
+    mirrorError = /** @type {Error} */ (err).message;
+    console.error('[time-turtle] markdown mirror failed:', mirrorError);
+  }
+  // The re-pointed count is catalog data the caller can already GET; it is the one number
+  // that says whether this was a bare id swap or a reconcile, so it is worth returning.
+  res.json({ ok: true, projects, mirror, mirrorError, mirrorBlocked: mirrorBlockFor(req.user) });
+});
+
 // ---- user management (admin) ----
 app.get('/api/users', requireUser, requireAdmin, (req, res) => res.json({ users: db.listUsers() }));
 app.post('/api/users', requireUser, requireAdmin, (req, res) => {

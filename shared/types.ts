@@ -430,6 +430,23 @@ export interface PutStateResponse {
   mirrorBlocked?: MirrorBlock | null;
 }
 
+/**
+ * SB-087 — `POST /api/clients/:id/rename`. A client rename is a pure CATALOG change:
+ * `Project.clientId` is the only persisted reference to a client id, so no user's entries
+ * or templates move and only the ACTING admin's mirror is rewritten. One mirror written
+ * means the singular `mirrorBlocked` every other one-mirror route carries — the plural
+ * shape belongs to the project rename, which really does write several (see PLAN-006 /
+ * SB-086's `ProjectRenameResponse`).
+ */
+export interface ClientRenameResponse {
+  ok: boolean;
+  /** how many project rows were re-pointed at the new id */
+  projects: number;
+  mirror: string | null;
+  mirrorError: string | null;
+  mirrorBlocked?: MirrorBlock | null;
+}
+
 /** 409 body when a PUT loses the race; `version` is the server's current one. */
 export interface ConflictResponse {
   error: string;

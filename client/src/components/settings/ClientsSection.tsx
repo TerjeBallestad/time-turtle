@@ -1,6 +1,7 @@
 import React from 'react';
 import TT from '../../i18n';
 import { SectionLabel, Button, Select, Input } from '../../ds';
+import { makeClientId } from '../../clientIds';
 import st from './settings.module.css';
 import type { AppState } from '../../../../shared/types';
 import type { UiActions } from '../../types';
@@ -8,6 +9,53 @@ import type { UiActions } from '../../types';
 interface SettingsProps {
   state: AppState;
   ui: UiActions;
+}
+
+// SB-087 (SB-067 fix 3): the client ID, finally reachable. It used to be write-once and
+// invisible — this section rendered name, rounding and rate and nothing else — so a client
+// that picked up a wrong id (or a `client7` that was already referenced when its name was
+// first committed, which `derivedClientId` deliberately declines to touch) was stuck with it.
+//
+// Edited through a DELIBERATE commit, exactly like ProjectCodeInput: local state holds the
+// in-progress edit and commits on blur or Enter, Escape resets, and a useEffect resyncs to
+// the server truth after the reload a successful rename triggers. Per keystroke would fire
+// the server rename — a transaction that re-points every project — for every character typed,
+// and would remount the row (key={client.id}) under the user's cursor.
+//
+// REUSE, DO NOT RE-DERIVE: what is typed is normalized through `makeClientId`, the very
+// function the name-blur derive uses (SB-067 fix 2), so the two paths can never disagree
+// about what a readable id looks like. It also guarantees no `|` — which matters because
+// this string is a cell in the mirror's `## clients` table AND the join key in every
+// `## projects` row.
+function ClientIdInput({ id, onCommit }: { id: string; onCommit: (next: string) => void }) {
+  const [value, setValue] = React.useState(id);
+  // resync when the server truth changes (e.g. after a successful rename reload)
+  React.useEffect(() => setValue(id), [id]);
+  const commit = () => {
+    const next = makeClientId(value);
+    // Snap back to the CURRENT server id in EVERY case, then ask for the rename. On success
+    // the reload changes `id` and the effect above paints the new one; on a REJECTED rename
+    // (a taken id) `id` never changes, so the effect never fires — without this reset the
+    // field would go on showing the id the server just refused, a control lying about what
+    // it holds while the store says otherwise. Found at the browser rung, not reasoned about.
+    setValue(id);
+    if (next && next !== id) onCommit(next);
+  };
+  return (
+    <Input
+      value={value}
+      onChange={(e) => setValue(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') e.currentTarget.blur();
+        else if (e.key === 'Escape') {
+          setValue(id);
+          e.currentTarget.blur();
+        }
+      }}
+      className={[st.small, st.codeInput].join(' ')}
+    />
+  );
 }
 
 export function ClientsSection({ state, ui }: SettingsProps) {
@@ -26,7 +74,7 @@ export function ClientsSection({ state, ui }: SettingsProps) {
         {TT.t('Clients')}
       </SectionLabel>
       <div className={[st.row, st.rowHead, st.colsClients].join(' ')}>
-        {['name', 'rounding', 'default rate'].map((header) => (
+        {['id', 'name', 'rounding', 'default rate'].map((header) => (
           <span key={header} className={st.th}>
             {TT.t(header)}
           </span>
@@ -35,6 +83,7 @@ export function ClientsSection({ state, ui }: SettingsProps) {
       </div>
       {activeClients.map((client) => (
         <div key={client.id} className={[st.row, st.colsClients].join(' ')}>
+          <ClientIdInput id={client.id} onCommit={(next) => ui.renameClient(client.id, next)} />
           <Input
             value={client.name}
             onChange={(e) => ui.updateClient(client.id, { name: e.target.value })}

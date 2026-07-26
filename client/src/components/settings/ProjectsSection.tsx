@@ -30,8 +30,13 @@ function ProjectCodeInput({
   React.useEffect(() => setValue(code), [code]);
   const commit = () => {
     const next = value.trim().toUpperCase();
+    // Snap back to the CURRENT server code in every case, then ask for the rename. The
+    // useEffect above only fires when `code` actually CHANGES, so on a rejected rename (a
+    // taken code) it never fires and the field would keep showing the refused code —
+    // `renameProject`'s reload cannot fix that on its own. Found by SB-087's browser pass
+    // against the identical seam in ClientIdInput; fixed here too rather than left to rot.
+    setValue(code);
     if (next && next !== code) onCommit(next);
-    else setValue(code);
   };
   return (
     <Input

@@ -18,6 +18,8 @@ export interface UiActions {
   updateClient: (id: string, patch: Partial<Client>) => void;
   /** SB-067: the name is committed (blur) — derive the id from it while the client is still unnamed & unreferenced. */
   commitClientName: (id: string) => void;
+  /** SB-087 (SB-067 fix 3): a deliberate client-ID rename through the server — re-points every project. */
+  renameClient: (id: string, next: string) => void;
   // SDD-002 ruling 7: clients & projects are ARCHIVED, never deleted — archive hides them
   // from creation pickers but keeps history resolving; restore un-hides them.
   archiveClient: (id: string) => void;

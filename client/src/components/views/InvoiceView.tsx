@@ -16,6 +16,17 @@ export function InvoiceView({ state, ui }: ViewProps) {
   const months = [...new Set(state.entries.map((entry) => entry.date.slice(0, 7)))].sort().reverse();
   const [clientId, setClientId] = React.useState(state.clients[0] ? state.clients[0].id : '');
   const [month, setMonth] = React.useState(months[0] || TT.todayStr().slice(0, 7));
+  // SB-087: the selected id is LOCAL state seeded once from the first client, so anything
+  // that changes a client id out from under it leaves a dangling selection — and a dangling
+  // selection fails silently rather than loudly: `client` is undefined, the <Select> matches
+  // no option (browsers then paint the first one, so the control LIES about what is picked),
+  // and the table renders an empty invoice for a real, billable month. A client-id rename is
+  // now reachable (fix 3 above), and it reloads the whole state under every mounted view.
+  // Fall back to the first client whenever the selection stops resolving.
+  React.useEffect(() => {
+    if (state.clients.some((candidate) => candidate.id === clientId)) return;
+    setClientId(state.clients[0] ? state.clients[0].id : '');
+  }, [state.clients, clientId]);
   const client = state.clients.find((candidate) => candidate.id === clientId);
   const entries = state.entries
     .filter((entry) => {

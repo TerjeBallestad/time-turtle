@@ -2188,3 +2188,190 @@ describe('optimistic concurrency (DC-001)', () => {
     expect((await second('GET', '/api/state')).json.clients.some((c) => c.id === 'b')).toBe(true);
   });
 });
+
+// SB-087 (SB-067 fix 3): the server-reconciled CLIENT-ID rename.
+//
+// The endpoint exists because no single PUT can do this: `guardReferencedDeletes` reads the
+// STORED rows before the write, so a collection-replace that swaps the id AND re-points the
+// projects still 409s `cannot delete client <id>: it has projects`. That refusal is asserted
+// here first — it is the premise the whole ticket rests on — and then the endpoint is proven
+// to do both halves in one transaction, over data belonging to TWO different users.
+//
+// Everything is read back with GET (and off the mirror BYTES) rather than trusted from the
+// rename's own response: a 200 proves the request was accepted, never that the store moved.
+//
+// ## Verified red-green: 2026-07-26
+//   break 1 — drop the `UPDATE projects SET client_id` from db.renameClientId:
+//     'admin rename re-points BOTH users' projects…' fails (`projects` 2 → 0) and the mirror
+//     test fails on the bytes — the project rows still carry the old join key.
+//   break 2 — delete the in-use 409 branch: 'rejects a colliding target…' fails with
+//     `400 {"error":"rename failed: UNIQUE constraint failed: clients.id"}`, i.e. exactly the
+//     unreadable PK backstop this ticket was filed to replace.
+//   break 3 — widen CLIENT_ID_RE to /^[\s\S]+$/: 'rejects an out-of-charset target' fails
+//     (400 → 200), `sb87|pipe` lands in the store, and the three tests after it fail 404
+//     because the client is now sitting on a hostile id.
+describe('SB-087 server-reconciled client-id rename (SB-067 fix 3)', () => {
+  const admin = session();
+  const emp = session(); // user B — the rename has to hold across more than one user's data
+  const OLD = 'sb87-old';
+  const NEW = 'sb87-new';
+  const TAKEN = 'sb87-taken';
+  const P_ADMIN = 'SB87-A'; // a project the ADMIN logs on
+  const P_EMP = 'SB87-B'; // a project user B logs on
+  const client = (id, name) => ({ id, name, rounding: 15, rate: 1250, archived: false });
+  const project = (code, clientId) => ({ code, name: 'SB87 ' + code, clientId, rate: null, billable: true });
+  const line = (id, date, code) => ({
+    id,
+    date,
+    start: 540,
+    end: 600,
+    durMin: null,
+    project: code,
+    label: 'w',
+    note: '',
+    billable: true,
+  });
+  let baseClients;
+  let baseProjects;
+
+  beforeAll(async () => {
+    await admin('POST', '/api/auth/login', { email: 'admin@timeturtle.local', password: 'testpw' });
+    await admin('POST', '/api/users', {
+      email: 'sb87@timeturtle.local',
+      name: 'Sb Eightseven',
+      role: 'employee',
+      password: 'sb87pw',
+    });
+    await emp('POST', '/api/auth/login', { email: 'sb87@timeturtle.local', password: 'sb87pw' });
+
+    const st = await admin('GET', '/api/state');
+    baseClients = st.json.clients;
+    baseProjects = st.json.projects;
+    expect(
+      (
+        await admin('PUT', '/api/state', {
+          clients: [...baseClients, client(OLD, 'SB87 Client'), client(TAKEN, 'Already Taken')],
+          projects: [...baseProjects, project(P_ADMIN, OLD), project(P_EMP, OLD)],
+        })
+      ).status,
+    ).toBe(200);
+    // both users log real work on the client's projects, so "across more than one user" is
+    // data on disk rather than a claim about the schema
+    await admin('PUT', '/api/state', { entries: [line('sb87-a', '2026-11-02', P_ADMIN)] });
+    await emp('PUT', '/api/state', { entries: [line('sb87-b', '2026-11-03', P_EMP)] });
+  }, 30000);
+
+  it('an employee cannot rename a client id (403) and the old id is untouched', async () => {
+    const r = await emp('POST', `/api/clients/${OLD}/rename`, { to: NEW });
+    expect(r.status).toBe(403);
+    expect((await admin('GET', '/api/state')).json.clients.some((c) => c.id === OLD)).toBe(true);
+  });
+
+  // The premise. Without this refusal the ticket would be a client-side one-liner.
+  it('the ordinary PUT still cannot do it — swapping a referenced id is a 409 referenced delete', async () => {
+    const st = await admin('GET', '/api/state');
+    const swapped = st.json.clients.map((c) => (c.id === OLD ? { ...c, id: NEW } : c));
+    const repointed = st.json.projects.map((p) => (p.clientId === OLD ? { ...p, clientId: NEW } : p));
+    // even sending BOTH halves in one body — the guard reads the stored rows, not the body's
+    const put = await admin('PUT', '/api/state', { clients: swapped, projects: repointed });
+    expect(put.status).toBe(409);
+    expect(put.json.error).toMatch(new RegExp('cannot delete client ' + OLD));
+    expect((await admin('GET', '/api/state')).json.clients.some((c) => c.id === OLD)).toBe(true);
+  });
+
+  it('rejects an empty target (400) and an unknown client (404)', async () => {
+    expect((await admin('POST', `/api/clients/${OLD}/rename`, { to: '' })).status).toBe(400);
+    expect((await admin('POST', `/api/clients/${OLD}/rename`, {})).status).toBe(400);
+    expect((await admin('POST', '/api/clients/nope-nope/rename', { to: NEW })).status).toBe(404);
+    expect((await admin('GET', '/api/state')).json.clients.some((c) => c.id === OLD)).toBe(true);
+  });
+
+  it('rejects an out-of-charset target before anything writes', async () => {
+    // the `|` is the one that matters: a client id is a cell in the mirror's `## clients`
+    // table AND the join key in every `## projects` row
+    const hostile = [
+      'sb87|pipe',
+      'sb87 space',
+      'SB87-Upper',
+      '-leading',
+      'trailing-',
+      'sb87--double',
+      'æøå',
+      'x'.repeat(25),
+    ];
+    for (const to of hostile) {
+      const r = await admin('POST', `/api/clients/${OLD}/rename`, { to });
+      expect(r.status).toBe(400);
+      expect(r.json.error).toMatch(/invalid client id/);
+    }
+    const after = await admin('GET', '/api/state');
+    expect(after.json.clients.some((c) => c.id === OLD)).toBe(true);
+    expect(after.json.clients.some((c) => hostile.includes(c.id))).toBe(false);
+  });
+
+  // The uniqueness error this ticket asks for BY NAME: readable, 409, and not a leaked
+  // SQLite string. The PK backstop is still there underneath — it just never gets reached.
+  it('rejects a colliding target with a readable 409, not a UNIQUE-constraint string', async () => {
+    const r = await admin('POST', `/api/clients/${OLD}/rename`, { to: TAKEN });
+    expect(r.status).toBe(409);
+    expect(r.json.error).toBe('client id ' + TAKEN + ' is already in use');
+    expect(r.json.error).not.toMatch(/UNIQUE/i);
+    expect(r.json.error).not.toMatch(/constraint/i);
+    const after = await admin('GET', '/api/state');
+    expect(after.json.clients.some((c) => c.id === OLD)).toBe(true);
+    expect(after.json.clients.find((c) => c.id === TAKEN).name).toBe('Already Taken');
+  });
+
+  it('admin rename re-points BOTH users’ projects in one request and the old id is gone', async () => {
+    const before = await admin('GET', '/api/state');
+    const r = await admin('POST', `/api/clients/${OLD}/rename`, { to: NEW });
+    expect(r.status).toBe(200);
+    expect(r.json.ok).toBe(true);
+    expect(r.json.projects).toBe(2); // both projects re-pointed, in the same transaction
+
+    const st = await admin('GET', '/api/state');
+    // the client row moved id and kept everything else
+    expect(st.json.clients.some((c) => c.id === OLD)).toBe(false);
+    expect(st.json.clients.find((c) => c.id === NEW)).toMatchObject({ name: 'SB87 Client', rounding: 15, rate: 1250 });
+    // …and NOTHING still references the old id anywhere
+    expect(st.json.projects.some((p) => p.clientId === OLD)).toBe(false);
+    expect(st.json.projects.find((p) => p.code === P_ADMIN).clientId).toBe(NEW);
+    expect(st.json.projects.find((p) => p.code === P_EMP).clientId).toBe(NEW);
+    // the catalog moved, so every open tab has to reload — the version says so
+    expect(st.json.version.catalog).toBeGreaterThan(before.json.version.catalog);
+
+    // user B sees the same reconciled catalog from its OWN session, and its entry still
+    // resolves through its project to the renamed client
+    const bState = (await emp('GET', '/api/state')).json;
+    expect(bState.clients.some((c) => c.id === NEW)).toBe(true);
+    expect(bState.projects.find((p) => p.code === P_EMP).clientId).toBe(NEW);
+    expect(bState.entries.find((e) => e.id === 'sb87-b').project).toBe(P_EMP);
+  });
+
+  // The id is a READABLE identifier in the markdown Terje reads (his 2026-07-26 ruling), so
+  // the mirror bytes are where the rename is finally true — in both places the id appears.
+  it('the renamed id lands in the mirror, in the clients table AND as the projects’ join key', async () => {
+    const r = await admin('POST', `/api/clients/${NEW}/rename`, { to: NEW }); // idempotent re-write
+    expect(r.status).toBe(200);
+    expect(r.json.mirrorError).toBe(null);
+    expect(r.json.mirrorBlocked).toBe(null);
+    expect(r.json.mirror).toBe(join(DATA_DIR, 'markdown', 'timesheet-admin.md'));
+
+    const text = readFileSync(join(DATA_DIR, 'markdown', 'timesheet-admin.md'), 'utf8');
+    expect(text).toContain('- ' + NEW + ' | SB87 Client | round 15 | rate 1250');
+    expect(text).toContain('- ' + P_ADMIN + ' | SB87 ' + P_ADMIN + ' | ' + NEW);
+    expect(text).toContain('- ' + P_EMP + ' | SB87 ' + P_EMP + ' | ' + NEW);
+    expect(text).not.toContain(OLD);
+  });
+
+  it('teardown: the projects and the renamed client can be removed in reference order', async () => {
+    // entries first — a project code with logged entries is itself un-deletable (ruling 7)
+    expect((await admin('PUT', '/api/state', { entries: [] })).status).toBe(200);
+    expect((await emp('PUT', '/api/state', { entries: [] })).status).toBe(200);
+    expect((await admin('PUT', '/api/state', { projects: baseProjects })).status).toBe(200);
+    expect((await admin('PUT', '/api/state', { clients: baseClients })).status).toBe(200);
+    const end = (await admin('GET', '/api/state')).json;
+    expect(end.clients.some((c) => c.id === NEW || c.id === OLD || c.id === TAKEN)).toBe(false);
+    expect(end.projects.some((p) => p.code === P_ADMIN || p.code === P_EMP)).toBe(false);
+  });
+});

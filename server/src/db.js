@@ -298,6 +298,29 @@ export function renameProjectCode(oldCode, newCode) {
   });
 }
 
+// SB-087 (SB-067 fix 3): the server-reconciled CLIENT-ID rename — the small twin of
+// renameProjectCode above. `projects.client_id` is the ONLY persisted reference to a client
+// id anywhere in the model: entries and templates carry project CODES, and a commit snapshot
+// is keyed by entry id and stores only {rate, billMin, amount}. So re-pointing that one
+// column IS the whole reconcile — no user's entries move, and no per-user entries version
+// needs bumping (only the catalog changed).
+//
+// It has to be ONE transaction because the two halves are refused separately: dropping the
+// old client id while projects still point at it is exactly the referenced delete that
+// `guardReferencedDeletes` (server/src/index.js) rejects with a 409. The guard reads the
+// STORED rows before the write, so no single collection-replace PUT can ever satisfy it.
+//
+// Returns how many project rows were re-pointed.
+/** @param {string} oldId @param {string} newId @returns {number} */
+export function renameClientId(oldId, newId) {
+  return transaction(() => {
+    db.prepare('UPDATE clients SET id = ? WHERE id = ?').run(String(newId), String(oldId));
+    const moved = db.prepare('UPDATE projects SET client_id = ? WHERE client_id = ?').run(String(newId), String(oldId));
+    bumpVersion('catalog');
+    return Number(moved.changes);
+  });
+}
+
 /** SDD-002: replace one user's templates only — never the whole table.
  * @param {number} userId @param {Task[]} tasks */
 export function putTasks(userId, tasks) {
