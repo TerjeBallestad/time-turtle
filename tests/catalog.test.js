@@ -720,3 +720,189 @@ describe('catalog note — the whole note (SB-058 task 3)', () => {
     });
   });
 });
+
+// ## Verified red-green: 2026-07-26
+// Task 4 (TASK-045): the goldens byte-equality cannot see — money resolves the same through a
+// parsed catalog.
+//
+// SB-048 taught this the expensive way and PLAN-009 carried the warning forward:
+// `serializeMd(parseMd(md)) === md` passed byte-exact while `commitSnapshot(entry)` returned null,
+// because ids never appear in the bytes. A BYTE-EQUALITY GOLDEN CANNOT SEE A SEVERED SEMANTIC
+// LINK. The catalog's version of that failure is a note whose every `Project.clientId` names a
+// client the Clients table does not contain: the bytes round-trip perfectly, and `TT.rateOf`
+// quietly returns 0 for every project. On this file that is invoiced money, not a test failure.
+//
+// So these assert on RESOLVED REFERENCES, not on bytes.
+describe('catalog note — money resolves the same through a parsed catalog (SB-058 task 4)', () => {
+  // A realistic graph, built so every inheritance case that makes a REFERENCE worth having is in
+  // it: an inherited rate and an overridden one, `round 15` and `round exact`, a non-billable
+  // project, a client with no rate at all, and an archived project that must keep resolving.
+  const CLIENTS = [
+    { id: 'fjellheim', name: 'Fjellheim AS', rate: 1250, rounding: 15, archived: false },
+    { id: 'brygga', name: 'Brygga Digital', rate: 990, rounding: 'exact', archived: false },
+    { id: 'nord', name: 'Nord Bygg', rate: null, rounding: 30, archived: true },
+  ];
+  const PROJECTS = [
+    { code: 'FJH-NETT', name: 'Nettbutikk rebuild', clientId: 'fjellheim', rate: null, billable: true, archived: false, vaultNote: 'Nettbutikk rebuild' }, // prettier-ignore
+    { code: 'FJH-DRIFT', name: 'Drift & support', clientId: 'fjellheim', rate: 1400, billable: true, archived: false },
+    { code: 'BRY-APP', name: 'Bryggeappen', clientId: 'brygga', rate: null, billable: true, archived: false },
+    { code: 'INT-ADM', name: 'Internal admin', clientId: null, rate: null, billable: false, archived: false },
+    { code: 'ARK-01', name: 'Arkiv 2025', clientId: 'nord', rate: 750, billable: true, archived: true },
+  ];
+  const CATALOG = {
+    clients: CLIENTS,
+    projects: PROJECTS,
+    tasks: [{ id: 'checkout', label: 'Checkout flow', project: 'FJH-NETT' }],
+    settings: [{ key: 'currency', value: 'kr' }],
+    revision: 5,
+  };
+  const ENTRIES = [
+    { id: 'e1', date: '2026-03-02', start: 540, end: 577, durMin: null, project: 'FJH-NETT', label: 'Checkout', note: '', billable: true }, // prettier-ignore
+    { id: 'e2', date: '2026-03-02', start: 600, end: 637, durMin: null, project: 'BRY-APP', label: 'Bugfix', note: '', billable: true }, // prettier-ignore
+    { id: 'e3', date: '2026-03-02', start: 700, end: 760, durMin: null, project: 'FJH-DRIFT', label: 'Support', note: '', billable: true }, // prettier-ignore
+    { id: 'e4', date: '2026-03-02', start: 800, end: 860, durMin: null, project: 'INT-ADM', label: 'Admin', note: '', billable: false }, // prettier-ignore
+    { id: 'e5', date: '2026-03-02', start: 900, end: 941, durMin: null, project: 'ARK-01', label: 'Archive', note: '', billable: true }, // prettier-ignore
+  ];
+  /** The resolvers read a Catalog; this is the smallest honest one a parsed note can furnish. */
+  const state = (catalog) => ({ settings: {}, clients: catalog.clients, projects: catalog.projects, tasks: catalog.tasks, entries: ENTRIES, commits: [] }); // prettier-ignore
+  /** Every money answer the catalog is responsible for, as one comparable object. */
+  const resolved = (catalog) => {
+    const s = state(catalog);
+    return {
+      rates: PROJECTS.map((project) => TT.rateOf(s, project.code)),
+      clients: PROJECTS.map((project) => (TT.clientOf(s, TT.projectOf(s, project.code)) || {}).id ?? null),
+      billable: PROJECTS.map((project) => TT.projectBillable(s, project.code)),
+      rounded: PROJECTS.map((project) => TT.roundBill(37, (TT.clientOf(s, TT.projectOf(s, project.code)) || { rounding: 0 }).rounding)), // prettier-ignore
+      billMinutes: ENTRIES.map((entry) => TT.billMinutes(s, entry)),
+      amounts: ENTRIES.map((entry) => TT.amount(s, entry)),
+    };
+  };
+
+  const NOTE = TT.serializeVaultCatalog(CATALOG);
+  const PARSED = TT.parseVaultCatalog(NOTE);
+
+  it('the note parses at all — everything below is meaningless otherwise', () => {
+    expect(PARSED.quarantine).toBe(false);
+    expect(PARSED.verified).toBe(true);
+  });
+
+  it('every resolver returns identical values in memory and through the note', () => {
+    expect(resolved(PARSED)).toEqual(resolved(CATALOG));
+  });
+
+  it('…and those values are the right ones, pinned rather than merely equal to each other', () => {
+    // Equality alone would pass if the resolvers were broken in the same way on both sides. These
+    // are the numbers an invoice is made of, so they are written down.
+    const money = resolved(CATALOG);
+    // inherited 1250, overridden 1400, inherited 990, no client at all, archived client with no
+    // rate but a project override
+    expect(money.rates).toEqual([1250, 1400, 990, 0, 750]);
+    expect(money.clients).toEqual(['fjellheim', 'fjellheim', 'brygga', null, 'nord']);
+    expect(money.billable).toEqual([true, true, true, false, true]);
+    // `round 15` takes 37 minutes to 45, `exact` leaves it, no client leaves it, `round 30` → 60
+    expect(money.rounded).toEqual([45, 45, 37, 37, 60]);
+    // e1 37min @ round 15 → 45min @ 1250 = 937.5 · e2 37min exact @ 990 = 610.5
+    // e3 60min @ round 15 @ 1400 = 1400 · e4 not billable = 0 · e5 41min @ round 30 → 60 @ 750
+    expect(money.billMinutes).toEqual([45, 37, 60, 0, 60]);
+    expect(money.amounts).toEqual([937.5, 610.5, 1400, 0, 750]);
+  });
+
+  it('an ARCHIVED client and project keep resolving for history (SDD-002 ruling 7)', () => {
+    const s = state(PARSED);
+    expect(TT.projectOf(s, 'ARK-01').archived).toBe(true);
+    expect(TT.clientOf(s, TT.projectOf(s, 'ARK-01')).archived).toBe(true);
+    expect(TT.rateOf(s, 'ARK-01')).toBe(750);
+    expect(TT.amount(s, ENTRIES[4])).toBe(750);
+  });
+
+  // ---- the failure byte-equality is structurally blind to ----
+  describe('a severed reference', () => {
+    // Every clientId renamed. Nothing else changes: the ids are still well-formed, every cell
+    // still parses, every section still verifies, and the file still LOOKS right.
+    const SEVERED = { ...CATALOG, projects: PROJECTS.map((project) => ({ ...project, clientId: project.clientId ? project.clientId + '-2025' : null })) }; // prettier-ignore
+    const SEVERED_NOTE = TT.serializeVaultCatalog(SEVERED);
+
+    it('round-trips BYTE-EXACT through the section codec, and every section verifies', () => {
+      // This is the assertion that would have passed while the money was gone. It is written out
+      // deliberately, so the next reader can see exactly what a byte golden proves here: nothing.
+      for (const section of ['clients', 'projects', 'tasks', 'settings']) {
+        const parsed = TT.parseVaultCatalogSection(SEVERED_NOTE, section);
+        expect(parsed.quarantine).toBe(false);
+        expect(parsed.verified).toBe(true);
+        expect(region(section, parsed.rows, parsed.revision)).toBe(region(section, SEVERED[section], 5));
+      }
+    });
+
+    it('and this is what it would have cost — every rate resolves to 0', () => {
+      // The severed model, resolved. Not hypothetical: this is the object the section codec alone
+      // would hand back, and `rateOf` returns 0 for every project whose client vanished.
+      const severed = {
+        clients: TT.parseVaultCatalogSection(SEVERED_NOTE, 'clients').rows,
+        projects: TT.parseVaultCatalogSection(SEVERED_NOTE, 'projects').rows,
+        tasks: [],
+      };
+      const s = state(severed);
+      expect(TT.rateOf(s, 'FJH-NETT')).toBe(0); // was 1250 — the inherited rate is simply gone
+      expect(TT.rateOf(s, 'BRY-APP')).toBe(0); // was 990
+      expect(TT.clientOf(s, TT.projectOf(s, 'FJH-NETT'))).toBe(null);
+      expect(TT.amount(s, ENTRIES[0])).toBe(0); // an invoice line for free work
+      // FJH-DRIFT keeps its OWN rate, which is what makes this so quiet: some projects still
+      // look right, so a spot check passes and only the client-inheriting ones bill zero
+      expect(TT.rateOf(s, 'FJH-DRIFT')).toBe(1400);
+    });
+
+    it('so the whole-note parse REFUSES it — a decision, not a fall-through', () => {
+      const parsed = TT.parseVaultCatalog(SEVERED_NOTE);
+      expect(parsed.quarantine).toBe(true);
+      expect(parsed.reason).toBe('catalog-dangling-client');
+      expect(parsed.section).toBe('projects');
+      // and no catalog escapes for anything to resolve against
+      expect('projects' in parsed).toBe(false);
+      // nor can a write proceed over it
+      expect(TT.writeVaultCatalog(SEVERED_NOTE, CATALOG).md).toBe(SEVERED_NOTE);
+    });
+
+    it('a project with NO client is not a dangling one — absent and severed are different facts', () => {
+      // INT-ADM has `clientId: null` and always did. Refusing it would make "no client" impossible
+      // to express, and it resolves to 0 legitimately rather than silently.
+      expect(TT.parseVaultCatalog(NOTE).quarantine).toBe(false);
+      expect(TT.rateOf(state(PARSED), 'INT-ADM')).toBe(0);
+      expect(TT.projectOf(state(PARSED), 'INT-ADM').clientId).toBe(null);
+    });
+  });
+
+  // ---- the never-zero rule, end to end ----
+  describe('a damaged rate cannot produce a catalog at all, let alone one that reads 0', () => {
+    for (const bad of ['1,250', '1250 kr', '-50', 'tbd', '12.50.00', '1 250'])
+      it(`a Rate cell reading ${bad} quarantines the whole note`, () => {
+        const damaged = NOTE.replace(
+          region('clients', CLIENTS, 5),
+          sign(edit(region('clients', CLIENTS, 5), '| 1250 |', `| ${bad} |`)),
+        );
+        const parsed = TT.parseVaultCatalog(damaged);
+        expect(parsed.quarantine).toBe(true);
+        expect(parsed.reason).toBe('catalog-bad-number');
+        // asserted on the ABSENCE of a degraded result, not only on the presence of a verdict:
+        // there must be no object here at all for a resolver to read a 0 out of
+        expect('clients' in parsed).toBe(false);
+        expect('projects' in parsed).toBe(false);
+        // and the note is not written over, so the damaged cell stays visible to a human
+        expect(TT.writeVaultCatalog(damaged, CATALOG).md).toBe(damaged);
+      });
+
+    it('there is no route from a damaged rate to a resolved rate of 0', () => {
+      // The whole class, stated once: for every damaged rate cell, either the parse refuses, or
+      // every rate it produces is one a human wrote. Nothing in between.
+      for (const bad of ['1,250', '1250 kr', '-50', 'tbd', 'NaN', 'Infinity', '1e3', '0x10']) {
+        const damaged = NOTE.replace(
+          region('clients', CLIENTS, 5),
+          sign(edit(region('clients', CLIENTS, 5), '| 1250 |', `| ${bad} |`)),
+        );
+        const parsed = TT.parseVaultCatalog(damaged);
+        if (parsed.quarantine) continue;
+        for (const client of parsed.clients) expect(client.rate === null || client.rate > 0).toBe(true);
+        expect(parsed.clients.find((client) => client.id === 'fjellheim').rate).not.toBe(0);
+      }
+    });
+  });
+});
