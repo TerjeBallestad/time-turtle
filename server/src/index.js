@@ -3,7 +3,7 @@ import express from 'express';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
-import { PORT, MD_DIR_LOCKED } from './config.js';
+import { PORT, HOST, MD_DIR_LOCKED, isLoopbackHost } from './config.js';
 import { shapeTarget, activeShape, shapeLocked } from './backend.js';
 import { verifyPassword, makeToken, readSessionCookie, sessionCookie, clearCookie } from './auth.js';
 // SB-056: the split is at the import site on purpose. `db` is IDENTITY ONLY here — users,
@@ -88,6 +88,69 @@ function singleUserShape() {
   return activeShape() === 'personal';
 }
 
+/**
+ * SB-098 item 4: DD-015's OPEN STATE — the one install configuration where the shape question
+ * has two real answers and nobody has given one, so the app asks (`AppState.shapeOpen`).
+ *
+ * All three conditions, and each rules out a different install that must NOT be asked:
+ *   `source === 'default'` — nothing stored, no TT_SHAPE, no TT_SHAPE_LOCK. An install that
+ *      answered by env or by lock has answered; re-asking would let a modal overwrite what
+ *      its operator typed on the command line. This one condition also subsumes the lock,
+ *      which is why there is no separate `shapeLocked()` term.
+ *   exactly one user — more than one has ANSWERED BY EXISTING (DD-015), and the boot rule
+ *      above stamps those `team` silently. The count is re-checked HERE, per request, because
+ *      the boot rule runs once: an open-state install that adds a second user mid-session
+ *      leaves the open state the moment it does, without waiting for a restart.
+ *   the caller is an admin — "ask at first admin login". Under the open state the single user
+ *      IS the admin, so this never fires today; it is here so that the modal can never appear
+ *      to an employee if some later path opens the state on a multi-user box.
+ *
+ * Resolved SERVER-SIDE, like every other shape decision. The client renders the question; it
+ * does not get to decide whether it is being asked.
+ * @param {User} user @returns {boolean}
+ */
+function shapeQuestionOpen(user) {
+  return shapeTarget().source === 'default' && db.listUsers().length === 1 && user.role === 'admin';
+}
+
+// ---- SB-098 / DD-015: the loopback bind, and it is NOT best-effort ----
+//
+// The personal shape serves a person's timesheet with NO AUTHENTICATION (item 1 below, in
+// requireUser). Two things make that acceptable and both are load-bearing; this is the second.
+// Bound to 0.0.0.0, "no login" means no login for anyone on the same wifi — every colleague on
+// the office network reads and WRITES the vault owner's hours by typing an IP.
+//
+// So a non-loopback TT_HOST under `personal` REFUSES TO START rather than being ignored or
+// quietly overridden. The alternatives were considered and are both worse. Ignoring it leaves
+// an operator believing the box is reachable when it is not — annoying but safe — while
+// HONOURING it is the catastrophe, and "clamp it to loopback and log a line" is the same
+// silent-divergence failure this whole map exists to kill, on the one setting where being
+// wrong is unrecoverable: bytes served to the wrong network cannot be recalled.
+//
+// IT IS THE FIRST THING THAT RUNS, ahead even of `seedIfEmpty` — further ahead than the
+// ordering rule below strictly demands, because it can be: it needs the shape and the env and
+// nothing else. A boot refused here has not created an admin user, not seeded demo data, not
+// stamped a shape or a cutover and not swept a mirror. The one refusal whose subject is "the
+// wrong people can read this" should leave the least behind.
+//
+// It is a shape decision resolved SERVER-SIDE (shapeTarget: env, lock, stored row) — nothing a
+// client sends reaches it, and there is no request in flight when it runs.
+if (singleUserShape() && HOST && !isLoopbackHost(HOST)) {
+  console.error(
+    `[time-turtle] refusing to start: the personal shape has no login (DD-015), so it may only bind loopback — but TT_HOST=${JSON.stringify(HOST)} is not a loopback address.`,
+  );
+  console.error('[time-turtle] serving an unauthenticated timesheet on a reachable interface hands it to the network.');
+  console.error(`[time-turtle] recover with:  unset TT_HOST   (or run the team shape:  ${SHAPE_RECOVERY})`);
+  process.exit(1);
+}
+/**
+ * The address `app.listen` binds. Under `personal` it is loopback, always — the refusal above
+ * has already rejected every TT_HOST that is not, so an explicit loopback TT_HOST is honoured
+ * (`::1`, say) and an absent one means `127.0.0.1`. Under `team` an absent TT_HOST keeps the
+ * historical every-interface bind exactly as it was.
+ */
+const BIND_HOST = singleUserShape() ? HOST || '127.0.0.1' : HOST || undefined;
+
 db.seedIfEmpty();
 
 // SB-056 / DD-006 consequence 1, direction 3: the boot refusal. See the single-user guard's
@@ -163,13 +226,52 @@ const app = express();
 app.use(express.json({ limit: '4mb' }));
 
 // ---- auth middleware ----
-/** @param {Request} req @param {Response} res @param {NextFunction} next */
+/**
+ * SB-098 / DD-015 depth 2, item 1: the implicit local session.
+ *
+ * Under `personal` there is exactly ONE human and the machine is theirs, so the cookie
+ * challenge asks a question with one possible answer. `requireUser` resolves that answer
+ * itself and the Login screen is never rendered. The user RECORD is untouched — `user_id 1`,
+ * the schema, and every `user_id` join stay exactly as they are (depth 3, dropping `user_id`,
+ * was rejected: it would make the two shapes two programs).
+ *
+ * THIS IS THE ONE PLACE AUTHENTICATION CAN BE SKIPPED, and it stays the one place. Two
+ * properties are what make that safe, and neither is negotiable:
+ *
+ *   1. IT KEYS OFF THE EFFECTIVE SHAPE, resolved server-side by `shapeTarget()` from the env,
+ *      the lock and the stored row. Nothing the client sends reaches this decision. A
+ *      client-supplied shape hint here would not be a design smell, it would be a one-line
+ *      auth bypass: any request could claim `personal` and skip the challenge. There is
+ *      deliberately no header, no query parameter and no body field consulted below.
+ *   2. IT IS LOOPBACK-ONLY. The boot block above refuses to start `personal` on a
+ *      non-loopback bind, so "no login" cannot silently mean "no login for the whole office".
+ *
+ * The COUNT CHECK is belt and braces rather than the guarantee: three separate guards already
+ * make >1 user under `personal` unreachable (the boot refusal, the `POST /api/users` refusal
+ * and the switch refusal), but if one of them were ever weakened, the failure mode without
+ * this line is picking an arbitrary person's timesheet for an anonymous caller. With it, the
+ * shape simply falls back to asking who you are, which is the safe direction.
+ *
+ * A REAL COOKIE STILL WINS where there is one — a session that survives a `team → personal`
+ * switch keeps working rather than being silently re-pointed.
+ * @param {Request} req @param {Response} res @param {NextFunction} next
+ */
 function requireUser(req, res, next) {
   const sess = readSessionCookie(req);
   const user = sess ? db.findUserById(sess.userId) : null;
   // SB-013: reject a token whose version is behind the stored one — the cookie was
   // issued before a password change, so its session is no longer trusted.
   if (!sess || !user || sess.tokenVersion !== db.getTokenVersion(user.id)) {
+    if (!TT.shapeCapabilities(activeShape()).identity) {
+      const only = db.listUsers();
+      // `findUserById`, not the list row, so `req.user` is byte-identical to what the cookie
+      // path produces — one session object, one shape, whichever way it was resolved.
+      const local = only.length === 1 ? db.findUserById(only[0].id) : null;
+      if (local) {
+        req.user = local;
+        return next();
+      }
+    }
     return res.status(401).json({ error: 'not authenticated' });
   }
   req.user = user;
@@ -316,6 +418,9 @@ function stateFor(user) {
     // BACKEND is not on the wire: it is derived from the shape (DD-015), never chosen.
     shape: activeShape(),
     shapeLocked: shapeLocked(),
+    // SB-098: DD-015's open state. See shapeQuestionOpen — the client renders the question,
+    // it does not decide whether it is being asked.
+    shapeOpen: shapeQuestionOpen(user),
     // SB-065: a standing mirror refusal is STATE, not a log line — a mirror that has
     // quietly stopped updating still looks current, which is the failure this guards.
     mirrorBlocked: mirrorBlockFor(user),
@@ -888,6 +993,75 @@ app.put('/api/state', requireUser, (req, res) => {
   });
 });
 
+// ---- SB-098 / SB-139: the deliberate shape-choosing gesture ----
+//
+// Choosing what this install IS is not a settings edit, and this is the channel that says so.
+// SB-098 needed it: the first-run question must store an answer that is EQUAL to the shape
+// already in force (an unstored install resolves to `team`, so "my company's" is the shape the
+// user is already effectively on), and it must do that from a modal that holds no settings
+// object to round-trip. Sending the whole settings object to answer one question is precisely
+// the class of bug SB-133 just closed.
+//
+// WHY A POST AND NOT A 403 ON THE SHARED PUT. `useServerSync` re-queues any non-409 failure and
+// re-arms a 4 s timer forever, so a blanket refusal on `PUT /api/state` wedges the client
+// permanently — SB-139's stated constraint, and the reason the two existing shape guards
+// compare against the stored value instead of rejecting the key. Nothing debounced or retried
+// reaches this route, so it may refuse outright, loudly, the way SB-056 refuses a second user.
+//
+// SB-139 IS NOT CLOSED BY THIS. `PUT /api/state` still accepts `shape`, so a hand-rolled client
+// can still store one without coming through here. Narrowing that is the other half of SB-139
+// and it moves SB-100's guard suites, which this ticket was told to keep green and untouched —
+// see the resolution comment on SB-098. What lands here is the channel, built once.
+app.post('/api/shape', requireUser, requireAdmin, (req, res) => {
+  const { shape } = req.body || {};
+  if (!TT.SHAPES.includes(shape))
+    return res.status(400).json({ error: 'shape must be one of ' + TT.SHAPES.join(', ') });
+  // The same three refusals the shared PUT applies, in the same order — this is a second door
+  // into one decision, never a second decision. DC-002: the lock is env-only and beats a write.
+  if (shapeLocked())
+    return res.status(403).json({ error: 'the instance shape is locked by server configuration (TT_SHAPE_LOCK)' });
+  // DD-006 consequence 1, direction 2. Compared against the EFFECTIVE shape rather than the
+  // stored one, because that is the shape the caller is actually moving away from.
+  if (shape === 'personal' && activeShape() !== 'personal') {
+    const users = db.listUsers().length;
+    if (users > 1) return res.status(403).json({ error: shapeSwitchRefusal(users) });
+  }
+  // NO `bumpCatalogVersion()`, and that is a considered omission rather than a forgotten line.
+  //
+  // `shape` is instance-local: it never travels to the vault or the mirror, it is not one of the
+  // catalog COLLECTIONS DC-001's version guards, and storing it cannot clobber another client's
+  // edit — so there is no lost update for a bump to prevent here.
+  //
+  // Bumping it does real harm, measured: this route's caller reloads afterwards, and a reload
+  // hands `useServerSync` a whole new state object while leaving its cached `versionRef` on the
+  // pre-bump number (it is re-baselined only on the FIRST load and after a 409). Every reference
+  // in the new state differs, so the hook immediately queues a full PUT — carrying the stale
+  // version, straight into a 409. The client recovers by reloading, but the patch it was holding
+  // is dropped by design, so the user's next keystrokes vanish with a "someone else saved first"
+  // toast on a single-user install. The browser suite caught it as an empty markdown mirror.
+  //
+  // That staleness is a pre-existing defect on the `load()`-after-write paths (the Settings shape
+  // toggle, renameProject, renameClient) and it is NOT fixed here: `useServerSync`'s 409 handling
+  // is SB-105, which Terje is ruling separately. This route simply declines to add a new way in.
+  store.transaction(() => {
+    // putSettings stamps the DD-016 cutover for `personal` itself, so nothing that can store
+    // the shape can skip it — including this route.
+    store.putSettings({ shape });
+  });
+  // The vault the engine watches is decided by the shape, so re-point it here for the same
+  // reason the settings PUT does: without this, answering "personal" leaves the sync engine
+  // idle until the next restart.
+  forgetOwnWrites();
+  if (startVaultSync())
+    void scanVault().catch((err) =>
+      console.error('[time-turtle] vault re-scan failed:', /** @type {Error} */ (err).message),
+    );
+  console.log(`[time-turtle] instance shape chosen: ${shape} (stored)`);
+  // The EFFECTIVE shape after the write, not the one that was asked for — they differ if a
+  // lock or an env value is in play, and the caller reloads against what is actually in force.
+  res.json({ ok: true, shape: activeShape(), version: store.getVersions(req.user.id) });
+});
+
 // ---- markdown mirror (SB-065) ----
 // The acknowledgement seam for the never-clobber guard: "yes, I dealt with it — overwrite
 // on the next save". Clearing is all it does; nothing is written here, so acknowledging by
@@ -1353,11 +1527,21 @@ const SHAPE_SOURCE = {
   default: 'default',
 };
 
-app.listen(PORT, () => {
+// SB-098: `{ port, host }` rather than `listen(PORT)`. `host: undefined` is the historical
+// every-interface bind, which is what `team` keeps; under `personal` BIND_HOST is loopback and
+// the boot block above has already refused every TT_HOST that would make it anything else.
+app.listen({ port: PORT, host: BIND_HOST }, () => {
   const shape = shapeTarget();
   const target = mirrorTarget();
   console.log(
     `[time-turtle] api on http://localhost:${PORT}  ·  shape: ${shape.shape}  (${SHAPE_SOURCE[shape.source]})  ·  storage: ${shape.backend}`,
+  );
+  // Which interfaces answer is not a detail when there is no login. Said out loud on the first
+  // line of the log, in the same breath as the shape that decided it (SB-073's lesson).
+  console.log(
+    BIND_HOST
+      ? `[time-turtle] bound to ${BIND_HOST} only — this instance is not reachable from other machines`
+      : '[time-turtle] bound to every interface — reachable from other machines on this network',
   );
   if (shape.shadowed)
     console.log(
