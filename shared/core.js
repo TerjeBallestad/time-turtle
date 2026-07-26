@@ -1091,6 +1091,11 @@ function isHeadingAnchor(line, heading) {
  *
  * Ordered by the stage that produces the refusal: locator, parser, writer.
  *
+ * NOT `VAULT_QUARANTINE_REASONS` further up this file — that one is reason → human sentence,
+ * is deliberately `Record<string, string>` so it can also carry the arbitration verdicts, and
+ * falls back rather than failing on a code it does not know. This is the VOCABULARY: the block
+ * half of it, exactly, and the thing the type is made of.
+ *
  * DOCUMENT THE MEMBERS FREELY. The comments below deliberately contain semicolons and
  * neighbouring reason names in single quotes — the two shapes of prose that used to break the
  * old scrape — precisely so that the coverage guard's indifference to them is standing evidence
