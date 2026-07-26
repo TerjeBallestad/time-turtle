@@ -17,8 +17,11 @@ export function sumMin(entries: Entry[]): number {
 export function committedKeys(state: Catalog): Set<string> {
   return new Set((state.commits ?? []).map((commit) => commit.key));
 }
+// SB-102: a THIN WRAPPER, not a second opinion. "Derive the day's segment key and walk the
+// ledger" is written exactly once, in `TT.committedOn` (shared/core.js), which `TT.frozenSegment`
+// and `TT.readOnlyDay` also gate. This keeps the (state, date) call shape the views already use.
 export function isCommitted(state: Catalog, date: string): boolean {
-  return (state.commits ?? []).some((commit) => commit.key === TT.segmentKey(date));
+  return TT.committedOn(date, state.commits);
 }
 // SDD-002 ruling 5 (SB-025): which segments an admin has APPROVED (locked). The employee's
 // ledger carries approvedAt through the server strip, so these are all the Week chip and

@@ -208,6 +208,13 @@ TT.VAULT_QUARANTINE_FALLBACK = 'Time Turtle refused this note and did not say wh
 TT.vaultQuarantineText = (reason) => (reason && VAULT_QUARANTINE_REASONS[reason]) || TT.VAULT_QUARANTINE_FALLBACK;
 
 /**
+ * What every rule in this family reads. The SAME object `vaultBound` has always taken, plus an
+ * optional `admin` that ONLY `readOnlyDay`'s `team` branch looks at.
+ * @typedef {{ shape?: string | null, vaultCutover?: string | null,
+ *             commits?: import('./types.ts').CommitSegment[] | null, admin?: boolean }} VaultRuleContext
+ */
+
+/**
  * IS THIS ENTRY THE VAULT'S? — DD-016 + DD-017, and SB-100 hands it to SB-057 by name.
  *
  * A non-vault-bound entry is written to SQLite and NEVER to a daily note, and never triggers
@@ -226,6 +233,9 @@ TT.vaultQuarantineText = (reason) => (reason && VAULT_QUARANTINE_REASONS[reason]
  *
  * ONE HOME, deliberately. SB-102 wants the same predicate; whoever lands first writes it and the
  * second consumes it. A second copy is a rule that agrees today and diverges on the first ruling.
+ * PLAN-012 landed first, so SB-102/PLAN-015 did not write a second copy: clauses 2 and 3 moved
+ * DOWN into `TT.preCutover` and `TT.frozenSegment` and this composes them. The signature, the
+ * guards and the return value on every input are unchanged — PLAN-013 is filed against them.
  *
  * SKIPPED, NOT REFUSED, at the call site: `useServerSync` re-queues any non-409 failure and
  * retries every 4 s forever, so turning this into a 403 would be a permanent toast loop for
@@ -238,11 +248,84 @@ TT.vaultBound = function (entry, context) {
   const ctx = context || {};
   if (ctx.shape !== 'personal') return false;
   if (!entry || typeof entry.date !== 'string') return false;
+  return !TT.preCutover(entry.date, ctx) && !TT.frozenSegment(entry.date, ctx);
+};
+
+/**
+ * DOES THE LEDGER HOLD THIS DAY'S SEGMENT? — the ONE ledger scan in the repo (PLAN-015).
+ *
+ * Deliberately shape-blind and role-blind: it answers a question about the ledger and nothing
+ * else. Every rule that cares — `frozenSegment` under `personal`, `readOnlyDay`'s `team` branch
+ * (SDD-002 ruling 6), and `client/src/components/views/viewUtils.ts`'s `isCommitted` — gates THIS
+ * rather than writing the scan again. Three copies of "derive the segment key, walk the ledger"
+ * is three chances for one of them to keep an old answer after a ruling moves.
+ *
+ * Null holes are survivable: the server strips the money snapshot per role and a client's ledger
+ * has been through JSON both ways.
+ * @param {string} date a `YYYY-MM-DD` day
+ * @param {import('./types.ts').CommitSegment[] | null | undefined} commits
+ * @returns {boolean}
+ */
+TT.committedOn = function (date, commits) {
+  if (typeof date !== 'string') return false;
+  const key = TT.segmentKey(date);
+  for (const segment of commits || []) if (segment && segment.key === key) return true;
+  return false;
+};
+
+/**
+ * IS THIS DAY OLDER THAN THE VAULT? — `vaultBound`'s cutover clause (DD-016), on its own.
+ *
+ * Day-grained on purpose: `vaultCutover` is stored as an ISO instant so this can choose, and
+ * `Entry.date` is a day. `''` (never stamped) excludes no history at all. Only `personal` has a
+ * cutover — under `team` there is no vault to predate.
+ * @param {string} date @param {VaultRuleContext} context @returns {boolean}
+ */
+TT.preCutover = function (date, context) {
+  const ctx = context || {};
+  if (ctx.shape !== 'personal') return false;
+  if (typeof date !== 'string') return false;
   const cutoverDay = String(ctx.vaultCutover || '').slice(0, 10);
-  if (cutoverDay && entry.date < cutoverDay) return false;
-  const key = TT.segmentKey(entry.date);
-  for (const segment of ctx.commits || []) if (segment && segment.key === key) return false;
-  return true;
+  return cutoverDay !== '' && date < cutoverDay;
+};
+
+/**
+ * IS THIS DAY INSIDE A FROZEN SEGMENT? — `vaultBound`'s ledger clause (DD-017 §2), on its own.
+ *
+ * A committed segment never splits: `TT.weekSegments` cuts on (ISO week ∩ month) and never on a
+ * date, so committing a week and then switching leaves a frozen money snapshot astride the
+ * cutover, and the ledger wins over the date for ALL SEVEN of its days — including the ones
+ * after the cutover, which the date clause alone would wave through.
+ * @param {string} date @param {VaultRuleContext} context @returns {boolean}
+ */
+TT.frozenSegment = function (date, context) {
+  const ctx = context || {};
+  if (ctx.shape !== 'personal') return false;
+  if (typeof date !== 'string') return false;
+  return TT.committedOn(date, ctx.commits);
+};
+
+/**
+ * CAN THIS DAY BE TYPED INTO? — DD-017 §1, and the rule the grid and the server both read.
+ *
+ * Under `personal`, `readOnlyDay` is the EXACT COMPLEMENT of `vaultBound`: editable ⇔ vault-bound.
+ * Anything you can type into reaches a daily note; anything that does not reach a daily note you
+ * cannot type into. That is not a comment — `tests/core.test.js` executes it over every personal
+ * row of its table, because two predicates that agree today and diverge on the first ruling is
+ * exactly the failure the one-home discipline exists to prevent.
+ *
+ * `ctx.admin` is read by the `team` branch and NOWHERE ELSE, and that is the point of the whole
+ * plan: the committed-segment admin exemption (SDD-002 ruling 6) is a `team` concept, and under
+ * `personal` the one user IS the seeded admin (DD-015 depth 2), so a role-gated lock never fires
+ * for the person it is meant to protect. If SB-098 later removes the role concept from the UI,
+ * this line is the only reader of `admin` in the rule.
+ * @param {string} date @param {VaultRuleContext} context @returns {boolean}
+ */
+TT.readOnlyDay = function (date, context) {
+  const ctx = context || {};
+  if (typeof date !== 'string') return false;
+  if (ctx.shape === 'personal') return TT.preCutover(date, ctx) || TT.frozenSegment(date, ctx);
+  return !ctx.admin && TT.committedOn(date, ctx.commits);
 };
 
 /**

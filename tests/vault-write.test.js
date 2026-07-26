@@ -287,3 +287,165 @@ describe('the vault writer (api)', () => {
 });
 
 // ## Verified red-green: 2026-07-26
+//
+// ## Verified red-green: 2026-07-27
+// PLAN-015 (SB-102 / DD-017 §2): the frozen-segment case below. Output TRANSCRIBED from the run.
+//   `TT.frozenSegment` forced to `return false` in shared/core.js — the ledger clause gone,
+//   the cutover clause untouched. Both new cases fail, and they fail on the POST-cutover day,
+//   which is the half the date clause cannot reach:
+//     × writes no note for ANY day of a frozen segment — including the ones after the cutover
+//       AssertionError: a POST-cutover day of a frozen segment got a note: 2026-07-27:
+//       expected true to be false
+//     × does not ADOPT a frozen segment’s post-cutover note either, when one already exists
+//       AssertionError: expected '# 2026-07-27\n\n## Time Log\n\n| Time…' to be
+//       '# 2026-07-27\n\n## Time Log\n\n| Time…'   (the note was rewritten with TT's own block)
+//   The CONTRAST half — the uncommitted post-cutover day's note — stays green throughout, which
+//   is what makes the absences above mean something rather than "the writer was broken".
+//   Restored: 11 passed.
+
+// ---------------------------------------------------------------------------
+// DD-017 §2 — A COMMITTED SEGMENT NEVER SPLITS: the ledger wins over the date.
+//
+// PLAN-015 pays a coverage debt, not a code debt. `server/src/vault-write.js` has filtered
+// through `TT.vaultBound` since PLAN-012, and `vaultBound`'s third clause — a day inside a
+// committed segment is not the vault's, EVEN WHEN IT IS AFTER THE CUTOVER — had never been
+// executed by a test in either direction (`grep -rn vaultBound tests/` returned one comment).
+// Case (2) above proves only the cutover clause, where the date alone already decides.
+//
+// The discriminating pair, and it is the whole design of this case:
+//   • days of a COMMITTED segment that fall AFTER the cutover  → no daily note. Only the ledger
+//     clause can produce this; a build with the ledger clause removed writes them happily.
+//   • a day that is also after the cutover but in NO committed segment → a note IS written.
+// Without the second half the first proves nothing: a writer that was simply broken, or a vault
+// path that never took, produces exactly the same absence.
+//
+// The segment has to be committed while `team` and met while `personal`, because `personal`
+// refuses a ledger CHANGE (SB-056/DD-008) — so this is a team boot, a stop, and a personal boot
+// on the same data dir, which is also the only install shape that can reach this state for real.
+describe('the vault writer: a committed segment stays whole (DD-017 §2)', () => {
+  let vault = '';
+  let dailyDir = '';
+  let admin = null;
+  let child = null;
+  let segment = null;
+  const notePath = (date) => join(dailyDir, date + '.md');
+  const ENTRIES = [];
+
+  beforeAll(async () => {
+    const data = mkdtempSync(join(tmpdir(), 'tt-vw2-data-'));
+    const md = join(data, 'mirror');
+    vault = mkdtempSync(join(tmpdir(), 'tt-vw2-vault-'));
+    dailyDir = join(vault, 'Calendar', 'Daily');
+    mkdirSync(dailyDir, { recursive: true });
+
+    // The segment containing today. Its days after today are post-cutover once the personal boot
+    // stamps the cutover at "now"; today itself always qualifies, so the post-cutover half of
+    // this segment is never empty whatever weekday the suite runs on.
+    segment = TT.weekSegments(TODAY).find((seg) => seg.dates.includes(TODAY));
+    const control = TT.addDays(TODAY, 7); // a different ISO week, so a genuinely uncommitted segment
+    let n = 0;
+    for (const date of segment.dates) ENTRIES.push(entry('seg' + n++, date, 540, 600, 'in the frozen segment'));
+    ENTRIES.push(entry('control', control, 660, 720, 'after the cutover and in no ledger'));
+
+    // BOOT 1 — `team`, where a commit is legal.
+    const team = await startServer({ TT_DATA_DIR: data, TT_MD_DIR: md, TT_SEED_DEMO: '0' });
+    const teamAdmin = await adminOn(team.port);
+    const before = await teamAdmin('GET', '/api/state');
+    expect(before.json.shape).toBe('team');
+    const seeded = await teamAdmin('PUT', '/api/state', {
+      entries: ENTRIES,
+      commits: [{ key: segment.key }],
+      version: before.json.version,
+    });
+    expect(seeded.status).toBe(200);
+    expect((await teamAdmin('GET', '/api/state')).json.commits.map((c) => c.key)).toEqual([segment.key]);
+    await stopServer(team.child);
+
+    // BOOT 2 — `personal`, which stamps the cutover at first personal boot (DD-016).
+    const personal = await startServer({ TT_DATA_DIR: data, TT_MD_DIR: md, TT_SHAPE: 'personal', TT_SEED_DEMO: '0' });
+    child = personal.child;
+    admin = await adminOn(personal.port);
+    const state = await admin('GET', '/api/state');
+    expect(state.json.shape).toBe('personal'); // without this every assertion below is vacuous
+    // Stamped at THIS boot, so it is today's instant — but deliberately not asserted equal to
+    // `TODAY`: the stamp is an ISO instant in UTC and `TT.todayStr()` is a LOCAL day, so the two
+    // disagree for a couple of hours a night east of Greenwich. Every day-grained comparison
+    // below derives `cutoverDay` from the stamp itself rather than assuming which one it is.
+    // (That skew is a real pre-existing defect in DD-016's stamp and is filed separately; it is
+    // not this case's subject and this case must not depend on which side of it we run.)
+    expect(state.json.settings.vaultCutover).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    expect(state.json.commits.map((c) => c.key)).toEqual([segment.key]); // the pre-switch ledger survived
+    const put = await admin('PUT', '/api/state', {
+      settings: { vaultPaths: { root: vault, daily: 'Calendar/Daily' } },
+      version: state.json.version,
+    });
+    expect(put.status).toBe(200);
+  }, 90000);
+  afterAll(async () => {
+    if (child) await stopServer(child);
+    stopAllServers();
+  });
+
+  it('writes no note for ANY day of a frozen segment — including the ones after the cutover', async () => {
+    // A real save under `personal`: every entry changed, so nothing here can be the identity
+    // diff of case (1) declining to write.
+    const state = await admin('GET', '/api/state');
+    const res = await admin('PUT', '/api/state', {
+      entries: ENTRIES.map((e) => ({ ...e, end: e.end + 15 })),
+      version: state.json.version,
+    });
+    expect(res.status).toBe(200);
+
+    const cutoverDay = state.json.settings.vaultCutover.slice(0, 10);
+    const postCutover = segment.dates.filter((date) => date >= cutoverDay);
+    const preCutover = segment.dates.filter((date) => date < cutoverDay);
+    // THE LOAD-BEARING GUARD. If this set is empty the case is vacuous — every remaining
+    // assertion would be satisfied by the cutover clause alone and a build with no ledger
+    // clause at all would pass.
+    expect(postCutover.length, 'no post-cutover day in the committed segment — the case is vacuous').toBeGreaterThan(0);
+
+    // THE CONTRAST: an uncommitted post-cutover day IS written. Wait on it rather than on a
+    // sleep, and assert it FIRST — it is what makes the absences below mean something.
+    expect(await until(() => existsSync(notePath(TT.addDays(TODAY, 7))))).toBe(true);
+    const written = TT.parseVaultBlock(readFileSync(notePath(TT.addDays(TODAY, 7)), 'utf8'), {
+      heading: HEADING,
+      date: TT.addDays(TODAY, 7),
+    });
+    expect(written.quarantine).toBe(false);
+    expect(written.entries.map((e) => e.label)).toEqual(['after the cutover and in no ledger']);
+
+    await new Promise((r) => setTimeout(r, 150)); // let any stray write land before claiming absence
+    for (const date of postCutover)
+      expect(existsSync(notePath(date)), `a POST-cutover day of a frozen segment got a note: ${date}`).toBe(false);
+    for (const date of preCutover)
+      expect(existsSync(notePath(date)), `a pre-cutover day of a frozen segment got a note: ${date}`).toBe(false);
+
+    // …and all of them are in SQLite. A frozen segment is SKIPPED for the vault, never refused —
+    // the entries are still the user's hours and still have to come back on the wire.
+    const after = await admin('GET', '/api/state');
+    expect(after.json.entries.map((e) => e.id).sort()).toEqual(ENTRIES.map((e) => e.id).sort());
+    const wanted = new Map(ENTRIES.map((e) => [e.id, e.end + 15]));
+    for (const stored of after.json.entries) expect(stored.end, stored.id).toBe(wanted.get(stored.id));
+  }, 30000);
+
+  it('does not ADOPT a frozen segment’s post-cutover note either, when one already exists', async () => {
+    // The other direction of case (2)'s (a)/(b) split, at the ledger clause: a real note on a
+    // post-cutover day inside the frozen segment is adoptable on its face — heading, well-formed
+    // table — and DD-012 adoption must still not fire on its behalf.
+    const cutoverDay = (await admin('GET', '/api/state')).json.settings.vaultCutover.slice(0, 10);
+    const day = segment.dates.filter((date) => date >= cutoverDay)[0];
+    const his = `# ${day}\n\n## ${HEADING}\n\n| Time | Task |\n|---|---|\n| 08:00→09:00 | his own morning |\n\n## Captures\n\nmine\n`;
+    writeFileSync(notePath(day), his);
+    const state = await admin('GET', '/api/state');
+    const res = await admin('PUT', '/api/state', {
+      entries: ENTRIES.map((e) => ({ ...e, end: e.end + 30 })),
+      version: state.json.version,
+    });
+    expect(res.status).toBe(200);
+    await new Promise((r) => setTimeout(r, 200));
+    expect(readFileSync(notePath(day), 'utf8')).toBe(his); // not one byte, and no anchor inserted
+    expect(readFileSync(notePath(day), 'utf8')).not.toContain('revision:');
+    const after = await admin('GET', '/api/state');
+    expect(after.json.entries.some((e) => e.label === 'his own morning')).toBe(false);
+  }, 30000);
+});
