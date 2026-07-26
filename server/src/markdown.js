@@ -28,7 +28,7 @@ export function mirrorTarget() {
   return { dir, source: 'setting', shadowed: MD_DIR_FROM_ENV && dir !== MD_DIR ? MD_DIR : null };
 }
 
-// The mdDir setting (editable in Settings → Markdown backend, e.g. a cloud-synced
+// The mdDir setting (editable in Settings → Markdown mirror, e.g. a cloud-synced
 // Obsidian folder) wins over TT_MD_DIR / the default — unless TT_MD_DIR_LOCK froze it,
 // in which case any stored setting is ignored (DC-002).
 /** @returns {string} */

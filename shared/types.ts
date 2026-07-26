@@ -180,7 +180,7 @@ export type Backend = 'sqlite' | 'vault';
  *   `committing`— freeze a week's money into the commit ledger. Off under `personal`
  *                 (DD-008): the ledger belongs in weekly notes, which are phase 3, and a
  *                 per-machine SQLite ledger there would diverge silently. Phase 3 restores it.
- *   `mdImport`  — paste a v2 mirror back INTO the database (Settings → Markdown backend).
+ *   `mdImport`  — paste a v2 mirror back INTO the database (Settings → Markdown mirror).
  *                 Off under `personal` (DD-011) because it is a WRITE path into the store from
  *                 mirror bytes, and those bytes stop being maintained.
  */

@@ -42,7 +42,7 @@ export function MarkdownSection({ state, ui }: SettingsProps) {
   return (
     <div>
       <SectionLabel style={{ marginBottom: 10 }} dot={<span className={st.mdDot}></span>}>
-        {TT.t('Markdown backend')}
+        {TT.t('Markdown mirror')}
       </SectionLabel>
       <p className={st.mdIntro}>
         {/* The stock blurb ends "paste it back here. This is the entire database" — both halves

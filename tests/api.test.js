@@ -1926,7 +1926,7 @@ describe('SB-074 commit segment key / committedAt guard', () => {
 // SB-072: the mirror parser splits a row on `|` and trims every cell it produces
 // (`splitUnescaped(s, '|', true)`, shared/core.js), so it cannot tell format padding from typed
 // content — a stored note `'trailing space '` came back `'trailing space'` on a mirror restore,
-// and Settings → Markdown backend makes that restore a one-action UI path. Terje's re-ruling:
+// and Settings → Markdown mirror makes that restore a one-action UI path. Terje's re-ruling:
 // make the DATA fit the format instead of escaping the edges — trim `entry.note` and
 // `client.name` on the way in, server-side, so the DB never holds a value the mirror cannot
 // round-trip. Server-side is the point: the claim is a data-integrity guarantee, and a
@@ -2038,7 +2038,7 @@ describe('SB-072 edge whitespace is trimmed at the write edge', () => {
   });
 
   it('the mirror the server wrote to disk round-trips these values', async () => {
-    // The end-to-end shape of the bug: the file Settings → Markdown backend hands the user,
+    // The end-to-end shape of the bug: the file Settings → Markdown mirror hands the user,
     // written by the server itself from the DB. Before the trim, ' leading' went in and
     // 'leading' came back out of here.
     const text = readFileSync(join(DATA_DIR, 'markdown', 'timesheet-seven-two.md'), 'utf8');
@@ -2190,7 +2190,7 @@ describe('SB-075 edge whitespace is trimmed at the write edge for project/task/e
   });
 
   it('the mirror the server wrote to disk round-trips these values', async () => {
-    // The end-to-end shape of the bug: the file Settings → Markdown backend hands the user,
+    // The end-to-end shape of the bug: the file Settings → Markdown mirror hands the user,
     // written by the server itself from the DB. Before the trim, ' leading' went in and
     // 'leading' came back out of here.
     const text = readFileSync(join(DATA_DIR, 'markdown', 'timesheet-seven-five.md'), 'utf8');

@@ -17,7 +17,7 @@ shared/   core.js — the data model + markdown (de)serialization, used by both 
 mirrors each user's full timesheet to a human-readable markdown file
 (`server/data/markdown/timesheet-<name>.md`) in a round-trippable format — that file can be
 pasted back into the app to restore everything. Point the mirror at a cloud-synced folder
-(Obsidian vault, Dropbox, …) in **Settings → Markdown backend → Mirror folder** (`~` works;
+(Obsidian vault, Dropbox, …) in **Settings → Markdown mirror → Mirror folder** (`~` works;
 admin only). The setting overrides the `TT_MD_DIR` env var and re-targets on the next save.
 On a shared server, where "admin" is not the machine owner, set `TT_MD_DIR_LOCK=1`: the mirror
 is then frozen at `TT_MD_DIR`, the setting is ignored, and changing it is rejected (403).

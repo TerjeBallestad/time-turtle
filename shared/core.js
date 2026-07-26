@@ -99,7 +99,7 @@ TT.TIME_SEPARATOR_VALUES = /** @type {string[]} */ (Object.keys(TIME_SEPARATORS)
 //
 // THE CAPABILITY TABLE LIVES HERE, in shared code, because both sides consult it: the server
 // guards that REFUSE the operation (server/src/index.js) and the client surfaces that explain
-// why the verb is missing (WeekView, Settings → Markdown backend). One table read at CALL TIME
+// why the verb is missing (WeekView, Settings → Markdown mirror). One table read at CALL TIME
 // is what makes DD-011's ruling structural — "the rule is a property of the SHAPE, not of a
 // path captured at switch time" — instead of a convention repeated in six places that drift.
 //
