@@ -10,6 +10,7 @@
 //
 // ## Verified red-green: 2026-07-26
 import { describe, it, expect } from 'vitest';
+import TT from '../shared/core.js';
 import { makeClientId, nextClientId, isGeneratedClientId, derivedClientId } from '../client/src/clientIds.ts';
 
 const client = (id, name = id) => ({ id, name, rounding: 'exact', rate: null, archived: false });
@@ -77,6 +78,31 @@ describe('makeClientId (fix 2: readable ids derived from the name)', () => {
   it('returns empty for a name with nothing usable in it', () => {
     expect(makeClientId('   ')).toBe('');
     expect(makeClientId('!!!')).toBe('');
+  });
+
+  // ## Verified red-green: 2026-07-26
+  // SB-088: there is now exactly ONE slug rule. SB-067 had to keep a second copy of it here
+  // because `shared/core.js` was held by another session; the transliteration has since moved
+  // into `TT.slug`, so this asserts the copy is gone rather than merely agreeing today. The
+  // only remaining difference is the FALLBACK: an unusable name must come back '' here (the
+  // caller's answer is "wait, don't derive yet"), where TT.slug's default invents 'task'.
+  it.each([
+    'Ballestad Studios',
+    '  Acme   Co.  ',
+    'Acme | Co',
+    'Bærum Bygg',
+    'Sør-Norge',
+    'Ålesund',
+    'A\u030Alesund', // Ålesund again, DECOMPOSED — must land on the same id
+    'Straße',
+    'Ballestad Studios International Holding Company',
+  ])('is TT.slug with an empty fallback, for %s', (name) => {
+    expect(makeClientId(name)).toBe(TT.slug(name, ''));
+  });
+
+  it('differs from TT.slug in exactly one place: the fallback', () => {
+    expect(makeClientId('!!!')).toBe('');
+    expect(TT.slug('!!!')).toBe('task');
   });
 });
 

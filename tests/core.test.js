@@ -471,3 +471,108 @@ describe('formatters', () => {
     expect(TT.fmtMoney(500, 'USD')).toBe('500 USD');
   });
 });
+
+// ## Verified red-green: 2026-07-26
+// SB-088: ONE slug rule. `TT.slug` dropped the Nordic letters outright — "Bærum" came out
+// `b-rum` — while `makeClientId` (SB-067) transliterated them, so the two rules disagreed
+// about the language most of this catalog is written in. The transliteration now lives in
+// `TT.slug` and `makeClientId` calls it.
+//
+// This changes what NEW ids look like ONLY. Nothing stored is re-derived or renamed by this
+// change: an existing project code, client id or task id keeps exactly the bytes it has.
+//
+// The ASCII rows are the CONTROL — they were green before the fix and must stay green, which
+// is what proves slugging in general was not changed, only extended.
+describe('TT.slug transliterates rather than dropping (SB-088)', () => {
+  const NORDIC = [
+    ['Bærum', 'baerum'],
+    ['Bærum Bygg', 'baerum-bygg'],
+    ['BÆRUM BYGG', 'baerum-bygg'],
+    ['Sør-Norge', 'sor-norge'],
+    ['Tromsø Kommune', 'tromso-kommune'],
+    ['Ødegård', 'odegard'],
+    ['Ålesund', 'alesund'],
+    ['Þingvellir', 'thingvellir'],
+    ['Ðjúpivogur', 'djupivogur'],
+    ['Straße', 'strasse'],
+    ['José Café', 'jose-cafe'],
+  ];
+
+  // NFD is not exotic here: macOS hands out decomposed strings from filenames and pastes,
+  // so the same name can arrive in either normalisation and must slug to the same id.
+  const NFD = [
+    ['A\u030alesund', 'alesund'], // Ålesund, decomposed
+    ['O\u0308stfold', 'ostfold'], // Östfold, decomposed
+    ['Jose\u0301 Cafe\u0301', 'jose-cafe'],
+  ];
+
+  const ASCII = [
+    ['Ballestad Studios', 'ballestad-studios'],
+    ['Brygga', 'brygga'],
+    ['  Acme   Co.  ', 'acme-co'],
+    ['Acme | Co', 'acme-co'],
+    ['A/B & C', 'a-b-c'],
+    ['FJH-NETT', 'fjh-nett'],
+  ];
+
+  it.each([...NORDIC, ...NFD])('slugs %s → %s', (name, expected) => {
+    expect(TT.slug(name)).toBe(expected);
+  });
+
+  it.each(ASCII)('control: %s still slugs to %s', (name, expected) => {
+    expect(TT.slug(name)).toBe(expected);
+  });
+
+  it('control: keeps its fallback for a name with nothing sluggable in it', () => {
+    expect(TT.slug('')).toBe('task');
+    expect(TT.slug('!!!')).toBe('task');
+    expect(TT.slug('   ')).toBe('task');
+  });
+
+  it('takes a caller-chosen fallback, which is how makeClientId can say "not yet"', () => {
+    // A client id must be distinguishable-from-nothing rather than invented, so the client
+    // path passes ''. That difference is the only reason the two rules were ever separate.
+    expect(TT.slug('!!!', '')).toBe('');
+    expect(TT.slug('Bærum', '')).toBe('baerum');
+  });
+
+  it('caps at 24 characters and never ends on a dash', () => {
+    const id = TT.slug('Ballestad Studios International Holding Company');
+    expect(id.length).toBeLessThanOrEqual(24);
+    expect(id.endsWith('-')).toBe(false);
+    // the cap landing exactly on a separator is the case that used to leave the dash
+    // ('abcdefghijk-lmnopqrstuv-' is what slice(0, 24) alone returns here)
+    expect(TT.slug('abcdefghijk lmnopqrstuv wxyz')).toBe('abcdefghijk-lmnopqrstuv');
+  });
+});
+
+// ## Verified red-green: 2026-07-26
+// SB-088: the same defect one function over. Project codes never went through TT.slug at all
+// — `makeCode` in App.tsx uppercased and stripped anything outside [A-Z0-9 ], so "Bærum Bygg"
+// became BRUM-BYGG: a silently dropped letter in a code Terje reads in the mirror and types
+// into the project editor. Extracting it here is what makes it provable below the browser rung.
+describe('TT.projectCode transliterates rather than dropping (SB-088)', () => {
+  it.each([
+    ['Bærum Bygg', 'BAER-BYGG'],
+    ['Ålesund', 'ALESUND'],
+    ['Ødegård Drift', 'ODEG-DRIF'],
+    ['Tromsø', 'TROMSO'],
+    ['Straße Bau', 'STRA-BAU'],
+  ])('codes %s → %s', (name, expected) => {
+    expect(TT.projectCode(name)).toBe(expected);
+  });
+
+  it.each([
+    ['Fjellheim Nettbutikk', 'FJEL-NETT'],
+    ['Lifelines', 'LIFELINE'],
+    ['Ops & maintenance', 'OPS-MAIN'],
+    ['  spaced   out  ', 'SPAC-OUT'],
+  ])('control: %s still codes to %s', (name, expected) => {
+    expect(TT.projectCode(name)).toBe(expected);
+  });
+
+  it('control: falls back to PROJ when the name yields no code', () => {
+    expect(TT.projectCode('')).toBe('PROJ');
+    expect(TT.projectCode('!!!')).toBe('PROJ');
+  });
+});

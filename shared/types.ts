@@ -702,7 +702,10 @@ export interface TTModule {
   projectOf(state: Catalog, code: string | null): Project | null;
   projectBillable(state: Pick<Catalog, 'projects'>, code: string | null): boolean;
   entryProjectCode(state: Catalog, entry: Entry): string | null;
-  slug(s: string): string;
+  // SB-088: `fallback` is what an unsluggable name becomes. The client-id path passes ''
+  // so it can tell "nothing usable yet" from a real id, instead of inventing one.
+  slug(s: string, fallback?: string): string;
+  projectCode(name: string): string;
   clientOf(state: Catalog, project: Project | null): Client | null;
   rateOf(state: Catalog, code: string | null): number;
   billMinutes(state: Catalog, entry: Entry): number;
