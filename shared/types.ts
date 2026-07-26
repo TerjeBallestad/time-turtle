@@ -96,11 +96,30 @@ export interface Entry {
   editedByAdmin?: boolean;
 }
 
+/**
+ * SB-063: which characters the VAULT daily note writes between a start and an end time.
+ * `unicode` (`→`) is the default — an arrow everywhere, with no font dependency. `ascii`
+ * (`->`) composes into a long-arrow ligature under JetBrains Mono / Fira Code / Cascadia and
+ * degrades to two literal characters elsewhere, which is why it is not the default. `hyphen`
+ * (`-`) matches the hand-written daily notes that predate the cutover.
+ *
+ * Write-side only: TT.parseTimeCell has accepted all three since SB-055, so changing this
+ * never requires a vault migration.
+ */
+export type VaultTimeSeparator = 'unicode' | 'ascii' | 'hyphen';
+
 export interface Settings {
   currency: string;
   language: string;
   /** markdown mirror directory; only present server-side / for admins */
   mdDir?: string;
+  /**
+   * SB-063: the vault daily note's Time-column separator; absent behaves as `unicode`.
+   * Reaches the bytes ONLY through TT.serializeVaultBlock's `timeSeparator` option — the v2
+   * mirror serializes no line for it and its output does not move when this changes (SB-069
+   * froze those bytes).
+   */
+  vaultTimeSeparator?: VaultTimeSeparator;
 }
 
 /**
@@ -447,7 +466,16 @@ export interface TTModule {
   fmtMoney(n: number, cur?: string): string;
   // time cell
   parseTimeCell(raw: string): ParsedTime | null;
-  fmtTimeCell(entry: Entry): string;
+  /**
+   * SB-063: `separator` is a Settings.vaultTimeSeparator VALUE NAME (never raw characters),
+   * defaulting to `unicode` — today's `→` — for every caller that does not pass one. Only
+   * TT.serializeVaultBlock does; the v2 mirror and the UI keep the default.
+   */
+  fmtTimeCell(entry: Entry, separator?: VaultTimeSeparator): string;
+  /** SB-063: value name → the characters to emit; absent/unrecognised → `→`. */
+  timeSeparator(name?: string | null): string;
+  /** SB-063: the legal Settings.vaultTimeSeparator values, default first. */
+  TIME_SEPARATOR_VALUES: string[];
   nowMin(): number;
   isRunning(entry: Entry): boolean;
   entryMinutes(entry: Entry): number;
@@ -534,7 +562,7 @@ export interface TTModule {
    */
   serializeVaultBlock(
     entries: VaultEntry[],
-    opts?: { heading?: string; headers?: string[]; revision?: number },
+    opts?: { heading?: string; headers?: string[]; revision?: number; timeSeparator?: VaultTimeSeparator },
   ): string;
   /**
    * SB-055: splice the serialized block back into its host note. Every byte outside the
@@ -545,7 +573,13 @@ export interface TTModule {
   writeVaultBlock(
     md: string,
     entries: VaultEntry[],
-    opts?: { heading?: string; date?: string; headers?: string[]; revision?: number },
+    opts?: {
+      heading?: string;
+      date?: string;
+      headers?: string[];
+      revision?: number;
+      timeSeparator?: VaultTimeSeparator;
+    },
   ): { md: string; quarantine: boolean; reason: VaultQuarantineReason | null };
   serializeMd(state: Catalog): string;
   newId(): string;

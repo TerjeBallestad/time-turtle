@@ -8,6 +8,7 @@
 /** @typedef {import('./types.ts').Client} Client */
 /** @typedef {import('./types.ts').Catalog} Catalog */
 /** @typedef {import('./types.ts').ParsedTime} ParsedTime */
+/** @typedef {import('./types.ts').VaultTimeSeparator} VaultTimeSeparator */
 /** @typedef {import('./types.ts').TTModule} TTModule */
 
 // Populated incrementally below; casting an empty object to TTModule lets each
@@ -68,9 +69,42 @@ TT.parseTimeCell = function (raw) {
   }
   return null;
 };
-TT.fmtTimeCell = function (entry) {
-  if (entry.durMin != null) return TT.fmtDur(entry.durMin);
-  if (entry.start != null) return TT.fmtT(entry.start) + '→' + (entry.end != null ? TT.fmtT(entry.end) : '');
+// SB-063: which characters the VAULT daily note writes between a start and an end time is a
+// setting (`Settings.vaultTimeSeparator`), because the three forms differ only in how they
+// render — parseTimeCell above has accepted all three since SB-055, so flipping the setting
+// never requires a vault migration. That is the whole reason this is cheap.
+//   unicode  `→`   the DEFAULT: an arrow everywhere, with no font dependency
+//   ascii    `->`  composes into a long-arrow ligature under JetBrains Mono / Fira Code /
+//                  Cascadia, and degrades to two literal characters everywhere else — which
+//                  is exactly why it is NOT the default (Terje, SB-063: "if it's dependant
+//                  on a ligature, revert to the short arrow")
+//   hyphen   `-`   matches the hand-written daily notes that predate the cutover
+/** @type {Record<string, string>} */
+const TIME_SEPARATORS = { unicode: '→', ascii: '->', hyphen: '-' };
+const TIME_SEPARATOR_DEFAULT = TIME_SEPARATORS.unicode;
+/**
+ * Resolve a `Settings.vaultTimeSeparator` VALUE NAME to the characters to emit. Absent or
+ * unrecognised resolves to `→`, today's behaviour — a setting may change how a note LOOKS,
+ * never whether it can be written. Note the argument is the name, never raw characters:
+ * arbitrary strings must not be able to reach a table cell and split their own row.
+ * @param {string | null} [name] @returns {string}
+ */
+TT.timeSeparator = (name) => (name && TIME_SEPARATORS[name]) || TIME_SEPARATOR_DEFAULT;
+/** The legal `Settings.vaultTimeSeparator` values, default first. The ONE home of this list. */
+TT.TIME_SEPARATOR_VALUES = /** @type {string[]} */ (Object.keys(TIME_SEPARATORS));
+/**
+ * @param {Entry} entry
+ * @param {VaultTimeSeparator} [separator] a `Settings.vaultTimeSeparator` value name. Defaults to
+ *   `unicode`, which is what every NON-vault caller wants and must keep getting: this
+ *   formatter also serves the v2 mirror's entry lines, whose bytes SB-069 froze
+ *   (`backend=sqlite` comes out of the vault effort byte-for-byte identical), and the app's
+ *   own UI has no daily note to match. Only TT.serializeVaultBlock passes this.
+ * @returns {string}
+ */
+TT.fmtTimeCell = function (entry, separator) {
+  if (entry.durMin != null) return TT.fmtDur(entry.durMin); // a duration has no separator
+  const sep = TT.timeSeparator(separator);
+  if (entry.start != null) return TT.fmtT(entry.start) + sep + (entry.end != null ? TT.fmtT(entry.end) : '');
   return '';
 };
 TT.nowMin = () => {
@@ -964,8 +998,12 @@ function vaultTotals(entries) {
  * `` `revision: N` `` line, with no trailing newline (the splice supplies the line breaks).
  * `opts.headers` is the block's OWN declared header set, so a block written before a column
  * existed re-emits its own columns; it defaults to the canonical five.
+ *
+ * `opts.timeSeparator` (SB-063) is `Settings.vaultTimeSeparator` — and this is the ONLY door
+ * it comes through. The v2 mirror shares TT.fmtTimeCell but does not share this option, so
+ * the setting cannot move a mirror byte (SB-069).
  * @param {VaultEntry[]} entries
- * @param {{ heading?: string, headers?: string[], revision?: number }} [opts]
+ * @param {{ heading?: string, headers?: string[], revision?: number, timeSeparator?: VaultTimeSeparator }} [opts]
  * @returns {string}
  */
 TT.serializeVaultBlock = function (entries, opts) {
@@ -973,6 +1011,7 @@ TT.serializeVaultBlock = function (entries, opts) {
   const heading = (opts && opts.heading) || VAULT_HEADING;
   const headers = (opts && opts.headers && opts.headers.length ? opts.headers : VAULT_COLUMNS).slice();
   const revision = opts && opts.revision != null ? opts.revision : 1; // a first write starts at 1
+  const timeSeparator = (opts && opts.timeSeparator) || undefined; // absent ⇒ `unicode`, today's bytes
   const keys = headers.map((label) => label.toLowerCase());
 
   const lines = ['## ' + heading, '', vaultRow(headers), '|' + headers.map(() => '---').join('|') + '|'];
@@ -980,7 +1019,7 @@ TT.serializeVaultBlock = function (entries, opts) {
     lines.push(
       vaultRow(
         keys.map((key) => {
-          if (key === 'time') return TT.fmtTimeCell(entry);
+          if (key === 'time') return TT.fmtTimeCell(entry, timeSeparator);
           if (key === 'project') return entry.project ? TT.encodeCell(entry.project) : '';
           if (key === 'task') return TT.encodeTaskCell({ label: entry.label, note: entry.note });
           if (key === 'bill') return entry.billable ? BILL_YES : '';
@@ -1034,7 +1073,7 @@ TT.serializeVaultBlock = function (entries, opts) {
  * re-emitted unchanged. When a write bumps the counter is SB-057's arbitration to rule on,
  * not this function's to assume.
  * @param {string} md @param {VaultEntry[]} entries
- * @param {{ heading?: string, date?: string, headers?: string[], revision?: number }} [opts]
+ * @param {{ heading?: string, date?: string, headers?: string[], revision?: number, timeSeparator?: VaultTimeSeparator }} [opts]
  * @returns {{ md: string, quarantine: boolean, reason: import('./types.ts').VaultQuarantineReason | null }}
  */
 TT.writeVaultBlock = function (md, entries, opts) {
@@ -1052,6 +1091,9 @@ TT.writeVaultBlock = function (md, entries, opts) {
     // canonical five and re-canonicalise a block — the opposite of the migration-free property
     headers: opts && opts.headers && opts.headers.length ? opts.headers : parsed.headers,
     revision: opts && opts.revision != null ? opts.revision : loc.revision,
+    // SB-063: absent ⇒ `unicode`. The write-would-corrupt gate below re-parses the result,
+    // so a bad value can never leave a note TT's own parser refuses.
+    timeSeparator: opts && opts.timeSeparator,
   });
   const out = lines
     .slice(0, loc.start)
@@ -1081,8 +1123,9 @@ TT.writeVaultBlock = function (md, entries, opts) {
 //
 // - SB-041's escaping drops out. A field holding `a|b` digests identically whether it reached disk as
 //   `a\|b` or was hand-typed some other way, so the key does not depend on escaping choices.
-// - The emitted separator drops out. SB-063 will make the `→`/`->`/`-` separator a setting; a
-//   separator-dependent digest would re-key every row in the vault the day that setting flips.
+// - The emitted separator drops out. SB-063 LANDED: `Settings.vaultTimeSeparator` chooses which of
+//   `→` (default) / `->` / `-` the vault block writes, so that setting now flips in the field. A
+//   separator-dependent digest would re-key every row in the vault the day it does.
 //
 // --- 2. Fixed field order, independent of the block's header order
 //

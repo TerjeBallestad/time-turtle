@@ -2009,3 +2009,122 @@ describe('vault block payload digest (SB-080 / DD-009)', () => {
     expect(TT.locateVaultBlock(res.md).verified).toBe(true);
   });
 });
+
+// ---- SB-063: the vault Time-column separator is a setting ----
+// Write-side only. TT.parseTimeCell has accepted `→`, `->` and `-` since SB-055, so the
+// three values differ only in how a note LOOKS — which is what makes the setting
+// migration-free, and is therefore the property these tests pin rather than assume.
+//
+// The trap this suite guards is the shared formatter: TT.fmtTimeCell serves the v2 mirror
+// (`## <date>` entry lines) as well as the vault block, and SB-069 froze the mirror's bytes.
+// So there are two halves here — the separator MOVES in the vault block under each value,
+// and the mirror does NOT move under any of them.
+// ## Verified red-green: 2026-07-26
+describe('vault Time-column separator setting (SB-063)', () => {
+  /** @param {Partial<import('../shared/types.ts').Entry>} o */
+  const E = (o) => ({
+    id: 'runtime-id',
+    date: '2026-01-05',
+    start: null,
+    end: null,
+    durMin: null,
+    project: null,
+    label: '',
+    note: '',
+    billable: false,
+    ...o,
+  });
+  // a finished range, an open (running) range, and a duration-only row — the third has no
+  // separator at all and must be untouched by every value
+  const DAY = [
+    E({ start: 660, end: 765, label: 'Search & facets' }),
+    E({ start: 1054, label: 'Block format feel-gate' }),
+    E({ durMin: 30, label: 'Tidying' }),
+  ];
+  const SEPARATORS = { unicode: '→', ascii: '->', hyphen: '-' };
+
+  it('resolves each setting value to its characters, and anything else to the `→` default', () => {
+    expect(TT.timeSeparator('unicode')).toBe('→');
+    expect(TT.timeSeparator('ascii')).toBe('->');
+    expect(TT.timeSeparator('hyphen')).toBe('-');
+    // the setting can only change how a note LOOKS, never whether it can be written
+    expect(TT.timeSeparator(undefined)).toBe('→');
+    expect(TT.timeSeparator(null)).toBe('→');
+    expect(TT.timeSeparator('')).toBe('→');
+    expect(TT.timeSeparator('arrow')).toBe('→'); // the ticket's original draft name
+    expect(TT.timeSeparator(' | ')).toBe('→'); // raw characters are NOT a value
+  });
+
+  it('emits the chosen separator in BOTH the range form and the running form', () => {
+    for (const [value, sep] of Object.entries(SEPARATORS)) {
+      const region = TT.serializeVaultBlock(DAY, { headers: ['Time', 'Task'], timeSeparator: value });
+      expect(region, value).toContain('| 11:00' + sep + '12:45 | Search & facets |');
+      expect(region, value).toContain('| 17:34' + sep + ' | Block format feel-gate |');
+      expect(region, value).toContain('| 30m | Tidying |'); // duration-only: no separator to change
+    }
+  });
+
+  it('an absent setting emits exactly what TT emits today (`unicode` is the default)', () => {
+    const today = TT.serializeVaultBlock(DAY, { headers: ['Time', 'Task'] });
+    expect(today).toBe(TT.serializeVaultBlock(DAY, { headers: ['Time', 'Task'], timeSeparator: 'unicode' }));
+    expect(today).toBe(TT.serializeVaultBlock(DAY, { headers: ['Time', 'Task'], timeSeparator: undefined }));
+    expect(today).toContain('| 11:00→12:45 | Search & facets |');
+    expect(today).toContain('| 17:34→ | Block format feel-gate |');
+  });
+
+  it('the splice carries the setting through to the note', () => {
+    const host = ['# Monday', '', '## Time Log', '', '| Time | Task |', '|---|---|', '| **0h** | **0h billable** |', '', '`revision: 1`', '', '## Captures', '- keep me'].join('\n'); // prettier-ignore
+    const res = TT.writeVaultBlock(host, DAY, { headers: ['Time', 'Task'], timeSeparator: 'hyphen' });
+    expect(res.quarantine).toBe(false);
+    expect(res.md).toContain('| 11:00-12:45 | Search & facets |');
+    expect(res.md).toContain('| 17:34- | Block format feel-gate |');
+    expect(res.md.endsWith('\n## Captures\n- keep me')).toBe(true); // nothing outside the block moved
+  });
+
+  // THE property that makes the setting migration-free: whichever separator was written,
+  // the parser recovers the same entries. Tested, not assumed — if this ever stops holding,
+  // flipping the setting silently becomes a vault migration.
+  it('round-trips under every value — the written separator never changes what is read back', () => {
+    const fields = (entries) =>
+      entries.map((entry) => ({
+        start: entry.start,
+        end: entry.end,
+        durMin: entry.durMin,
+        label: entry.label,
+      }));
+    const expected = fields(DAY);
+    const written = new Set();
+    for (const value of Object.keys(SEPARATORS)) {
+      const region = TT.serializeVaultBlock(DAY, { headers: ['Time', 'Task'], timeSeparator: value });
+      written.add(region);
+      const parsed = TT.parseVaultBlock(region, { date: '2026-01-05' });
+      expect(parsed.quarantine, value).toBe(false);
+      expect(fields(parsed.entries), value).toEqual(expected);
+    }
+    // three DIFFERENT byte strings converged on one reading — without this the test would
+    // pass just as happily if the option were being ignored entirely
+    expect(written.size).toBe(3);
+  });
+
+  // ---- the v2 mirror does not move (SB-069) ----
+  // `backend=sqlite` must come out of the whole vault effort byte-for-byte identical, so the
+  // setting must be reachable ONLY through the vault block's own options.
+  it('the v2 mirror is byte-identical at every value of the setting', () => {
+    const base = TT.serializeMd(TT.parseMd(V2_FIXTURE));
+    expect(base).toBe(V2_FIXTURE); // the existing golden, restated so a break lands here too
+    for (const value of [...Object.keys(SEPARATORS), 'arrow', undefined]) {
+      const state = TT.parseMd(V2_FIXTURE);
+      state.settings.vaultTimeSeparator = value;
+      expect(TT.serializeMd(state), String(value)).toBe(V2_FIXTURE);
+    }
+  });
+
+  it('the mirror still writes `→`, and no Settings key can reach it', () => {
+    const state = TT.parseMd(V2_FIXTURE);
+    state.settings.vaultTimeSeparator = 'hyphen';
+    const out = TT.serializeMd(state);
+    expect(out).toContain('→');
+    expect(out).not.toContain('vaultTimeSeparator'); // the mirror serializes no such line
+    expect(TT.parseMd(out).settings.vaultTimeSeparator).toBe(undefined);
+  });
+});

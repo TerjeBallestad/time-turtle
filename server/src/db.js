@@ -152,12 +152,17 @@ function migrateToSdd002() {
 migrateToSdd002();
 
 // ---- settings ----
+// SB-063: `vaultTimeSeparator` is stored like any other key, and defaults to `unicode` on
+// read so an untouched install emits exactly what TT emitted before the setting existed. It
+// reaches no mirror byte — TT.serializeMd writes only `currency:`/`language:`/`format:`, the
+// same reason `mdDir` has always been invisible there.
 /** @returns {Settings & { mdDir: string }} */
 export function getSettings() {
   const rows = /** @type {{ key: string, value: string }[]} */ (db.prepare('SELECT key, value FROM settings').all());
-  const settings = { currency: 'kr', language: 'en', mdDir: '' };
-  for (const row of rows) settings[/** @type {'currency'|'language'|'mdDir'} */ (row.key)] = row.value;
-  return settings;
+  const settings = { currency: 'kr', language: 'en', mdDir: '', vaultTimeSeparator: 'unicode' };
+  for (const row of rows)
+    settings[/** @type {'currency'|'language'|'mdDir'|'vaultTimeSeparator'} */ (row.key)] = row.value;
+  return /** @type {Settings & { mdDir: string }} */ (settings);
 }
 /** @param {Settings} settings */
 export function putSettings(settings) {
@@ -166,6 +171,10 @@ export function putSettings(settings) {
   );
   for (const key of /** @type {const} */ (['currency', 'language', 'mdDir']))
     if (settings[key] != null) upsert.run(key, String(settings[key]));
+  // An enum, not free text like currency: an unrecognised value would read back as junk even
+  // though TT.timeSeparator would safely emit `→` for it. The vocabulary lives in core.js.
+  if (settings.vaultTimeSeparator != null && TT.TIME_SEPARATOR_VALUES.includes(settings.vaultTimeSeparator))
+    upsert.run('vaultTimeSeparator', settings.vaultTimeSeparator);
 }
 
 // ---- catalog ----
