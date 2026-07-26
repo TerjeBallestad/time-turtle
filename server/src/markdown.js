@@ -5,6 +5,10 @@ import { join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import TT from '../../shared/core.js';
 import { DATA_DIR, MD_DIR, MD_DIR_LOCKED, MD_DIR_FROM_ENV } from './config.js';
+// SB-056: this module reads `db.js` DIRECTLY, not the storage seam, and that is deliberate.
+// `writeMirror` only ever runs under `backend: 'sqlite'` — under `vault` the mirror is off
+// entirely (DD-011) — so routing it through `store.js` would imply the mirror has a vault
+// meaning it does not have. Under sqlite the two are the same tables anyway.
 import { getSettings, getClients, getProjects, getTasks, getEntries, getCommits } from './db.js';
 
 /** @typedef {{ dir: string, source: 'env-locked' | 'setting' | 'env' | 'default', shadowed: string | null }} MirrorTarget */

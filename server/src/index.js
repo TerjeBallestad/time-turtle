@@ -5,7 +5,12 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
 import { PORT, MD_DIR_LOCKED } from './config.js';
 import { verifyPassword, makeToken, readSessionCookie, sessionCookie, clearCookie } from './auth.js';
+// SB-056: the split is at the import site on purpose. `db` is IDENTITY ONLY here — users,
+// passwords, token versions, the first-run seed — and every TIMESHEET-STORAGE read/write goes
+// through `store`, which is where SB-057's vault implementation lands. If a new `db.` call
+// appears below that is not about a user account, it belongs on `store`. See store.js's header.
 import * as db from './db.js';
+import * as store from './store.js';
 import { writeMirror, mirrorTarget, mirrorPath, mirrorBlockFor, acknowledgeMirrorBlock } from './markdown.js';
 import { teamReport } from './reports.js';
 import TT from '../../shared/core.js';
@@ -101,19 +106,19 @@ function stateFor(user) {
   // segment's chip can render read-only (ruling 5) — but the per-entry money snapshot is
   // dropped (a server strip, not a UI hide) and releasedBy is admin-internal. Admins keep
   // the full segment.
-  const commits = db.getCommits(user.id);
+  const commits = store.getCommits(user.id);
   return {
     user,
-    version: db.getVersions(user.id),
+    version: store.getVersions(user.id),
     mdDirLocked: MD_DIR_LOCKED,
     // SB-065: a standing mirror refusal is STATE, not a log line — a mirror that has
     // quietly stopped updating still looks current, which is the failure this guards.
     mirrorBlocked: mirrorBlockFor(user),
-    settings: db.getSettings(),
-    clients: db.getClients().map(strip),
-    projects: db.getProjects().map(strip),
-    tasks: db.getTasks(user.id),
-    entries: db.getEntries(user.id),
+    settings: store.getSettings(),
+    clients: store.getClients().map(strip),
+    projects: store.getProjects().map(strip),
+    tasks: store.getTasks(user.id),
+    entries: store.getEntries(user.id),
     commits: admin
       ? commits
       : commits.map((c) => ({
@@ -286,8 +291,8 @@ class ReferencedDeleteError extends Error {}
 function guardReferencedDeletes(body) {
   if (body.projects !== undefined) {
     const incoming = new Set(body.projects.map((project) => String(project.code)));
-    for (const stored of db.getProjects()) {
-      if (!incoming.has(stored.code) && db.projectCodeReferenced(stored.code))
+    for (const stored of store.getProjects()) {
+      if (!incoming.has(stored.code) && store.projectCodeReferenced(stored.code))
         throw new ReferencedDeleteError(
           'cannot delete project ' + stored.code + ': it has logged entries (archive it)',
         );
@@ -295,8 +300,8 @@ function guardReferencedDeletes(body) {
   }
   if (body.clients !== undefined) {
     const incoming = new Set(body.clients.map((client) => String(client.id)));
-    for (const stored of db.getClients()) {
-      if (!incoming.has(stored.id) && db.clientReferenced(stored.id))
+    for (const stored of store.getClients()) {
+      if (!incoming.has(stored.id) && store.clientReferenced(stored.id))
         throw new ReferencedDeleteError('cannot delete client ' + stored.id + ': it has projects (archive it)');
     }
   }
@@ -315,10 +320,10 @@ function guardReferencedDeletes(body) {
  */
 function normalizeBillable(userId, body) {
   if (body.entries === undefined) return;
-  const projState = { projects: db.getProjects() };
+  const projState = { projects: store.getProjects() };
   /** @param {string | null} code */
   const derive = (code) => TT.projectBillable(projState, code ?? null);
-  const stored = new Map(db.getEntries(userId).map((entry) => [entry.id, entry]));
+  const stored = new Map(store.getEntries(userId).map((entry) => [entry.id, entry]));
   body.entries = body.entries.map((entry) => {
     const prior = stored.get(entry.id);
     if (prior) {
@@ -341,7 +346,7 @@ function normalizeBillable(userId, body) {
  */
 function pinEditedByAdmin(userId, body) {
   if (body.entries === undefined) return;
-  const stored = new Map(db.getEntries(userId).map((entry) => [entry.id, entry]));
+  const stored = new Map(store.getEntries(userId).map((entry) => [entry.id, entry]));
   body.entries = body.entries.map((entry) => {
     const prior = stored.get(entry.id);
     return { ...entry, editedByAdmin: !!(prior && prior.editedByAdmin) };
@@ -392,7 +397,7 @@ function deriveSnapshot(catalog, entries, key) {
  * @returns {{ pinnedKeys: Set<string> }}
  */
 function reconcileCommits(userId, body, isEmployee) {
-  const stored = db.getCommits(userId);
+  const stored = store.getCommits(userId);
   const storedByKey = new Map(stored.map((commit) => [commit.key, commit]));
   // Keys the employee cannot drop: approved-and-not-released (the ruling-5 lock).
   const lockedKeys = isEmployee ? stored.filter((commit) => TT.segmentApproved(commit)).map((c) => c.key) : [];
@@ -415,12 +420,12 @@ function reconcileCommits(userId, body, isEmployee) {
       incomingKeys.push(key);
     }
   }
-  const effectiveEntries = body.entries !== undefined ? body.entries : db.getEntries(userId);
+  const effectiveEntries = body.entries !== undefined ? body.entries : store.getEntries(userId);
   /** @type {import('../../shared/types.ts').Catalog} */
   const catalog = {
-    settings: db.getSettings(),
-    clients: db.getClients(),
-    projects: db.getProjects(),
+    settings: store.getSettings(),
+    clients: store.getClients(),
+    projects: store.getProjects(),
     tasks: [],
     entries: [],
   };
@@ -445,7 +450,7 @@ function reconcileCommits(userId, body, isEmployee) {
  */
 function pinCommittedEntries(userId, body, pinnedKeys) {
   if (body.entries === undefined || pinnedKeys.size === 0) return;
-  const stored = db.getEntries(userId);
+  const stored = store.getEntries(userId);
   const storedById = new Map(stored.map((entry) => [entry.id, entry]));
   /** @param {string} date */
   const isPinned = (date) => pinnedKeys.has(TT.segmentKey(date));
@@ -516,7 +521,7 @@ app.put('/api/state', requireUser, (req, res) => {
     MD_DIR_LOCKED &&
     body.settings &&
     body.settings.mdDir !== undefined &&
-    String(body.settings.mdDir) !== db.getSettings().mdDir
+    String(body.settings.mdDir) !== store.getSettings().mdDir
   ) {
     return res.status(403).json({ error: 'mirror folder is locked by server configuration (TT_MD_DIR_LOCK)' });
   }
@@ -545,24 +550,24 @@ app.put('/api/state', requireUser, (req, res) => {
   // share one scope, so a commit write follows the same DC-001 409 semantics.
   const touchesPersonal = body.entries !== undefined || body.tasks !== undefined || body.commits !== undefined;
   try {
-    db.transaction(() => {
+    store.transaction(() => {
       // Checked inside the transaction so the compare and the write cannot be
       // split by another writer.
-      const current = db.getVersions(req.user.id);
+      const current = store.getVersions(req.user.id);
       if (touchesCatalog && expected?.catalog !== undefined && +expected.catalog !== current.catalog)
         throw new ConflictError('catalog', current);
       if (touchesPersonal && expected?.entries !== undefined && +expected.entries !== current.entries)
         throw new ConflictError('entries', current);
       // SDD-002 ruling 7: refuse to hard-delete a still-referenced code/id (archive instead).
       guardReferencedDeletes(body);
-      if (body.settings) db.putSettings(body.settings);
-      if (body.clients) db.putClients(body.clients);
-      if (body.projects) db.putProjects(body.projects);
-      if (body.tasks) db.putTasks(req.user.id, body.tasks);
-      if (body.entries) db.putEntries(req.user.id, body.entries);
-      if (body.commits !== undefined) db.putCommits(req.user.id, body.commits);
-      if (touchesCatalog) db.bumpCatalogVersion();
-      if (touchesPersonal) db.bumpEntriesVersion(req.user.id);
+      if (body.settings) store.putSettings(body.settings);
+      if (body.clients) store.putClients(body.clients);
+      if (body.projects) store.putProjects(body.projects);
+      if (body.tasks) store.putTasks(req.user.id, body.tasks);
+      if (body.entries) store.putEntries(req.user.id, body.entries);
+      if (body.commits !== undefined) store.putCommits(req.user.id, body.commits);
+      if (touchesCatalog) store.bumpCatalogVersion();
+      if (touchesPersonal) store.bumpEntriesVersion(req.user.id);
     });
   } catch (err) {
     if (err instanceof ConflictError)
@@ -584,7 +589,7 @@ app.put('/api/state', requireUser, (req, res) => {
   // promoted to a 500 — "you cannot save at all" is a worse failure than a stale mirror.
   res.json({
     ok: true,
-    version: db.getVersions(req.user.id),
+    version: store.getVersions(req.user.id),
     mirror,
     mirrorError,
     mirrorBlocked: mirrorBlockFor(req.user),
@@ -643,13 +648,13 @@ app.get('/api/users/:id/timesheet', requireUser, requireAdmin, (req, res) => {
   if (!target) return res.status(404).json({ error: 'no such user' });
   res.json({
     user: target,
-    settings: db.getSettings(),
-    clients: db.getClients(),
-    projects: db.getProjects(),
-    tasks: db.getTasks(id),
-    entries: db.getEntries(id),
-    commits: db.getCommits(id), // money PRESENT — admin
-    version: db.getVersions(id),
+    settings: store.getSettings(),
+    clients: store.getClients(),
+    projects: store.getProjects(),
+    tasks: store.getTasks(id),
+    entries: store.getEntries(id),
+    commits: store.getCommits(id), // money PRESENT — admin
+    version: store.getVersions(id),
   });
 });
 
@@ -682,7 +687,7 @@ app.put('/api/users/:id/entries', requireUser, requireAdmin, (req, res) => {
     return res.status(400).json({ error: 'version must be an object' });
   }
 
-  const stored = db.getEntries(id);
+  const stored = store.getEntries(id);
   const storedById = new Map(stored.map((entry) => [entry.id, entry]));
   // Mark the lines the admin actually changed (or added); an unchanged line keeps its
   // prior marker, so a re-save never clears an earlier admin correction.
@@ -720,13 +725,13 @@ app.put('/api/users/:id/entries', requireUser, requireAdmin, (req, res) => {
 
   /** @type {import('../../shared/types.ts').Catalog} */
   const catalog = {
-    settings: db.getSettings(),
-    clients: db.getClients(),
-    projects: db.getProjects(),
+    settings: store.getSettings(),
+    clients: store.getClients(),
+    projects: store.getProjects(),
     tasks: [],
     entries: [],
   };
-  const commits = db.getCommits(id);
+  const commits = store.getCommits(id);
   let commitsChanged = false;
   const reFrozen = commits.map((seg) => {
     if (!affected.has(seg.key)) return seg; // untouched committed segment — frozen verbatim
@@ -749,16 +754,16 @@ app.put('/api/users/:id/entries', requireUser, requireAdmin, (req, res) => {
   });
 
   try {
-    db.transaction(() => {
+    store.transaction(() => {
       // DC-001: compare-and-write inside the transaction so a concurrent writer cannot
       // split the check from the save. A version-less PUT skips the guard (unconditional).
       if (expected?.entries !== undefined) {
-        const current = db.getVersions(id);
+        const current = store.getVersions(id);
         if (+expected.entries !== current.entries) throw new ConflictError('entries', current);
       }
-      db.putEntries(id, marked);
-      if (commitsChanged) db.putCommits(id, reFrozen);
-      db.bumpEntriesVersion(id);
+      store.putEntries(id, marked);
+      if (commitsChanged) store.putCommits(id, reFrozen);
+      store.bumpEntriesVersion(id);
     });
   } catch (err) {
     if (err instanceof ConflictError)
@@ -775,7 +780,7 @@ app.put('/api/users/:id/entries', requireUser, requireAdmin, (req, res) => {
     mirrorError = /** @type {Error} */ (err).message;
     console.error('[time-turtle] markdown mirror failed:', mirrorError);
   }
-  res.json({ ok: true, version: db.getVersions(id), mirror, mirrorError, mirrorBlocked: mirrorBlockFor(target) });
+  res.json({ ok: true, version: store.getVersions(id), mirror, mirrorError, mirrorBlocked: mirrorBlockFor(target) });
 });
 
 // SDD-002 ruling 5 (SB-025): the lock verbs. Approve stamps approvedAt (and clears any
@@ -792,7 +797,7 @@ function segmentLockHandler(verb) {
     const key = req.params.key;
     const target = db.findUserById(id);
     if (!target) return res.status(404).json({ error: 'no such user' });
-    const commits = db.getCommits(id);
+    const commits = store.getCommits(id);
     if (!commits.some((seg) => seg.key === key)) return res.status(404).json({ error: 'no such committed segment' });
     const next = commits.map((seg) => {
       if (seg.key !== key) return seg;
@@ -804,9 +809,9 @@ function segmentLockHandler(verb) {
       return { ...rest, releasedBy: req.user.id };
     });
     try {
-      db.transaction(() => {
-        db.putCommits(id, next);
-        db.bumpEntriesVersion(id);
+      store.transaction(() => {
+        store.putCommits(id, next);
+        store.bumpEntriesVersion(id);
       });
     } catch (err) {
       return res.status(400).json({ error: 'save failed: ' + /** @type {Error} */ (err).message });
@@ -819,7 +824,7 @@ function segmentLockHandler(verb) {
       mirrorError = /** @type {Error} */ (err).message;
       console.error('[time-turtle] markdown mirror failed:', mirrorError);
     }
-    res.json({ ok: true, version: db.getVersions(id), mirrorError, mirrorBlocked: mirrorBlockFor(target) });
+    res.json({ ok: true, version: store.getVersions(id), mirrorError, mirrorBlocked: mirrorBlockFor(target) });
   };
 }
 app.post('/api/users/:id/segments/:key/approve', requireUser, requireAdmin, segmentLockHandler('approve'));
@@ -827,7 +832,7 @@ app.post('/api/users/:id/segments/:key/release', requireUser, requireAdmin, segm
 
 // SDD-002 DC-005 (PLAN-006): the server-reconciled project-code rename. A dedicated
 // admin-only endpoint rewrites every user's entries + templates old→new in ONE transaction
-// (db.renameProjectCode), so a code rename no longer orphans another user's logged history.
+// (store.renameProjectCode), so a code rename no longer orphans another user's logged history.
 // A BLIND reconcile: it never returns another user's entry CONTENT — so SB-009's per-user
 // privacy line stays intact. Replaces the old client-only renameProject.
 //
@@ -846,14 +851,14 @@ app.post('/api/projects/:code/rename', requireUser, requireAdmin, (req, res) => 
   const from = String(req.params.code);
   const to = req.body && typeof req.body.to === 'string' ? req.body.to.trim() : '';
   if (!to) return res.status(400).json({ error: 'a non-empty target code is required' });
-  const projects = db.getProjects();
+  const projects = store.getProjects();
   if (!projects.some((p) => p.code === from)) return res.status(404).json({ error: 'no such project' });
   if (from !== to && projects.some((p) => p.code === to))
     return res.status(409).json({ error: 'a project with that code already exists' });
   /** @type {number[]} */
   let affected;
   try {
-    affected = db.renameProjectCode(from, to);
+    affected = store.renameProjectCode(from, to);
   } catch (err) {
     return res.status(400).json({ error: 'rename failed: ' + /** @type {Error} */ (err).message });
   }
@@ -919,7 +924,7 @@ const CLIENT_ID_MAX = 24;
 // before the write, so a single collection-replace that swaps the id AND re-points the
 // projects still 409s `cannot delete client <id>: it has projects` — the old id is absent
 // from the incoming clients while the stored projects still reference it. The drop and the
-// re-point can only meet inside one transaction, which is what `db.renameClientId` is.
+// re-point can only meet inside one transaction, which is what `store.renameClientId` is.
 // (Pinned by the SB-067 test in tests/api.test.js, which asserts that exact 409.)
 //
 // MUCH SMALLER THAN THE PROJECT RENAME. `Project.clientId` is the only persisted reference
@@ -943,7 +948,7 @@ app.post('/api/clients/:id/rename', requireUser, requireAdmin, (req, res) => {
         CLIENT_ID_MAX +
         ' characters',
     });
-  const clients = db.getClients();
+  const clients = store.getClients();
   if (!clients.some((client) => client.id === from)) return res.status(404).json({ error: 'no such client' });
   // A READABLE uniqueness error. Without this the PK backstop surfaces as
   // `400 save failed: … UNIQUE constraint failed: clients.id` — accurate and useless.
@@ -952,7 +957,7 @@ app.post('/api/clients/:id/rename', requireUser, requireAdmin, (req, res) => {
   /** @type {number} */
   let projects;
   try {
-    projects = db.renameClientId(from, to);
+    projects = store.renameClientId(from, to);
   } catch (err) {
     return res.status(400).json({ error: 'rename failed: ' + /** @type {Error} */ (err).message });
   }

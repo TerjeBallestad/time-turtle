@@ -9,7 +9,10 @@
 // to the client's increment individually, so a total is not recoverable from a
 // pre-rounded total.
 import TT from '../../shared/core.js';
+// SB-056: same split as index.js — `db` for IDENTITY only (`listUsers`, to put a name on a
+// row), `store` for every timesheet read. See store.js's header for where the line is drawn.
 import * as db from './db.js';
+import * as store from './store.js';
 
 /** @typedef {import('../../shared/types.ts').Catalog} Catalog */
 /** @typedef {import('../../shared/types.ts').TeamReportRow} TeamReportRow */
@@ -26,9 +29,9 @@ export function teamReport({ from, to } = {}) {
   // task lookup, and tasks (now per-user templates) are irrelevant to the report.
   /** @type {Catalog} */
   const catalog = {
-    settings: db.getSettings(),
-    clients: db.getClients(),
-    projects: db.getProjects(),
+    settings: store.getSettings(),
+    clients: store.getClients(),
+    projects: store.getProjects(),
     tasks: [],
     entries: [],
   };
@@ -44,14 +47,14 @@ export function teamReport({ from, to } = {}) {
   const commitsOf = (userId) => {
     let commits = commitsByUser.get(userId);
     if (!commits) {
-      commits = db.getCommits(userId);
+      commits = store.getCommits(userId);
       commitsByUser.set(userId, commits);
     }
     return commits;
   };
   /** @type {Map<string, TeamReportRow>} */
   const buckets = new Map();
-  for (const { userId, ...entry } of db.getAllEntries(from, to)) {
+  for (const { userId, ...entry } of store.getAllEntries(from, to)) {
     const code = TT.entryProjectCode(catalog, entry);
     const key = userId + '\u0000' + (code ?? '');
     let bucket = buckets.get(key);
