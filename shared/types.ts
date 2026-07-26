@@ -486,6 +486,16 @@ export interface PasswordSetRequest {
 export interface OkResponse {
   ok: boolean;
 }
+/**
+ * SB-065 / SB-085 — POST /api/mirror/acknowledge. `cleared` is false when there was no
+ * block to clear (someone else got there first, or the caller guessed); `path` is the
+ * mirror file whose on-disk bytes were adopted as the new stamp.
+ */
+export interface MirrorAcknowledgeResponse {
+  ok: boolean;
+  cleared: boolean;
+  path: string;
+}
 export interface UsersResponse {
   users: User[];
 }

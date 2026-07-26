@@ -20,8 +20,14 @@ import { TopBar } from './TopBar';
 import { useSession } from '../hooks/useSession';
 import { useToasts } from '../hooks/useToasts';
 import { useServerSync } from '../hooks/useServerSync';
-import type { AppState } from '../../../shared/types';
+import type { AppState, MirrorBlock } from '../../../shared/types';
 import type { UiActions, Route, TaskModalInit } from '../types';
+
+/** Same refusal? Path + first-detection instant identify a block; nothing else changes. */
+function sameBlock(a: MirrorBlock | null | undefined, b: MirrorBlock | null | undefined): boolean {
+  if (!a || !b) return !a && !b;
+  return a.path === b.path && a.detectedAt === b.detectedAt;
+}
 
 function makeCode(name: string): string {
   const words = name
@@ -42,7 +48,19 @@ function makeCode(name: string): string {
 export function App() {
   const { state, setState, load } = useSession();
   const { toasts, toast } = useToasts();
-  const sync = useServerSync(state, toast, load);
+  // SB-085: the save response is where a mirror refusal first shows up. Fold it into the
+  // session state (`mirrorBlocked` is NOT one of useServerSync's SYNC_KEYS, so this cannot
+  // bounce back at the server as a patch) and bail out when nothing changed, so an
+  // unblocked install re-renders exactly never.
+  const setMirrorBlocked = React.useCallback(
+    (block: MirrorBlock | null) =>
+      setState((current) => {
+        if (!current) return current;
+        return sameBlock(current.mirrorBlocked, block) ? current : { ...current, mirrorBlocked: block };
+      }),
+    [setState],
+  );
+  const sync = useServerSync(state, toast, load, setMirrorBlocked);
   const [route, setRoute] = React.useState<Route>({ view: 'today' });
   const [taskModal, setTaskModal] = React.useState<TaskModalInit | null>(null);
   const [lang, setLang] = React.useState<string | null>(localStorage.getItem('tt_lang') || null);
@@ -300,6 +318,22 @@ export function App() {
     },
     setCurrency: (currency) => updateState((current) => ({ ...current, settings: { ...current.settings, currency } })),
     setMdDir: (dir) => updateState((current) => ({ ...current, settings: { ...current.settings, mdDir: dir } })),
+    // SB-065/SB-085: consent to overwrite. The server adopts the bytes on disk as its stamp
+    // and clears the block; nothing is written until the next save. Deliberately NOT a
+    // reload — `load()` hands useServerSync a fresh object for every synced key, which would
+    // PUT the whole state straight back and turn "acknowledge" into "overwrite now".
+    acknowledgeMirror: () =>
+      api
+        .acknowledgeMirror()
+        .then(() => {
+          setMirrorBlocked(null);
+          toast(TT.t('mirror unblocked — the next save overwrites the file'));
+          return true;
+        })
+        .catch((err: Error) => {
+          toast(err.message);
+          return false;
+        }),
     importMd: (md) => {
       try {
         const parsed = TT.parseMd(md);

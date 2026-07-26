@@ -3,7 +3,7 @@ import TT from '../i18n';
 import { api } from '../api';
 import type { ApiError } from '../api';
 import type { SessionState } from './useSession';
-import type { AppState, StatePatch, StateVersion } from '../../../shared/types';
+import type { AppState, MirrorBlock, StatePatch, StateVersion } from '../../../shared/types';
 
 const SYNC_DEBOUNCE_MS = 700;
 // SDD-002 ruling 4: `commits` rides the same debounced diff as entries. The client
@@ -24,7 +24,16 @@ function copyKey<K extends SyncKey>(dst: StatePatch, src: AppState, key: K) {
 // DC-001: every PUT carries the version we last saw. If someone else saved in
 // between, the server answers 409 and we reload instead of clobbering them —
 // the losing side's un-flushed edits are dropped, which is the point.
-export function useServerSync(state: SessionState, toast: (msg: string) => void, reload: () => void): SyncStatus {
+// SB-085: every mirror-writing response carries the standing refusal, so the save that
+// TRIPS the guard is the moment the client learns about it. Hand it to the App so it lands
+// in AppState — a toast alone is a transient message about a sticky, persisted condition,
+// and the settings row is where it has to stay put until someone acknowledges it.
+export function useServerSync(
+  state: SessionState,
+  toast: (msg: string) => void,
+  reload: () => void,
+  onMirrorBlocked: (block: MirrorBlock | null) => void,
+): SyncStatus {
   const [sync, setSync] = React.useState<SyncStatus>('synced');
   const prevRef = React.useRef<SessionState>(null);
   const pendingRef = React.useRef<StatePatch>({});
@@ -34,6 +43,10 @@ export function useServerSync(state: SessionState, toast: (msg: string) => void,
   // Set when we reload after a conflict, so the incoming state re-baselines the
   // diff instead of being PUT straight back at the server.
   const resyncRef = React.useRef(false);
+  // A queued flush runs the closure it was scheduled with; keep the callback in a ref so a
+  // timer scheduled two renders ago still reports into the current state.
+  const blockedRef = React.useRef(onMirrorBlocked);
+  blockedRef.current = onMirrorBlocked;
   const flush = () => {
     timerRef.current = null;
     if (!Object.keys(pendingRef.current).length) return;
@@ -53,7 +66,14 @@ export function useServerSync(state: SessionState, toast: (msg: string) => void,
         inFlightRef.current = false;
         versionRef.current = res.version;
         setSync(timerRef.current ? 'saving' : 'synced');
-        if (res.mirrorError) toast(TT.t('markdown mirror failed: ') + res.mirrorError);
+        // SB-085: `mirrorBlocked` is present on every mirror-writing response — adopt it
+        // (including the null that means a previous block is gone) so Settings reflects the
+        // server without a reload.
+        if (res.mirrorBlocked !== undefined) blockedRef.current(res.mirrorBlocked);
+        // A guard refusal is not a passing error: point at the place that can clear it
+        // rather than dumping the raw server string into a toast that vanishes.
+        if (res.mirrorBlocked) toast(TT.t('mirror paused — see Settings → Mirror folder'));
+        else if (res.mirrorError) toast(TT.t('markdown mirror failed: ') + res.mirrorError);
       })
       .catch((err: ApiError) => {
         inFlightRef.current = false;

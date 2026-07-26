@@ -7,6 +7,7 @@ import type {
   UsersResponse,
   UserResponse,
   OkResponse,
+  MirrorAcknowledgeResponse,
   TeamReportResponse,
   User,
   Settings,
@@ -68,6 +69,14 @@ export const api = {
   logout: () => request<OkResponse>('POST', '/api/auth/logout'),
   getState: () => request<StateResponse>('GET', '/api/state'),
   putState: (patch: StatePatch) => request<PutStateResponse>('PUT', '/api/state', patch),
+  /**
+   * SB-065: clear a standing mirror refusal. This is NOT a dismiss — it ADOPTS the bytes
+   * currently on disk as TT's stamp, which is consent for the next save to overwrite them.
+   * Nothing is written here, so an acknowledgement made by mistake costs nothing until the
+   * next save. Omit `userId` for your own mirror; admins may pass another user's id.
+   */
+  acknowledgeMirror: (userId?: number) =>
+    request<MirrorAcknowledgeResponse>('POST', '/api/mirror/acknowledge', userId === undefined ? {} : { userId }),
   listUsers: () => request<UsersResponse>('GET', '/api/users'),
   createUser: (u: UserCreateRequest) => request<UserResponse>('POST', '/api/users', u),
   deleteUser: (id: number) => request<OkResponse>('DELETE', '/api/users/' + id),

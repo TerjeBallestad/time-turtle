@@ -32,6 +32,11 @@ export interface UiActions {
   setLanguage: (language: string) => void;
   setCurrency: (currency: string) => void;
   setMdDir: (dir: string) => void;
+  /**
+   * SB-065/SB-085: clear the standing mirror refusal — consent for the next save to
+   * overwrite whatever is on disk. Resolves false (and toasts) when the server said no.
+   */
+  acknowledgeMirror: () => Promise<boolean>;
   importMd: (md: string) => boolean;
   openProject: (code: string) => void;
   /** SDD-002 ruling 4: attest a (week∩month) segment — the server freezes its money. */

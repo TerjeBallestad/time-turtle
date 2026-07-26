@@ -161,6 +161,23 @@ const NO: Record<string, string> = {
   'locked to the server default': 'låst til serverstandarden',
   'the server pins the mirror folder (TT_MD_DIR_LOCK) — change it in the server environment.':
     'serveren låser speilmappen (TT_MD_DIR_LOCK) — endre den i servermiljøet.',
+  // SB-085: the standing mirror refusal (SB-065's guard) in the Mirror folder row. The two
+  // `reason` strings are the server's own wording, translated here by exact match.
+  'mirror paused — see Settings → Mirror folder': 'speiling satt på pause — se Innstillinger → Speilmappe',
+  'mirror unblocked — the next save overwrites the file': 'speiling gjenåpnet — neste lagring overskriver filen',
+  'Mirror paused': 'Speiling satt på pause',
+  'the file changed on disk since Time Turtle last wrote it':
+    'filen er endret på disken siden Time Turtle sist skrev den',
+  'the file was not written by this Time Turtle': 'filen er ikke skrevet av denne Time Turtle',
+  'detected ': 'oppdaget ',
+  'last written by Time Turtle ': 'sist skrevet av Time Turtle ',
+  'never written by Time Turtle': 'aldri skrevet av Time Turtle',
+  'Time Turtle will not overwrite a file it did not write, so it has stopped mirroring this timesheet. Everything you log is still saved here — only the markdown file is frozen. Copy it somewhere safe if it holds changes you need.':
+    'Time Turtle overskriver ikke en fil den ikke har skrevet selv, så speilingen av denne timelisten er stanset. Alt du fører opp lagres fortsatt her — det er bare markdown-filen som er frosset. Ta en kopi av den et trygt sted hvis den inneholder endringer du trenger.',
+  'Adopt the file on disk…': 'Overta filen på disken…',
+  'Nothing is merged: Time Turtle adopts the file exactly as it stands right now, and the next save replaces its contents with the data in this app.':
+    'Ingenting slås sammen: Time Turtle overtar filen nøyaktig slik den står nå, og neste lagring erstatter innholdet med dataene i denne appen.',
+  'Adopt it and overwrite on the next save': 'Overta den og overskriv ved neste lagring',
 };
 
 TT.lang = 'en';

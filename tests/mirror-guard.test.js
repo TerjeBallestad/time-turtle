@@ -249,6 +249,69 @@ describe('mirror never-clobber guard', () => {
     expect((await admin('GET', '/api/state')).json.mirrorBlocked.reason).toMatch(/not written/i);
   }, 30000);
 
+  // SB-085 renders the block in Settings → Mirror folder and translates the server's
+  // `reason` by EXACT string match (the keys in client/src/i18n.ts are the English
+  // strings). Rewording a reason on the server would therefore not break a test or a
+  // type — it would just silently drop Norwegian users back to English mid-sentence. Pin
+  // both wordings to the keys the client actually carries.
+  //
+  // ## Verified red-green: 2026-07-26
+  //   Reworded ONE i18n key ('was not' → 'was NOT') and the test failed on the containment:
+  //     × reports reasons the settings UI can translate verbatim
+  //     AssertionError: expected '// i18n — English (default) + Norwegi…' to contain
+  //       ''the file was not written by this Ti…'
+  it('reports reasons the settings UI can translate verbatim', async () => {
+    const i18n = readFileSync(join(ROOT, 'client', 'src', 'i18n.ts'), 'utf8');
+
+    // (a) no stamp at all — the 2026-07-25 incident's shape
+    const vaultMd = mkdtempSync(join(tmpdir(), 'tt-guard-reason-vault-'));
+    const vaultData = mkdtempSync(join(tmpdir(), 'tt-guard-reason-vault-data-'));
+    writeFileSync(join(vaultMd, 'timesheet-admin.md'), FOREIGN, 'utf8');
+    const fresh = await adminOn((await startServer({ TT_DATA_DIR: vaultData, TT_MD_DIR: vaultMd })).port);
+    await fresh('PUT', '/api/state', { entries: [entryWith('unstamped')] });
+    const unstamped = (await fresh('GET', '/api/state')).json.mirrorBlocked;
+    expect(unstamped.reason).toBe('the file was not written by this Time Turtle');
+    expect(unstamped.lastWrittenAt).toBe(null); // the row says "never written by Time Turtle"
+
+    // (b) TT wrote it once, then someone else did
+    const driftMd = mkdtempSync(join(tmpdir(), 'tt-guard-reason-drift-'));
+    const driftData = mkdtempSync(join(tmpdir(), 'tt-guard-reason-drift-data-'));
+    const drifted = await adminOn((await startServer({ TT_DATA_DIR: driftData, TT_MD_DIR: driftMd })).port);
+    await drifted('PUT', '/api/state', { entries: [entryWith('ours')] });
+    writeFileSync(join(driftMd, 'timesheet-admin.md'), FOREIGN, 'utf8');
+    await drifted('PUT', '/api/state', { entries: [entryWith('theirs')] });
+    const changed = (await drifted('GET', '/api/state')).json.mirrorBlocked;
+    expect(changed.reason).toBe('the file changed on disk since Time Turtle last wrote it');
+    expect(typeof changed.lastWrittenAt).toBe('string'); // the row can date TT's last write
+
+    for (const reason of [unstamped.reason, changed.reason]) expect(i18n).toContain(`'${reason}'`);
+  }, 30000);
+
+  // The settings affordance fires POST /api/mirror/acknowledge blind — the button is drawn
+  // from state that may be a few seconds stale, and a second tab (or the click landing
+  // twice) must not turn into an error the user has to interpret.
+  it('acknowledging with nothing blocked is a no-op, not an error', async () => {
+    const mdDir = mkdtempSync(join(tmpdir(), 'tt-guard-ack-md-'));
+    const dataDir = mkdtempSync(join(tmpdir(), 'tt-guard-ack-data-'));
+    const path = join(mdDir, 'timesheet-admin.md');
+    const admin = await adminOn((await startServer({ TT_DATA_DIR: dataDir, TT_MD_DIR: mdDir })).port);
+
+    const virgin = await admin('POST', '/api/mirror/acknowledge');
+    expect(virgin.status).toBe(200);
+    expect(virgin.json).toEqual({ ok: true, cleared: false, path });
+
+    await admin('PUT', '/api/state', { entries: [entryWith('ours')] });
+    writeFileSync(path, FOREIGN, 'utf8');
+    await admin('PUT', '/api/state', { entries: [entryWith('theirs')] });
+    expect((await admin('POST', '/api/mirror/acknowledge')).json.cleared).toBe(true);
+    // the second press has nothing left to clear, and still answers 200
+    const twice = await admin('POST', '/api/mirror/acknowledge');
+    expect(twice.status).toBe(200);
+    expect(twice.json.cleared).toBe(false);
+    expect((await admin('GET', '/api/state')).json.mirrorBlocked).toBe(null);
+    expect(readFileSync(path, 'utf8')).toBe(FOREIGN); // still not written — consent only
+  }, 30000);
+
   // The block has to outlive the process, or a restart silently re-arms the clobber.
   it('the block survives a server restart', async () => {
     const mdDir = mkdtempSync(join(tmpdir(), 'tt-guard-restart-md-'));
