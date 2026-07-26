@@ -633,6 +633,11 @@ export interface TTModule {
   BACKENDS: Backend[];
   /** SB-056: what a backend may do. Consulted at CALL TIME by server guards and client surfaces alike. */
   backendCapabilities(backend?: string | null): BackendCapabilities;
+  /**
+   * SB-056: why a capability is off under this backend, or null when it is on. Worded once so
+   * the server's 403 body and the client's on-screen explanation cannot drift.
+   */
+  backendOffReason(capability: keyof BackendCapabilities, backend?: string | null): string | null;
   nowMin(): number;
   isRunning(entry: Entry): boolean;
   entryMinutes(entry: Entry): number;

@@ -289,6 +289,29 @@ function commitLedgerError(commits) {
 }
 
 /**
+ * SB-056 / DD-008: the commit capability gate. Returns the refusal message when this request
+ * would CHANGE the ledger under a backend that cannot hold one, or null when it may proceed.
+ *
+ * A CHANGE, not the presence of a ledger: an install that committed weeks under `sqlite` and
+ * then switched keeps re-sending those segments on every debounce, and refusing them would
+ * wedge it forever (see the call site). So the incoming key SET is compared against the stored
+ * one — identical rides along, any difference is refused. Order and duplicates do not matter:
+ * `commitLedgerError` has already rejected a repeated key with a 400 before this runs.
+ *
+ * The wording comes from `TT.backendOffReason` so this and Task 7's on-screen explanation
+ * cannot claim different things.
+ * @param {number} userId @param {any[]} incoming @returns {string | null}
+ */
+function commitCapabilityRefusal(userId, incoming) {
+  const reason = TT.backendOffReason('committing', activeBackend());
+  if (!reason) return null;
+  const stored = new Set(store.getCommits(userId).map((segment) => segment.key));
+  const wanted = new Set(incoming.map((segment) => (segment == null ? undefined : segment.key)));
+  if (stored.size === wanted.size && [...stored].every((key) => wanted.has(key))) return null;
+  return reason;
+}
+
+/**
  * SDD-002 ruling 7 (PLAN-006): the never-referenced true-delete guard, mapped to 409.
  * Archive is the default path; a HARD delete is a code/id ABSENT from the collection-
  * replace PUT (there is no DELETE route). The server allows a hard delete only when the
@@ -552,6 +575,18 @@ app.put('/api/state', requireUser, (req, res) => {
     String(body.settings.backend) !== store.getSettings().backend
   ) {
     return res.status(403).json({ error: 'storage backend is locked by server configuration (TT_BACKEND_LOCK)' });
+  }
+  // SB-056 / DD-008: committing is a CAPABILITY of the backend, and under `vault` there is
+  // nowhere to persist a commit — the ledger belongs in weekly notes, which are phase 3.
+  //
+  // It refuses a CHANGE to the ledger, not its presence, which is the same shape the mdDir
+  // lock takes and for a sharper reason: `useServerSync` re-queues any non-409 failure and
+  // re-arms a 4 s timer forever, so a blanket 403 on `commits` would put anyone who committed
+  // anything BEFORE the switch into a permanent toast loop on every keystroke they log.
+  // Whether those pre-switch segments should still be RENDERED is SB-093, not this guard.
+  if (body.commits !== undefined) {
+    const refusal = commitCapabilityRefusal(req.user.id, body.commits);
+    if (refusal) return res.status(403).json({ error: refusal });
   }
   const expected = body.version;
   if (expected !== undefined && (typeof expected !== 'object' || expected === null)) {
@@ -821,6 +856,12 @@ app.put('/api/users/:id/entries', requireUser, requireAdmin, (req, res) => {
  */
 function segmentLockHandler(verb) {
   return (req, res) => {
+    // SB-056 / DD-008: approve and release are ledger WRITES, so the same capability gate
+    // covers them. Refused outright rather than compared: unlike the collection-replace PUT
+    // above, these are deliberate one-shot verbs — nothing re-sends them on a debounce, so
+    // there is no ride-along to preserve and a flat refusal cannot wedge anything.
+    const off = TT.backendOffReason('committing', activeBackend());
+    if (off) return res.status(403).json({ error: off });
     const id = +req.params.id;
     const key = req.params.key;
     const target = db.findUserById(id);

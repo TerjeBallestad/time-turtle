@@ -128,6 +128,32 @@ TT.BACKENDS = /** @type {import('./types.ts').Backend[]} */ (
  * @param {string | null} [backend] @returns {import('./types.ts').BackendCapabilities}
  */
 TT.backendCapabilities = (backend) => (backend && BACKEND_CAPABILITIES[backend]) || BACKEND_CAPABILITIES.sqlite;
+
+// WHY a capability is off, worded ONCE. The server puts this in the 403 body and the client
+// puts it on screen where the verb used to be, so the two cannot drift in what they claim —
+// and drift here is not cosmetic. SB-056's ruling is that this must not be a hidden disabled
+// button: "switching backends silently losing a shipped feature is the kind of thing that
+// reads as a bug months later. Whatever form it takes, it should say WHY it is off and that
+// phase 3 restores it."
+//
+// English, because the server has no locale. The Norwegian UI translates these in i18n.ts;
+// the CLAIM is what must match, not the bytes.
+/** @type {Record<string, string>} */
+const BACKEND_OFF_REASONS = {
+  committing:
+    'committing is off under the vault backend: the commit ledger lives in weekly notes, which phase 3 adds — a per-machine SQLite ledger would diverge silently (DD-008). Switch back to the sqlite backend to commit.',
+  mdImport:
+    'applying markdown edits is off under the vault backend: the vault’s daily notes are the markdown surface now, and the v2 mirror files this would restore from are no longer maintained (DD-011). Copy and download still work.',
+  mirror:
+    'the markdown mirror is off under the vault backend: the vault’s daily notes are the markdown surface, and two markdown copies of the same hours in one vault is what this avoids (DD-011).',
+};
+/**
+ * Why a capability is unavailable under this backend, or null when it IS available.
+ * @param {keyof import('./types.ts').BackendCapabilities} capability
+ * @param {string | null} [backend] @returns {string | null}
+ */
+TT.backendOffReason = (capability, backend) =>
+  TT.backendCapabilities(backend)[capability] ? null : (BACKEND_OFF_REASONS[capability] ?? null);
 /**
  * @param {Entry} entry
  * @param {VaultTimeSeparator} [separator] a `Settings.vaultTimeSeparator` value name. Defaults to
