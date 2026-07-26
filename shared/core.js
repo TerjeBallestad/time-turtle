@@ -6,6 +6,8 @@
 /** @typedef {import('./types.ts').Task} Task */
 /** @typedef {import('./types.ts').Project} Project */
 /** @typedef {import('./types.ts').Client} Client */
+/** @typedef {import('./types.ts').Rounding} Rounding */
+/** @typedef {import('./types.ts').Settings} Settings */
 /** @typedef {import('./types.ts').Catalog} Catalog */
 /** @typedef {import('./types.ts').ParsedTime} ParsedTime */
 /** @typedef {import('./types.ts').VaultTimeSeparator} VaultTimeSeparator */
@@ -1571,6 +1573,736 @@ TT.writeVaultBlock = function (md, entries, opts) {
   if (parseAnchoredBlock(out, opts).quarantine)
     return { md: input, quarantine: true, reason: 'write-would-corrupt', adopted: false };
   return { md: out, quarantine: false, reason: null, adopted };
+};
+
+// ---- the catalog note: `Time Turtle/Catalog.md` (SB-058) ----
+//
+// The one piece of vault state outside the calendar: clients, projects (rates, billable
+// defaults, archived flags, `Project.vaultNote`), task templates, and the settings the note
+// genuinely owns. FOUR INDEPENDENTLY-ANCHORED SECTIONS, each the same shape as a daily-note
+// block, so `TT.locateVaultBlock` parses them unchanged — the catalog is a CONSUMER of the
+// locator and modifies nothing about it. Everything outside the four regions is Terje's.
+//
+// NOT ONE LINE OF FILE I/O IS HERE. Every function takes a string and returns a string or a
+// model. Finding, opening and safely replacing the real file is SB-057's.
+//
+// WHY THIS FILE IS MONOLITHIC when SDD-003 rejected a monolithic mirror for ENTRIES. Not
+// convenience — CONTENTION. A single mirror is the worst shape for iCloud because every save
+// rewrites the whole file and two machines contend on the same bytes forever, which is why the
+// entries shard per day. Clients, projects and rates change MONTHLY, so the odds of two machines
+// writing this file inside one sync window are negligible. Low write frequency is the whole
+// argument. If the catalog ever becomes a thing that changes several times a day (a per-project
+// timer preset, a per-entry rate override written back), the argument expires and this file has
+// to shard. "Monolithic is fine" is not a general licence here.
+//
+// THE MONEY RULES, each one stated as a refusal because each one silently costs money otherwise:
+//
+//   • WHOLE-CATALOG ATOMICITY, on both sides. One section quarantining quarantines the whole
+//     note, and no section is written. `TT.rateOf` resolves project → client → rate, so a
+//     catalog that returns projects and silently drops clients makes every rate 0 with no error
+//     anywhere. Losing the client/rate catalog is worse than losing a day of entries: refused
+//     beats partial. Enforced in `TT.parseVaultCatalog` / `TT.writeVaultCatalog`.
+//   • UNKNOWN COLUMN → QUARANTINE. UNKNOWN SETTINGS ROW → CARRIED VERBATIM. The asymmetry is
+//     deliberate. A column is a FIELD: dropping one on rewrite loses data with no database
+//     behind it to restore from, because under the vault shape this file IS the database. A row
+//     is DATA: a settings key from a newer TT has to survive a read-write cycle by an older one,
+//     and quarantining on it would freeze the rates over a cosmetic setting. Row-extensible by
+//     construction is also what makes SB-044 adding `vaultColumns` purely additive.
+//   • A NUMBER THAT CANNOT BE READ IS A REFUSAL, NEVER A VALUE. A `Rate` or `Rounding` cell that
+//     does not parse quarantines. It must never become NaN and above all never 0 — a silent 0
+//     rate is the failure mode this whole ticket exists to prevent.
+//
+// TABLES, not the v2 mirror's `- a | b | c` bullet rows, for two independent reasons: the
+// locator REQUIRES a header row and a delimiter row, so a bullet list is not locatable at all,
+// and SB-058's own bar is "a legitimate reference note Terje would be happy to open" — a rates
+// table renders, a bullet list does not.
+//
+// DD-007 HOLDS: headings and column labels are canonical ENGLISH, never localized. They are
+// storage, not UI, exactly as the daily block's headers are.
+
+/**
+ * THE SECTION REGISTRY — the ONE home for every heading name, every column label and every
+ * per-column codec in this note. SB-106 is the feel-gate on the NAMES (section headings, column
+ * labels, whether `Archived` should be a column at all), so a different answer from Terje has to
+ * be a one-place change: nothing below reads a literal heading or label, only this table.
+ *
+ * Each column is `{ label, read, write }` and optionally `when`:
+ *   • `read(cell, row)` decodes the STILL-ESCAPED cell onto the row, returning a quarantine
+ *     reason or null. Cells arrive escaped because that is what `vaultRowCells` produces, and
+ *     structure must be read out of a cell before `TT.decodeCell` collapses the escapes.
+ *   • `write(row)` produces the escaped cell.
+ *   • `when(rows)` decides whether the column is EMITTED at all. Only `Archived` has one: the
+ *     column appears only when at least one row in that table is archived — the emit-when-set
+ *     discipline the v2 mirror's ` | archived` token uses, lifted to the column, so a note with
+ *     nothing archived carries no column for it.
+ *
+ * THE READ SIDE ACCEPTS ANY SUBSET IN ANY ORDER, exactly as the daily block does (SB-045's
+ * vocabulary rule): a note written before a column existed keeps parsing, and a missing column
+ * simply leaves its field at the row default. THE WRITE SIDE EMITS THE CANONICAL SET, which is
+ * where the catalog deliberately DIVERGES from `TT.serializeVaultBlock` — that one re-emits the
+ * block's own headers. Here the model is complete and the file is the only copy, so echoing a
+ * narrower header set would DROP fields that have no database behind them. That is the same
+ * data-loss argument the unknown-column rule makes, in the other direction.
+ */
+const CATALOG_CHECK = BILL_YES; // U+2713 — one check mark in this file, shared with the Bill cell
+/**
+ * A `Rate` cell. A plain non-negative decimal or nothing at all. No thousands separator, no
+ * currency suffix, no sign: those are all shapes a human might type, and every one of them
+ * would have to be GUESSED at, which on this column means guessing at money.
+ */
+const CATALOG_NUMBER_RE = /^\d+(?:\.\d+)?$/;
+const CATALOG_ROUNDING_EXACT = 'exact';
+/** @param {string} cell @returns {{ value: number | null } | { reason: 'catalog-bad-number' }} */
+function readCatalogRate(cell) {
+  // An ABSENT rate is a different fact from a rate of 0: it means INHERIT (a project takes its
+  // client's rate). `TT.rateOf` depends on that distinction, so an empty cell has to reach the
+  // model as null and can never be flattened to 0.
+  if (cell === '') return { value: null };
+  if (!CATALOG_NUMBER_RE.test(cell)) return { reason: 'catalog-bad-number' };
+  return { value: +cell };
+}
+/** @param {number | null | undefined} rate @returns {string} */
+const writeCatalogRate = (rate) => (rate == null ? '' : String(rate));
+/**
+ * A `Rounding` cell — the word `exact`, or a whole number of minutes.
+ *
+ * An EMPTY cell reads as `exact` rather than refusing, and this is the one place a blank is
+ * given a meaning instead of a refusal. `Rounding` has no null in the model (`Rounding` is
+ * `'exact' | number`), and `TT.roundBill` already treats `exact` and 0 identically — so a blank
+ * is not an unreadable number, it is an absent one, and the absent value is spelled `exact`. The
+ * emitter always writes it out, so a TT-written note never has a blank here to interpret.
+ * @param {string} cell @returns {{ value: Rounding } | { reason: 'catalog-bad-number' }}
+ */
+function readCatalogRounding(cell) {
+  if (cell === '' || cell === CATALOG_ROUNDING_EXACT) return { value: CATALOG_ROUNDING_EXACT };
+  if (!/^\d+$/.test(cell)) return { reason: 'catalog-bad-number' };
+  return { value: +cell };
+}
+/**
+ * `0` emits as `exact`, following the v2 mirror's own `client.rounding || 'exact'`. The two
+ * spellings are the same behaviour — `TT.roundBill` reads 0 and `exact` identically — so this
+ * normalises a value rather than changing one.
+ * @param {Rounding} rounding @returns {string}
+ */
+const writeCatalogRounding = (rounding) =>
+  rounding === CATALOG_ROUNDING_EXACT || !rounding ? CATALOG_ROUNDING_EXACT : String(rounding);
+/**
+ * A checkmark cell — exactly the check mark, or exactly blank. Anything else is a hand edit
+ * whose intent TT cannot know on a column that decides billing or visibility, so it refuses
+ * instead of guessing. Same rule as the daily block's `Bill` cell (SB-045).
+ * @param {string} cell @returns {{ value: boolean } | { reason: 'catalog-bad-flag-cell' }}
+ */
+function readCatalogFlag(cell) {
+  if (cell === CATALOG_CHECK) return { value: true };
+  if (cell === '') return { value: false };
+  return { reason: 'catalog-bad-flag-cell' };
+}
+/** @param {boolean | undefined} on @returns {string} */
+const writeCatalogFlag = (on) => (on ? CATALOG_CHECK : '');
+/**
+ * The Projects table's `Note` column — `Project.vaultNote`, the note this project is written as
+ * in a daily-note `Project` cell (SB-059). The brackets are composed and stripped HERE, the same
+ * way `vaultProjectCell` does it, because the field holds the note NAME without them.
+ *
+ * A BARE value (no brackets) is honoured as the note name rather than refused, and re-emitted in
+ * canonical `[[…]]` form. Refusing would freeze the whole catalog — and with it every rate — over
+ * a missing pair of brackets on a cosmetic column, which is exactly the trade the unknown-settings
+ * -row rule already settles in the other direction. No value is lost either way.
+ * @param {string} cell still escaped @returns {string | undefined}
+ */
+function readCatalogNote(cell) {
+  if (cell === '') return undefined;
+  const m = WIKILINK_RE.exec(cell);
+  return TT.decodeCell(m ? m[1] : cell);
+}
+/** @param {string | undefined} note @returns {string} */
+const writeCatalogNote = (note) => (note ? '[[' + TT.encodeCell(note) + ']]' : '');
+
+/** @type {Record<string, import('./types.ts').VaultCatalogSectionName>} */
+const CATALOG_SECTION_NAMES = { clients: 'clients', projects: 'projects', tasks: 'tasks', settings: 'settings' };
+/**
+ * @typedef {{
+ *   label: string,
+ *   id?: string,
+ *   when?: (rows: any[]) => boolean,
+ *   read: (cell: string, row: any) => import('./types.ts').VaultQuarantineReason | null,
+ *   write: (row: any) => string,
+ * }} CatalogColumn
+ */
+/**
+ * Column FACTORIES. Every column in this registry is one of four shapes, and each shape is built
+ * here exactly once — so a rule added to a column type reaches every column of that type instead
+ * of reaching the copy that happened to be edited.
+ *
+ * That is not cosmetic on this file. `Rate` and `Archived` each appeared as a byte-identical
+ * literal in BOTH money tables, which is a live drift path: a guard tightened on the Clients copy
+ * and not the Projects one is a rule that silently holds for half the money.
+ *
+ * `codec` is the read half's `{ value } | { reason }` pair — the one place the refusal is
+ * unwrapped, so no column can forget to propagate one.
+ * @param {string} label @param {string} field @param {{ id?: boolean }} [opts] @returns {CatalogColumn}
+ */
+const catalogTextColumn = (label, field, opts) => ({
+  label,
+  ...(opts && opts.id ? { id: field } : {}),
+  read: (cell, row) => ((row[field] = TT.decodeCell(cell)), null),
+  write: (row) => TT.encodeCell(row[field]),
+});
+/**
+ * A column whose codec can REFUSE. The `'reason' in read` unwrap lives here and nowhere else.
+ * @param {string} label @param {string} field
+ * @param {(cell: string) => any} decode @param {(value: any) => string} encode
+ * @param {{ when?: (rows: any[]) => boolean }} [opts] @returns {CatalogColumn}
+ */
+const catalogCodecColumn = (label, field, decode, encode, opts) => ({
+  label,
+  ...(opts && opts.when ? { when: opts.when } : {}),
+  read: (cell, row) => {
+    const read = decode(cell);
+    if ('reason' in read) return read.reason;
+    row[field] = read.value;
+    return null;
+  },
+  write: (row) => encode(row[field]),
+});
+/** The `Rate` column, shared by both money tables — ONE definition, not one per table. */
+const catalogRateColumn = () => catalogCodecColumn('Rate', 'rate', readCatalogRate, writeCatalogRate);
+/**
+ * The `Archived` column, shared by both money tables. Emit-when-set is part of the column's own
+ * definition, so the two tables cannot disagree about when it appears.
+ */
+const catalogArchivedColumn = () =>
+  catalogCodecColumn('Archived', 'archived', readCatalogFlag, writeCatalogFlag, {
+    when: (rows) => rows.some((row) => row.archived),
+  });
+
+/** @type {Record<string, { heading: string, blank: () => any, columns: CatalogColumn[] }>} */
+const CATALOG_SECTIONS = {
+  // THE MONEY TABLE. `Client` is the id the Projects table's `Client` column points at, so a
+  // change to either label moves a reference, not just a word.
+  clients: {
+    heading: 'Clients',
+    blank: () => /** @type {Client} */ ({ id: '', name: '', rate: null, rounding: CATALOG_ROUNDING_EXACT, archived: false }), // prettier-ignore
+    columns: [
+      catalogTextColumn('Client', 'id', { id: true }),
+      catalogTextColumn('Name', 'name'),
+      catalogRateColumn(),
+      catalogCodecColumn('Rounding', 'rounding', readCatalogRounding, writeCatalogRounding),
+      catalogArchivedColumn(),
+    ],
+  },
+  // The other money table, and the home `Project.vaultNote` never had. SB-059 added the field and
+  // its wikilink rendering, then SB-069 froze the v2 mirror — so until this column existed the
+  // field survived no round-trip anywhere.
+  projects: {
+    heading: 'Projects',
+    blank: () => /** @type {Project} */ ({ code: '', name: '', clientId: null, rate: null, billable: false, archived: false }), // prettier-ignore
+    columns: [
+      catalogTextColumn('Project', 'code', { id: true }),
+      catalogTextColumn('Name', 'name'),
+      {
+        label: 'Client',
+        // An ABSENT client cell is `clientId: null` — a project with no client. Deliberately NOT
+        // the v2 mirror's `—` placeholder: SB-045 ruled `—` out of the vault format, and inside a
+        // table an empty cell is already unambiguous. Not `catalogTextColumn`, which would store
+        // '' and make "no client" and "a client named nothing" the same value.
+        read: (cell, row) => ((row.clientId = cell === '' ? null : TT.decodeCell(cell)), null),
+        write: (row) => (row.clientId ? TT.encodeCell(row.clientId) : ''),
+      },
+      catalogRateColumn(),
+      // `✓`/blank exactly as the daily block's `Bill` is. Note the row default is FALSE, not the
+      // model's "billable unless someone says otherwise": inside a note the cell is explicit, and
+      // a Projects table written with no `Billable` column at all is one where nothing said yes.
+      catalogCodecColumn('Billable', 'billable', readCatalogFlag, writeCatalogFlag),
+      {
+        label: 'Note',
+        read: (cell, row) => {
+          const note = readCatalogNote(cell);
+          if (note !== undefined) row.vaultNote = note;
+          return null;
+        },
+        write: (row) => writeCatalogNote(row.vaultNote),
+      },
+      catalogArchivedColumn(),
+    ],
+  },
+  // Per-user templates (SDD-002) in a note that is a PERSONAL-shape artifact — and personal
+  // implies exactly one user (SDD-003's single-user guard, DD-015), so one templates table is
+  // well defined here in a way it would not be under the team shape.
+  //
+  // STRAIGHT `TT.encodeCell` CELLS, and nothing else. `<br>` and the `- ` prefix are structural
+  // ONLY in the daily block's `Task` cell (SB-045, DD-010), where a label and a note share one
+  // cell; a template has a label and no note, so importing `encodeTaskCell` here by reflex would
+  // put a backslash in front of a label that legitimately starts with `- ` and escape a `<br>`
+  // that has no delimiter to collide with.
+  tasks: {
+    heading: 'Task templates',
+    blank: () => /** @type {Task} */ ({ id: '', label: '', project: null }),
+    columns: [
+      catalogTextColumn('Template', 'id', { id: true }),
+      catalogTextColumn('Label', 'label'),
+      // A template's project is a CODE, not a wikilink: `Task.project` holds the code and the
+      // daily block's wikilink rendering is a property of an ENTRY's cell (SB-059), not of every
+      // column that happens to name a project.
+      //
+      // A code naming no project is CARRIED, not refused — deliberately unlike a project's
+      // dangling clientId. A template is a stamp: logging an hour COPIES its label and project
+      // onto the entry (SDD-002), and no resolver reads money through it, so a stale template
+      // costs one bad autofill rather than a rate of 0. Refusing would also make deleting a
+      // project quarantine the file that holds the rates.
+      { label: 'Project', read: (cell, row) => ((row.project = cell === '' ? null : TT.decodeCell(cell)), null), write: (row) => (row.project ? TT.encodeCell(row.project) : '') }, // prettier-ignore
+    ],
+  },
+  // THE SETTINGS THE NOTE ACTUALLY OWNS — and the exclusion that is a correctness rule rather
+  // than a preference.
+  //
+  // FOUR SETTINGS STAY IN SQLITE UNDER BOTH SHAPES and must never be serialized here. Three of
+  // them — `shape` (`backend` before SB-100), `vaultPaths` and `mdDir` — are how TT FINDS this
+  // note, so putting them in it is a bootstrap loop. `vaultCutover` joins them under DD-017: it
+  // means "the date THIS instance's vault history begins", which is per-instance by definition.
+  // The exclusion is proved by a test asserting on BOTH spellings of the renamed axis, so it
+  // cannot go quietly green.
+  //
+  // AN UNKNOWN KEY IS CARRIED VERBATIM AND RE-EMITTED — not applied, and not quarantined. That
+  // is the exact opposite of the unknown-COLUMN rule above, and deliberately so. A row is
+  // extensible by construction and a column is not: a settings key written by a NEWER TT must
+  // survive a read-write cycle by an OLDER one, and quarantining on it would freeze the file
+  // that holds the rates over a cosmetic setting. It is also what makes SB-044's `vaultColumns`
+  // purely additive whenever it lands — no format change, no migration.
+  //
+  // The rows are therefore the single source of truth for the bytes, IN NOTE ORDER, and
+  // `TT.vaultCatalogSettings` is the typed projection of the keys this TT understands. One
+  // source, one order, no second copy that can drift.
+  settings: {
+    heading: 'Settings',
+    blank: () => /** @type {import('./types.ts').VaultCatalogSettingRow} */ ({ key: '', value: '' }),
+    columns: [catalogTextColumn('Setting', 'key', { id: true }), catalogTextColumn('Value', 'value')],
+  },
+};
+
+/**
+ * The section's canonical header labels for a given set of rows — every column whose `when` says
+ * it applies. ONE definition, so the emitter and anything reasoning about the header set cannot
+ * drift about whether `Archived` is there.
+ * @param {{ columns: CatalogColumn[] }} spec @param {any[]} rows @returns {CatalogColumn[]}
+ */
+const catalogColumnsFor = (spec, rows) => spec.columns.filter((column) => !column.when || column.when(rows));
+
+/**
+ * THE ANCHOR EMITTER for a catalog section — one of exactly TWO places in this file that decide
+ * how the catalog's revision counter reaches and leaves the bytes (the reader is
+ * `catalogRevisionOf`). SB-104 is open on WHICH counter a per-file arbiter compares, and this
+ * pair is why the ruling is a one-place change: under both live options the sections each carry a
+ * revision line and the bytes are identical, and only the BUMP rule differs — which lives in
+ * SB-057's arbitration, not here.
+ *
+ * Delegates the line itself to `vaultRevisionLine` and the digest to `vaultPayloadDigest`, the
+ * daily block's sole emitter and sole hash. DD-009's digest is PER BLOCK, and that is decisive
+ * here rather than incidental: one file-level revision line spanning four tables would leave the
+ * Projects table with no digest of its own, so an Obsidian diff-merge (SB-051) that rewrites a
+ * RATE would be undetectable. On the one file where a silent rewrite costs money, the per-section
+ * digest is the reason the format looks like this.
+ *
+ * @param {import('./types.ts').VaultCatalogSectionName} section
+ * @param {any[]} rows
+ * @param {{ revision?: number }} [opts]
+ * @returns {string} the region bytes — `## <Heading>` through the revision line, no trailing newline
+ */
+TT.serializeVaultCatalogSection = function (section, rows, opts) {
+  const spec = CATALOG_SECTIONS[section];
+  const list = rows || [];
+  const columns = catalogColumnsFor(spec, list);
+  const revision = opts && opts.revision != null ? opts.revision : 1; // a first write starts at 1
+  const labels = columns.map((column) => column.label);
+  const lines = ['## ' + spec.heading, '', vaultRow(labels), '|' + labels.map(() => '---').join('|') + '|'];
+  for (const row of list) lines.push(vaultRow(columns.map((column) => column.write(row))));
+  // No totals row: the daily block's exists because a day has hours to add up, and this table has
+  // nothing to total. `lines.slice(2)` is therefore exactly the payload the digest covers —
+  // header, delimiter, data rows — taken before the blank line and the anchor are appended.
+  lines.push('', vaultRevisionLine(revision, vaultPayloadDigest(lines.slice(2))));
+  return lines.join('\n');
+};
+
+/**
+ * Parse ONE catalog section out of a note, or refuse. Locates with the SHARED
+ * `TT.locateVaultBlock` — same anchors, same hard stop at the next heading, same per-table
+ * digest — and then reads the table through the section registry.
+ *
+ * The whole-note entry point is `TT.parseVaultCatalog`, which is what enforces whole-catalog
+ * atomicity and the cross-section rules. This one is exposed because each half has to be
+ * testable on its own, and because SB-057 reporting "the Projects section is quarantined" is
+ * more use to a human than "the catalog is quarantined".
+ *
+ * @param {string} md @param {import('./types.ts').VaultCatalogSectionName} section
+ * @returns {import('./types.ts').VaultCatalogSectionResult}
+ */
+TT.parseVaultCatalogSection = function (md, section) {
+  const spec = CATALOG_SECTIONS[section];
+  const loc = TT.locateVaultBlock(md, { heading: spec.heading });
+  // propagated UNCHANGED, plus the section name — the locator owns its reasons, and a shared
+  // reason like 'no-heading' only becomes actionable once you know WHICH heading
+  if (loc.quarantine) return { quarantine: true, reason: loc.reason, section };
+  const lines = String(md == null ? '' : md).split('\n');
+
+  // the header row IS the schema (SB-045), read against this section's vocabulary
+  const headers = vaultRowCells(lines[loc.headerLine]);
+  /** @type {CatalogColumn[]} */
+  const columns = [];
+  for (const label of headers) {
+    const key = label.toLowerCase();
+    const column = spec.columns.find((candidate) => candidate.label.toLowerCase() === key);
+    // UNKNOWN COLUMN → QUARANTINE. A column is a field, and dropping one on rewrite is data loss
+    // with no database behind it to restore from. See the header comment for the row/column
+    // asymmetry this is one half of.
+    if (!column) return { quarantine: true, reason: 'unknown-header', section };
+    if (columns.includes(column)) return { quarantine: true, reason: 'duplicate-header', section };
+    columns.push(column);
+  }
+  // The identity column names the model field it fills, so "which cell is the id" and "which
+  // field is the id" are ONE fact. Held apart they typecheck independently (rows are `any` across
+  // four model types), and a rename of one would make `row[idField]` undefined — the blank-id
+  // refusal would stop firing and every row would collide on `undefined`, quarantining the
+  // section as a duplicate-id for entirely the wrong reason.
+  const idColumn = spec.columns.find((column) => column.id);
+  const idField = idColumn ? idColumn.id : '';
+  // A section with no id column declared cannot produce a referenceable row at all. Reported as
+  // the row-level fact rather than as a header problem, because that is what it costs.
+  if (idColumn && !columns.includes(idColumn)) return { quarantine: true, reason: 'catalog-missing-id', section };
+
+  /** @type {any[]} */
+  const rows = [];
+  const seen = new Set();
+  for (const ln of loc.rowLines) {
+    const cells = vaultRowCells(lines[ln]);
+    if (cells.length !== columns.length) return { quarantine: true, reason: 'row-cell-count', section };
+    const row = spec.blank();
+    for (let c = 0; c < columns.length; c++) {
+      const reason = columns[c].read(cells[c], row);
+      if (reason) return { quarantine: true, reason, section };
+    }
+    if (idField) {
+      const id = row[idField];
+      // A row with no identity can be neither referenced nor rewritten, and dropping it silently
+      // is how a client disappears out of the file that resolves the rates.
+      if (id === '') return { quarantine: true, reason: 'catalog-missing-id', section };
+      // Under the vault shape there is no database uniqueness constraint behind this file, so the
+      // parse is the only place a duplicate can be caught. Resolution takes the FIRST match
+      // (`TT.projectOf`, `TT.clientOf`), which would make the second row invisible rather than
+      // visibly wrong — the quiet direction, and therefore the one to refuse.
+      if (seen.has(id)) return { quarantine: true, reason: 'catalog-duplicate-id', section };
+      seen.add(id);
+    }
+    rows.push(row);
+  }
+
+  return {
+    quarantine: false,
+    section,
+    heading: loc.heading,
+    revision: loc.revision,
+    headers,
+    rows,
+    verified: loc.verified,
+  };
+};
+
+/**
+ * The settings keys the catalog note carries, and the ONLY ones it may.
+ *
+ * `currency` and `language` are free text (`putSettings` writes them as given).
+ * `vaultTimeSeparator` is an ENUM, validated against `TT.TIME_SEPARATOR_VALUES` — the one home
+ * of that vocabulary — because an unrecognised value would read back as junk even though
+ * `TT.timeSeparator` would safely emit the default for it.
+ * @type {Record<string, (value: string) => boolean>}
+ */
+const CATALOG_SETTING_KEYS = {
+  currency: () => true,
+  language: () => true,
+  vaultTimeSeparator: (value) => TT.TIME_SEPARATOR_VALUES.includes(value),
+};
+/**
+ * The settings keys the catalog note carries, as a list. The ONE home of that vocabulary, the way
+ * `TT.SHAPES` and `TT.TIME_SEPARATOR_VALUES` are the one home of theirs.
+ *
+ * What is NOT on it is the load-bearing half, and it is an allowlist rather than a denylist on
+ * purpose: `shape` (`backend` before SB-100), `vaultPaths`, `mdDir` and `vaultCutover` stay in
+ * SQLite under both shapes, and an allowlist means a settings key invented later is excluded by
+ * default instead of included by omission.
+ */
+TT.VAULT_CATALOG_SETTING_KEYS = Object.keys(CATALOG_SETTING_KEYS);
+/**
+ * The typed projection of a catalog's settings rows — the keys this TT understands, with a value
+ * it is willing to apply. Everything else stays on the rows and is re-emitted untouched.
+ *
+ * An unrecognised value for a known ENUM key is DROPPED here rather than refused, which is
+ * exactly what `putSettings` does with the same value (`server/src/db.js`): it writes only what
+ * it recognises and silently ignores the rest. One rule, in both directions — and the row itself
+ * survives, so an older TT reading a newer TT's value never rewrites it away.
+ * @param {import('./types.ts').VaultCatalogSettingRow[]} rows @returns {Partial<Settings>}
+ */
+TT.vaultCatalogSettings = function (rows) {
+  /** @type {Record<string, string>} */
+  const out = {};
+  for (const row of rows || []) {
+    const validate = CATALOG_SETTING_KEYS[row.key];
+    if (validate && validate(row.value)) out[row.key] = row.value;
+  }
+  return /** @type {Partial<Settings>} */ (out);
+};
+/**
+ * The settings rows a catalog note should carry for a given settings object — every key the note
+ * OWNS that is actually set, in the registry's canonical order, followed by the rows this TT did
+ * not recognise, in the order the note carried them.
+ *
+ * THE INSTANCE-LOCAL EXCLUSION IS ENFORCED HERE, AND THE SCOPE OF THAT IS EXACTLY ONE FUNCTION —
+ * this one. A `Settings` object handed to it cannot put `shape`, `vaultPaths`, `mdDir` or
+ * `vaultCutover` into the note, because the keys are taken from `CATALOG_SETTING_KEYS` rather than
+ * from the object.
+ *
+ * IT IS NOT A BYTE-BOUNDARY GUARANTEE, and an earlier version of this comment wrongly claimed it
+ * was ("cannot reach the note however it is passed in"). `serializeVaultCatalog` and
+ * `writeVaultCatalog` take settings ROWS, and they emit the rows they are given — which they must,
+ * because the unknown-row rule requires a key from a newer TT to survive a read-write cycle
+ * untouched, and a filter at the byte boundary could not tell that key from a forbidden one. So a
+ * caller that builds rows itself, out of `Object.entries(settings)`, WILL write `vaultPaths` into
+ * the synced note.
+ *
+ * The rule is therefore: **build the rows here.** SB-057, that means you — the bootstrap loop this
+ * exclusion prevents is reachable only by going around this function.
+ *
+ * The read direction has no such hole: `TT.vaultCatalogSettings` projects only allowlisted keys,
+ * so a forbidden row that is already in a note is carried verbatim (Terje's bytes are his) and can
+ * never be applied.
+ * @param {Partial<Settings>} settings
+ * @param {import('./types.ts').VaultCatalogSettingRow[]} [carried] rows from a previous parse
+ * @returns {import('./types.ts').VaultCatalogSettingRow[]}
+ */
+TT.vaultCatalogSettingRows = function (settings, carried) {
+  /** @type {import('./types.ts').VaultCatalogSettingRow[]} */
+  const rows = [];
+  for (const key of Object.keys(CATALOG_SETTING_KEYS)) {
+    const value = settings ? /** @type {Record<string, unknown>} */ (settings)[key] : undefined;
+    if (value != null && value !== '') rows.push({ key, value: String(value) });
+  }
+  for (const row of carried || []) if (!CATALOG_SETTING_KEYS[row.key]) rows.push({ ...row });
+  return rows;
+};
+
+// ---- the whole note: assemble, splice, and refuse as one unit ----
+//
+// WHOLE-CATALOG ATOMICITY IS THE POINT OF THIS LAYER. If any single section quarantines,
+// `parseVaultCatalog` returns a quarantine naming the section and the reason, and
+// `writeVaultCatalog` writes NO section and hands the note back byte-identical.
+//
+// The reason is `TT.rateOf`, which resolves project → client → rate. A catalog that returned
+// projects and silently dropped clients would make every rate 0, with no error anywhere and
+// nothing on screen — an invoice for free work. Losing the client/rate catalog is worse than
+// losing a day of entries, so refused beats partial, in both directions.
+//
+// NO ADOPTION HERE (DD-012 is deliberately not extended to this note). The daily note needs
+// adoption because Terje hand-writes daily notes; the catalog is a file TT owns end to end, and a
+// `## Clients` heading in some unrelated note is not an invitation to claim it. A missing section
+// is reported as a missing section — whether to CREATE the note is a write decision, and it is
+// SB-057's, with the bytes already available from `TT.serializeVaultCatalog`.
+/**
+ * The sections, in the order a NEW note is written. An EXISTING note keeps its own order: the
+ * splice puts each section back where it was, so rearranging the note is Terje's to do.
+ * @type {import('./types.ts').VaultCatalogSectionName[]}
+ */
+const CATALOG_ORDER = [
+  CATALOG_SECTION_NAMES.clients,
+  CATALOG_SECTION_NAMES.projects,
+  CATALOG_SECTION_NAMES.tasks,
+  CATALOG_SECTION_NAMES.settings,
+];
+/**
+ * The H1 a note TT creates from scratch opens with. In the registry with everything else SB-106
+ * gates, because whether the note wants a title at all is a taste question and not a parse one —
+ * nothing reads it, the locator's hard stop is unaffected by it, and a note that does not have it
+ * parses exactly the same.
+ */
+const CATALOG_TITLE = '# Time Turtle';
+
+/**
+ * THE ANCHOR READER — the other of the two places that decide how the catalog's revision counter
+ * crosses the bytes (the emitter is `TT.serializeVaultCatalogSection`). SB-104 is open on which
+ * counter a per-file arbiter compares, and this function is where a different ruling lands: today
+ * it demands agreement, and "the file takes the max" would be a one-line change here.
+ *
+ * DISAGREEMENT IS A QUARANTINE, NOT A MAXIMUM. A TT-written catalog cannot carry mixed revisions —
+ * TT writes the note whole, one file, one atomic rename (SB-057's write primitive) — so mixed
+ * revisions mean a merge or a partial hand edit. Reconciling to the max would silently adopt
+ * whichever half won, on the file that holds the rates.
+ *
+ * The counter is NOT bumped anywhere in this file. When a write bumps it is SB-057's arbitration
+ * to rule on, exactly as `TT.writeVaultBlock` leaves it.
+ * @param {import('./types.ts').VaultCatalogSectionParse[]} sections
+ * @returns {{ revision: number } | { reason: 'catalog-revision-mismatch' }}
+ */
+function catalogRevisionOf(sections) {
+  const revision = sections.length ? sections[0].revision : 1;
+  for (const section of sections) if (section.revision !== revision) return { reason: 'catalog-revision-mismatch' };
+  return { revision };
+}
+
+/**
+ * Serialize a whole catalog note — the bytes of a note that does not exist yet. SB-057 needs
+ * exactly this for the first-boot case: producing the bytes is here, writing them is there.
+ *
+ * `catalog.settings` is the ROWS (see `TT.vaultCatalogSettingRows`), not a `Settings` object, so
+ * that the keys this TT does not know survive whatever the caller does with the typed half.
+ * @param {{ clients?: Client[], projects?: Project[], tasks?: Task[], settings?: import('./types.ts').VaultCatalogSettingRow[], revision?: number }} catalog
+ * @param {{ revision?: number }} [opts]
+ * @returns {string}
+ */
+TT.serializeVaultCatalog = function (catalog, opts) {
+  const source = catalog || {};
+  const revision = (opts && opts.revision != null ? opts.revision : source.revision) ?? 1;
+  const lines = [CATALOG_TITLE, ''];
+  for (const section of CATALOG_ORDER) {
+    // THE SAME N INTO EVERY SECTION. One catalog-wide counter, written identically four times —
+    // the catalog is the unit of change and the section is not.
+    // `|| []` is right HERE and wrong in `writeVaultCatalog`: this composes a note that does not
+    // exist yet, so a section the caller did not supply is genuinely empty. There is no prior
+    // content for an absent key to mean "leave alone".
+    lines.push(TT.serializeVaultCatalogSection(section, source[section] || [], { revision }), '');
+  }
+  return lines.join('\n');
+};
+
+/**
+ * Parse a whole catalog note into a model, or refuse — as ONE unit. Any section quarantining
+ * quarantines the note.
+ * @param {string} md @returns {import('./types.ts').VaultCatalogParseResult}
+ */
+TT.parseVaultCatalog = function (md) {
+  const input = String(md == null ? '' : md);
+  /** @type {import('./types.ts').VaultCatalogSectionParse[]} */
+  const sections = [];
+  for (const section of CATALOG_ORDER) {
+    const parsed = TT.parseVaultCatalogSection(input, section);
+    if (parsed.quarantine) return parsed; // named, with its section — no partial catalog escapes
+    sections.push(parsed);
+  }
+  // structural first: a revision disagreement is a fact about the NOTE, and diagnosing a
+  // dangling reference inside a note that has plainly been merged would name the wrong problem
+  const counter = catalogRevisionOf(sections);
+  if ('reason' in counter) return { quarantine: true, reason: counter.reason, section: null };
+
+  // Looked up BY NAME, never by position. `CATALOG_ORDER` is the order a new note is WRITTEN in —
+  // a presentation choice SB-106 gates — and positional destructuring would silently swap clients
+  // and projects the day that list is reordered: the dangling-client check would then scan the
+  // wrong table, and not one BYTE golden would notice.
+  /** @param {import('./types.ts').VaultCatalogSectionName} name @returns {any[]} */
+  const rowsOf = (name) => {
+    const found = sections.find((section) => section.section === name);
+    // unreachable: `sections` was just filled from CATALOG_ORDER, which is these four names. The
+    // narrowing is the point — a section added to the type without being added to CATALOG_ORDER
+    // should stop here rather than hand back an undefined table.
+    if (!found) throw new Error('catalog section not parsed: ' + name);
+    return found.rows;
+  };
+  const clients = /** @type {Client[]} */ (rowsOf(CATALOG_SECTION_NAMES.clients));
+  const projects = /** @type {Project[]} */ (rowsOf(CATALOG_SECTION_NAMES.projects));
+  // THE CROSS-SECTION RULE, and the one this whole ticket exists for. A `Project.clientId` naming
+  // a client the Clients table does not contain round-trips PERFECTLY — the bytes are identical
+  // both ways — while `TT.rateOf` returns 0 for every project on that client. SB-048 taught this
+  // exact blindness the expensive way (a byte-green mirror golden beside a `commitSnapshot` that
+  // returned null), and byte equality is structurally incapable of seeing it.
+  //
+  // A DECISION, not a fall-through: it QUARANTINES. Under the vault shape there is no database to
+  // reconcile a dangling id against — this file IS the database — so the only alternatives are
+  // resolving to 0 (an invoice for free work) or dropping the reference (the same, silently). A
+  // dangling clientId is a catalog a human has to look at.
+  const ids = new Set(clients.map((client) => client.id));
+  for (const project of projects)
+    if (project.clientId && !ids.has(project.clientId))
+      return { quarantine: true, reason: 'catalog-dangling-client', section: CATALOG_SECTION_NAMES.projects };
+
+  return {
+    quarantine: false,
+    clients,
+    projects,
+    tasks: /** @type {Task[]} */ (rowsOf(CATALOG_SECTION_NAMES.tasks)),
+    settings: /** @type {import('./types.ts').VaultCatalogSettingRow[]} */ (rowsOf(CATALOG_SECTION_NAMES.settings)),
+    revision: counter.revision,
+    // one unverified section leaves the NOTE unverified: the catalog is the unit of change, so a
+    // partly-verified catalog is not a thing SB-057's arbitration should be offered
+    verified: sections.every((section) => section.verified),
+  };
+};
+
+/**
+ * Write a catalog into an existing note, leaving every byte outside the four regions untouched —
+ * an H1, prose above the first section, notes between sections, anything below the last one.
+ * The same guarantee `TT.writeVaultBlock` gives a daily note.
+ *
+ * THE GATE IS THE PARSER, NOT JUST THE LOCATOR, and it runs on both sides:
+ *   • the INPUT is parsed whole, so it is impossible to reach a write from a note TT cannot read.
+ *     A quarantined catalog is left exactly as it is for a human to resolve (SB-057's surface),
+ *     which is also why "fix the dangling client by writing over it" is deliberately not a path.
+ *   • the OUTPUT is parsed back before it is returned — the lesson PLAN-009's end-gate review
+ *     paid for. Anything that would not survive the round-trip is refused as `write-would-corrupt`
+ *     with the input handed back untouched, rather than reported as a successful write that froze
+ *     the note against TT until a human repaired it by hand.
+ *
+ * The revision is NOT bumped here: `opts.revision` sets it, and absent, the note's own counter is
+ * re-emitted unchanged. When a write bumps it is SB-057's arbitration.
+ * @param {string} md @param {{ clients?: Client[], projects?: Project[], tasks?: Task[], settings?: import('./types.ts').VaultCatalogSettingRow[], revision?: number }} catalog
+ * @param {{ revision?: number }} [opts]
+ * @returns {import('./types.ts').VaultCatalogWriteResult}
+ */
+TT.writeVaultCatalog = function (md, catalog, opts) {
+  const input = String(md == null ? '' : md);
+  const source = catalog || {};
+  const parsed = TT.parseVaultCatalog(input);
+  if (parsed.quarantine) return { md: input, quarantine: true, reason: parsed.reason, section: parsed.section };
+  const revision = (opts && opts.revision != null ? opts.revision : source.revision) ?? parsed.revision;
+
+  // Re-locating is not redundant: the parse returns values, not line offsets. Collected for ALL
+  // four sections BEFORE anything is spliced, because a locate that failed halfway through would
+  // otherwise leave the note with two sections rewritten and two not — the partial write this
+  // whole layer exists to make impossible.
+  const lines = input.split('\n');
+  /** @type {{ start: number, end: number, region: string }[]} */
+  const splices = [];
+  for (const section of CATALOG_ORDER) {
+    const loc = TT.locateVaultBlock(input, { heading: CATALOG_SECTIONS[section].heading });
+    if (loc.quarantine) return { md: input, quarantine: true, reason: loc.reason, section };
+    splices.push({
+      start: loc.start,
+      end: loc.end,
+      // AN ABSENT SECTION KEEPS THE NOTE'S OWN ROWS. `??` and not `||`, so the two cases stay
+      // distinguishable: an explicit `[]` still empties the section, and a MISSING key means "I am
+      // not changing this one".
+      //
+      // This is the atomicity rule arriving through the write direction, and it was a real defect
+      // caught by the end-gate review: with `|| []`, `writeVaultCatalog(note, { clients })` — the
+      // exact call a `Partial<VaultCatalog>` signature invites — returned `quarantine: false` and
+      // a note whose Projects, Task templates and Settings tables had been emptied. The output
+      // gate cannot see it, because a header-only table parses perfectly well. That is the same
+      // "keeps its clients, loses its projects, every rate resolves to 0" failure this whole layer
+      // is written about, reported as a successful write, on the file that IS the database.
+      region: TT.serializeVaultCatalogSection(section, source[section] ?? parsed[section], { revision }),
+    });
+  }
+  // BOTTOM-UP, by the position the section actually occupies in THIS note — so a note whose
+  // author put Settings first keeps that order, and every splice's offsets stay valid because
+  // nothing below it has moved yet. The regions cannot overlap: each one ends at its own revision
+  // line, which the locator already proved sits before the next heading of any level.
+  let out = lines;
+  for (const splice of splices.slice().sort((a, b) => b.start - a.start))
+    out = out.slice(0, splice.start).concat(splice.region.split('\n'), out.slice(splice.end + 1));
+  const written = out.join('\n');
+
+  // The REASON stays `write-would-corrupt` — that is the class, and SB-057 keys on it — but the
+  // SECTION comes from the failed read, because "TT could not read back what it just wrote" is
+  // not a diagnosis anyone can act on without knowing which table it was. A caller handing in a
+  // dangling `clientId` lands here rather than on `catalog-dangling-client`, and the section name
+  // is what makes those two distinguishable on the surface.
+  const gate = TT.parseVaultCatalog(written);
+  if (gate.quarantine) return { md: input, quarantine: true, reason: 'write-would-corrupt', section: gate.section };
+  return { md: written, quarantine: false, reason: null, section: null };
 };
 
 // ---- canonical row string (DD-008 spec obligation — nothing computes this in phase 1) ----

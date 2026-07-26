@@ -1715,13 +1715,20 @@ describe('vault block round-trip (SB-055)', () => {
 
     it('covers every quarantine reason the parser and locator can produce', () => {
       // A guard against a new reason being added without a refusal golden beside it. The
-      // vocabulary's home is the VaultQuarantineReason union in shared/types.ts, so the list
+      // vocabulary's home is the VaultBlockQuarantineReason union in shared/types.ts, so the list
       // is read from there rather than kept as a second hand-maintained copy — and every
       // reason in it must ALSO be emitted somewhere in core.js, which catches a dead one.
+      //
+      // SB-058 SPLIT THE UNION and this guard follows the BLOCK half. The catalog note
+      // (`Time Turtle/Catalog.md`) adds refusals only it can produce, and their goldens live in
+      // tests/catalog.test.js over a catalog note — this file has no catalog to refuse, so a flat
+      // union would have made each guard demand goldens the other file owns. The type a boot scan
+      // switches on is still the single `VaultQuarantineReason`, which is both halves; the
+      // catalog half has the same guard beside its own goldens.
       const produced = new Set(REFUSALS.map(([reason]) => reason));
       const types = readFileSync(new URL('../shared/types.ts', import.meta.url), 'utf8');
-      const union = /export type VaultQuarantineReason =([\s\S]*?);/.exec(types);
-      expect(union, 'VaultQuarantineReason union not found in shared/types.ts').toBeTruthy();
+      const union = /export type VaultBlockQuarantineReason =([\s\S]*?);/.exec(types);
+      expect(union, 'VaultBlockQuarantineReason union not found in shared/types.ts').toBeTruthy();
       const reasons = [...union[1].matchAll(/'([a-z-]+)'/g)].map((m) => m[1]);
       expect(reasons.length).toBe(16);
       const core = readFileSync(new URL('../shared/core.js', import.meta.url), 'utf8');
