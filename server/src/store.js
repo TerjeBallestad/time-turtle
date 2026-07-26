@@ -38,7 +38,7 @@
 // define. That hole is NAMED, not forgotten.
 
 import { activeCapabilities } from './backend.js';
-import { writeMirror } from './markdown.js';
+import { writeMirror, retireMirrors } from './markdown.js';
 
 export {
   // settings
@@ -92,8 +92,13 @@ export {
 /** @param {import('../../shared/types.ts').User} user @returns {string | null} the path written, or null */
 export function mirror(user) {
   if (!activeCapabilities().mirror) {
-    // PLAN-010 task 3 replaces this with retireMirrors(): stopping is only half of DD-011 —
-    // the files already on disk have to stop LOOKING current too.
+    // DD-011, both halves. Stopping is not enough on its own — frozen-but-current-looking is
+    // the one option the ruling names and rejects — so every mirror call under `vault` also
+    // RETIRES what is on disk. Running it from here (rather than once, at the switch) is what
+    // makes DD-011's "the rule must hold against the setting moving" true: it re-resolves the
+    // CURRENT mdDir every time, so re-pointing the folder after the switch retires there too.
+    // Idempotent, and it never throws.
+    retireMirrors();
     return null;
   }
   return writeMirror(user);

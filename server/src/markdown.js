@@ -9,7 +9,7 @@ import { DATA_DIR, MD_DIR, MD_DIR_LOCKED, MD_DIR_FROM_ENV } from './config.js';
 // `writeMirror` only ever runs under `backend: 'sqlite'` — under `vault` the mirror is off
 // entirely (DD-011) — so routing it through `store.js` would imply the mirror has a vault
 // meaning it does not have. Under sqlite the two are the same tables anyway.
-import { getSettings, getClients, getProjects, getTasks, getEntries, getCommits } from './db.js';
+import { getSettings, getClients, getProjects, getTasks, getEntries, getCommits, listUsers } from './db.js';
 
 /** @typedef {{ dir: string, source: 'env-locked' | 'setting' | 'env' | 'default', shadowed: string | null }} MirrorTarget */
 /** @typedef {import('../../shared/types.ts').MirrorBlock} MirrorBlock */
@@ -146,6 +146,79 @@ export function acknowledgeMirrorBlock(path) {
   else delete state.files[path];
   saveGuard(state);
   return true;
+}
+
+// ---- SB-056 / DD-011: retiring the mirror files the toggle leaves behind ----
+//
+// Under `vault` the v2 `|`-mirror stops (see store.mirror). Stopping is only HALF of DD-011,
+// and the half that was explicitly ruled out on its own: files frozen at the moment of
+// cutover, sitting next to the daily notes in the same vault, still LOOKING current, is the
+// stale-restore hazard SB-069 accepted risk on. So the toggle actively retires them.
+//
+// RENAME-ONLY, NEVER AN IN-PLACE REWRITE. This is the answer to the case SB-065's guard
+// creates and this code has to get right ON PURPOSE: retiring a file TT is REFUSING to write.
+// A rename loses no bytes, so it is safe on a file TT cannot prove it owns. A tombstone line —
+// the other shape DD-011 permits — would be a write into exactly that file, which is the one
+// thing the guard exists to forbid. THE RETIRED FILENAME IS THE TOMBSTONE. Nothing below ever
+// opens a candidate for writing.
+//
+// THE SET COMES FROM THE GUARD LEDGER, NOT A GLOB: the keys of `files` (every path TT has
+// written) UNION the keys of `blocked` (every path TT is refusing) UNION `mirrorPath(user)`
+// for every current user under the CURRENT mirror dir. That is the record of what TT actually
+// wrote, wherever it wrote it, so it survives `mdDir` having moved since — and it catches the
+// demo-user files DD-011 asks to sweep without a `timesheet-*.md` glob that could rename a
+// file a human made and TT never touched.
+//
+// WHY THE BLOCK IS CLEARED. Its purpose — do not destroy those bytes — is fully served by the
+// rename. Worse, leaving it standing would WEDGE a later switch back to `sqlite`: writeMirror
+// refuses a standing block forever (see the `standing` check below), so the first sqlite save
+// after a round trip would throw against a file that is not even there any more.
+/** @param {string} path @returns {string} the same path with `.md` stripped, if it had one */
+function withoutMd(path) {
+  return path.endsWith('.md') ? path.slice(0, -3) : path;
+}
+
+/**
+ * Retire every mirror file TT wrote. Idempotent: a retired file is neither stamped nor any
+ * user's mirror path, so it is never a candidate again and a second run renames nothing.
+ * Never throws — a per-file failure is logged and that file keeps its stamp and its block.
+ * @returns {{ from: string, to: string }[]} what was renamed, oldest-first
+ */
+export function retireMirrors() {
+  const guard = loadGuard();
+  const candidates = new Set([...Object.keys(guard.files), ...Object.keys(guard.blocked)]);
+  for (const user of listUsers()) candidates.add(mirrorPath(user));
+
+  const stamp = new Date().toISOString().slice(0, 10);
+  /** @type {{ from: string, to: string }[]} */
+  const retired = [];
+  let touched = false;
+  for (const path of candidates) {
+    if (existsSync(path)) {
+      // `-2`, `-3` … on collision, so a second switch on the same day cannot overwrite the
+      // first day's retirement. renameSync would happily clobber; that is the whole point.
+      let to = `${withoutMd(path)}.retired-${stamp}.md`;
+      for (let n = 2; existsSync(to); n++) to = `${withoutMd(path)}.retired-${stamp}-${n}.md`;
+      try {
+        renameSync(path, to);
+      } catch (err) {
+        // Keep the stamp AND the block: nothing moved, so nothing about this path is settled.
+        console.error(`[time-turtle] could not retire ${path}: ${/** @type {Error} */ (err).message}`);
+        continue;
+      }
+      retired.push({ from: path, to });
+      console.log(`[time-turtle] retired mirror ${path} → ${to}`);
+    }
+    // Reached for a successful rename AND for a path that is already gone. A stamp for a file
+    // that is not there says nothing, and a block on it is the wedge described above.
+    if (guard.files[path] || guard.blocked[path]) {
+      delete guard.files[path];
+      delete guard.blocked[path];
+      touched = true;
+    }
+  }
+  if (retired.length || touched) saveGuard(guard);
+  return retired;
 }
 
 // Mirror one user's timesheet (full catalog + their entries) to a markdown file.

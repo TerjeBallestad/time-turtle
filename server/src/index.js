@@ -14,7 +14,7 @@ import * as db from './db.js';
 import * as store from './store.js';
 // SB-056: `writeMirror` is NOT imported here any more — every mirror write goes through
 // `store.mirror`, which is off under `vault` (DD-011). See store.js.
-import { mirrorTarget, mirrorPath, mirrorBlockFor, acknowledgeMirrorBlock } from './markdown.js';
+import { mirrorTarget, mirrorPath, mirrorBlockFor, acknowledgeMirrorBlock, retireMirrors } from './markdown.js';
 import { teamReport } from './reports.js';
 import TT from '../../shared/core.js';
 
@@ -24,6 +24,13 @@ import TT from '../../shared/core.js';
 /** @typedef {import('../../shared/types.ts').User} User */
 
 db.seedIfEmpty();
+
+// SB-056 / DD-011: the one-shot boot sweep. NOT optional and not redundant with the sweep
+// store.mirror does on every save — an install switched by `TT_BACKEND=vault` alone never
+// fires a settings write, so without this the mirror files would sit next to the daily notes
+// looking current until somebody happened to save. Idempotent; runs after seedIfEmpty so
+// listUsers() is populated on a first run.
+if (!TT.backendCapabilities(activeBackend()).mirror) retireMirrors();
 
 const app = express();
 app.use(express.json({ limit: '4mb' }));
