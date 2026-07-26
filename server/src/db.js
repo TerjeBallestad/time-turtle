@@ -92,6 +92,36 @@ addColumnIfMissing('entries', 'edited_by_admin', 'INTEGER NOT NULL DEFAULT 0');
 // on-disk rows stay active and the markdown mirror stays byte-identical.
 addColumnIfMissing('clients', 'archived', 'INTEGER NOT NULL DEFAULT 0');
 addColumnIfMissing('projects', 'archived', 'INTEGER NOT NULL DEFAULT 0');
+/**
+ * The mirror slug a user gets ONCE, at creation (and, for rows that predate the column, at the
+ * backfill below). Identical to the expression `mirrorPath` used to evaluate on every write —
+ * keeping it identical is what makes this change move zero files. Never call it on an existing
+ * row: re-deriving is the defect.
+ * @param {{ name?: string | null, email: string }} user @returns {string}
+ */
+function deriveMirrorSlug(user) {
+  return TT.slug(user.name || user.email.split('@')[0]);
+}
+// SB-112: the mirror filename, PINNED. `mirrorPath` (server/src/markdown.js) used to slug
+// `users.name` on every write, which made the filename a function of a mutable field — the one
+// derived identifier in this codebase that was re-derived on read. Every other one is settled at
+// creation and never recomputed (client ids, `TT.projectCode`, task ids — see DC-005), and this
+// column brings the mirror in line with them.
+//
+// BACKFILLED FROM THE CURRENT NAME, WHICH IS WHY IT MOVES NOTHING. The seed expression below is
+// character-for-character what `mirrorPath` computed a moment ago, so every existing user is
+// pinned to the file that is already on disk: no rename, no move, no delete, no new orphan, and
+// every guard-ledger key stays valid. Verified against the live `users` table before shipping —
+// all five rows (Admin, Kari Ansatt, Terje, Terje 2, Review Demo) are pure ASCII, so SB-088's
+// transliteration fold changes none of them and the backfill is a no-op on disk.
+addColumnIfMissing('users', 'mirror_slug', "TEXT NOT NULL DEFAULT ''");
+{
+  const unpinned = /** @type {{ id: number, name: string, email: string }[]} */ (
+    db.prepare("SELECT id, name, email FROM users WHERE mirror_slug = ''").all()
+  );
+  const pin = db.prepare('UPDATE users SET mirror_slug = ? WHERE id = ?');
+  for (const row of unpinned) pin.run(deriveMirrorSlug(row), row.id);
+}
 
 // One-shot v1→v2 data migration (idempotent — guarded by a schema version marker).
 // For every entry: resolve its old task_id against the (old, shared) tasks table and
@@ -647,15 +677,37 @@ export function listUsers() {
 }
 /** @param {UserCreateRequest} user @returns {User | null} */
 export function createUser({ email, name, role, password }) {
+  const cleanEmail = String(email).trim().toLowerCase();
+  const cleanName = String(name).trim();
   const result = db
-    .prepare('INSERT INTO users (email, name, role, password_hash) VALUES (?, ?, ?, ?)')
+    .prepare('INSERT INTO users (email, name, role, password_hash, mirror_slug) VALUES (?, ?, ?, ?, ?)')
     .run(
-      String(email).trim().toLowerCase(),
-      String(name).trim(),
+      cleanEmail,
+      cleanName,
       role === 'admin' ? 'admin' : 'employee',
       hashPassword(password),
+      // SB-112: settled here and never again, so a later rename cannot fork the mirror file.
+      deriveMirrorSlug({ name: cleanName, email: cleanEmail }),
     );
   return findUserById(result.lastInsertRowid);
+}
+
+/**
+ * SB-112: the pinned filename component for this user's markdown mirror, or null if the row is
+ * somehow unpinned (a hand-edited database — the migration covers every row it can see). Read by
+ * `mirrorPath`, which falls back to the old live derivation on null so an unpinned row keeps
+ * writing exactly where it writes today rather than jumping to a new file.
+ *
+ * NOT ON THE WIRE, and not on the `User` type, deliberately: this is a storage detail of one
+ * machine's mirror folder, and DD-015's lesson is that a derived storage fact does not belong in
+ * the envelope just because it was convenient to put it there. `mirrorPath` looks it up.
+ * @param {number} id @returns {string | null}
+ */
+export function getMirrorSlug(id) {
+  const row = /** @type {{ mirror_slug: string } | undefined} */ (
+    db.prepare('SELECT mirror_slug FROM users WHERE id = ?').get(id)
+  );
+  return row && row.mirror_slug ? row.mirror_slug : null;
 }
 /** @param {number} id @param {string} password */
 export function setUserPassword(id, password) {

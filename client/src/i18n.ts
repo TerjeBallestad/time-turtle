@@ -12,7 +12,12 @@ const NO: Record<string, string> = {
   Tasks: 'Oppgaver',
   Clients: 'Kunder',
   General: 'Generelt',
-  'Markdown backend': 'Markdown-backend',
+  // SB-113: was 'Markdown backend' → 'Markdown-backend'. After DD-015/SB-100 "backend" means
+  // `sqlite | vault`, derived from the shape and never selected — so the one place the word
+  // reached a user named the concept it specifically does not mean. This section configures the
+  // markdown MIRROR, which is the word the rest of the surface already uses (Mirror folder,
+  // "mirror paused"), and `speil` is its established Norwegian.
+  'Markdown mirror': 'Markdown-speil',
   // SB-056 / SB-100: the vault settings surface.
   // SB-056 / DD-008 / DD-011: the two capability refusals. The English side of these keys is
   // TT.shapeOffReason's text VERBATIM (shared/core.js) — the server puts the same string in

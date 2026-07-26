@@ -1,4 +1,4 @@
-// Settings: clients, projects, tasks, users (admin), general, vault, markdown backend
+// Settings: clients, projects, tasks, users (admin), general, vault, markdown mirror
 import React from 'react';
 import TT from '../../i18n';
 import { isAdmin } from '../../roles';
