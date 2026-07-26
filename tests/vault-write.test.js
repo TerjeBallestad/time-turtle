@@ -128,39 +128,6 @@ describe('the vault writer (api)', () => {
     expect(parseNote(TODAY).revision).toBe(1);
   });
 
-  it('(2) an entry dated BEFORE the cutover produces no file and no adoption', async () => {
-    // DD-016's hazard, exactly: `TT.seedMd()` dates its demo entries relative to first boot — `T`,
-    // `T-1`, `T-2`, `T-7`, `T-8`, `T-9` — so without this a fresh personal install adopts six of
-    // Terje's real daily notes and writes Fjellheim AS hours into them.
-    //
-    // BOTH DIRECTIONS, because they are protected by different code and only one of them is
-    // protected by `TT.vaultBound`:
-    //   (a) a pre-cutover day whose note EXISTS — untouched, and no anchor inserted;
-    //   (b) a pre-cutover day whose note does NOT exist — and no note is created. This is the one
-    //       the filter itself has to catch: an absent note is otherwise eligible to be written,
-    //       because creating a file loses nothing.
-    const old = TT.addDays(TODAY, -30);
-    const older = TT.addDays(TODAY, -31); // (b): deliberately no note on disk
-    // a REAL daily note of Terje's, adoptable on its face: it carries the heading and a
-    // well-formed table, which is exactly what DD-012 adoption fires on
-    const his = `# ${old}\n\n## ${HEADING}\n\n| Time | Task |\n|---|---|\n| 08:00→09:00 | his own morning |\n\n## Captures\n\nmine\n`;
-    writeFileSync(notePath(old), his);
-    expect(existsSync(notePath(older))).toBe(false);
-    await save([
-      entry('a1', TODAY, 540, 600, 'today’s hour'),
-      entry('old', old, 480, 540, 'pre-cutover'),
-      entry('older', older, 480, 540, 'pre-cutover, no note'),
-    ]);
-    await new Promise((r) => setTimeout(r, 150));
-    expect(readFileSync(notePath(old), 'utf8')).toBe(his); // not one byte, and no anchor inserted
-    expect(readFileSync(notePath(old), 'utf8')).not.toContain('revision:');
-    expect(existsSync(notePath(older)), 'a pre-cutover day was given a daily note').toBe(false);
-    // …and both DID reach SQLite, because a non-vault-bound entry is skipped for the vault, never
-    // refused — a 403 here would be a permanent 4 s toast loop in `useServerSync`
-    const state = await admin('GET', '/api/state');
-    expect(state.json.entries.map((e) => e.id).sort()).toEqual(['a1', 'old', 'older']);
-  });
-
   it('(3) deleting the last entry on a date rewrites that note with an EMPTY block', async () => {
     // Not a deleted file (the note is Terje's, and his other sections are in it) and not an
     // untouched one (the hours really are gone). The block stays, with its header row: no header
@@ -304,6 +271,109 @@ describe('the vault writer (api)', () => {
 //   Restored: 11 passed.
 
 // ---------------------------------------------------------------------------
+// (2) — DAYS FROM BEFORE THE VAULT, lifted out of the shared fixture above.
+//
+// Every assertion here is the one this case has always made; only the way its rows get into
+// SQLite changed. PLAN-015 task 2's route guard now refuses the CREATION of a row on a day older
+// than the vault, and that is correct rather than inconvenient: DD-017 §1 makes a pre-vault day
+// read-only, and a row you can type into that never reaches a daily note is precisely the silent
+// divergence DD-016 and DD-017 exist to kill. So the rows are seeded under `team` and met under
+// `personal` — which is also the only way a real install has pre-vault history in the first place.
+//
+// The WRITER's behaviour, which is what this case is about, is untouched.
+describe('the vault writer: a day from before the vault (DD-016)', () => {
+  let vault = '';
+  let dailyDir = '';
+  let admin = null;
+  let child = null;
+  const notePath = (date) => join(dailyDir, date + '.md');
+  const OLD = TT.addDays(TODAY, -30);
+  const OLDER = TT.addDays(TODAY, -31); // (b): deliberately no note on disk
+
+  beforeAll(async () => {
+    const data = mkdtempSync(join(tmpdir(), 'tt-vw3-data-'));
+    const md = join(data, 'mirror');
+    vault = mkdtempSync(join(tmpdir(), 'tt-vw3-vault-'));
+    dailyDir = join(vault, 'Calendar', 'Daily');
+    mkdirSync(dailyDir, { recursive: true });
+
+    const team = await startServer({ TT_DATA_DIR: data, TT_MD_DIR: md, TT_SEED_DEMO: '0' });
+    const teamAdmin = await adminOn(team.port);
+    const before = await teamAdmin('GET', '/api/state');
+    expect(before.json.shape).toBe('team');
+    expect(
+      (
+        await teamAdmin('PUT', '/api/state', {
+          entries: [entry('old', OLD, 480, 540, 'from before the vault'), entry('older', OLDER, 480, 540, 'no note')],
+          version: before.json.version,
+        })
+      ).status,
+    ).toBe(200);
+    await stopServer(team.child);
+
+    const personal = await startServer({ TT_DATA_DIR: data, TT_MD_DIR: md, TT_SHAPE: 'personal', TT_SEED_DEMO: '0' });
+    child = personal.child;
+    admin = await adminOn(personal.port);
+    const state = await admin('GET', '/api/state');
+    expect(state.json.shape).toBe('personal'); // without this every assertion below is vacuous
+    expect(state.json.settings.vaultCutover).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    expect(OLD < state.json.settings.vaultCutover.slice(0, 10)).toBe(true);
+    expect(
+      (
+        await admin('PUT', '/api/state', {
+          settings: { vaultPaths: { root: vault, daily: 'Calendar/Daily' } },
+          version: state.json.version,
+        })
+      ).status,
+    ).toBe(200);
+  }, 90000);
+  afterAll(async () => {
+    if (child) await stopServer(child);
+    stopAllServers();
+  });
+
+  it('(2) an entry dated BEFORE the cutover produces no file and no adoption', async () => {
+    // DD-016's hazard, exactly: `TT.seedMd()` dates its demo entries relative to first boot — `T`,
+    // `T-1`, `T-2`, `T-7`, `T-8`, `T-9` — so without this a fresh personal install adopts six of
+    // Terje's real daily notes and writes Fjellheim AS hours into them.
+    //
+    // BOTH DIRECTIONS, because they are protected by different code and only one of them is
+    // protected by `TT.vaultBound`:
+    //   (a) a pre-cutover day whose note EXISTS — untouched, and no anchor inserted;
+    //   (b) a pre-cutover day whose note does NOT exist — and no note is created. This is the one
+    //       the filter itself has to catch: an absent note is otherwise eligible to be written,
+    //       because creating a file loses nothing.
+    // a REAL daily note of Terje's, adoptable on its face: it carries the heading and a
+    // well-formed table, which is exactly what DD-012 adoption fires on
+    const his = `# ${OLD}\n\n## ${HEADING}\n\n| Time | Task |\n|---|---|\n| 08:00→09:00 | his own morning |\n\n## Captures\n\nmine\n`;
+    writeFileSync(notePath(OLD), his);
+    expect(existsSync(notePath(OLDER))).toBe(false);
+    // The save that carries them: today's hour is new and editable, the two pre-vault rows ride
+    // along verbatim. This is what a real personal debounce looks like.
+    const state = await admin('GET', '/api/state');
+    const res = await admin('PUT', '/api/state', {
+      entries: [...state.json.entries, entry('a1', TODAY, 540, 600, 'today’s hour')],
+      version: state.json.version,
+    });
+    expect(res.status, JSON.stringify(res.json)).toBe(200);
+    // THE CONTRAST: today's note IS written. Without it, the two absences below are equally well
+    // explained by a vault path that never took.
+    expect(await until(() => existsSync(notePath(TODAY)))).toBe(true);
+
+    await new Promise((r) => setTimeout(r, 150));
+    expect(readFileSync(notePath(OLD), 'utf8')).toBe(his); // not one byte, and no anchor inserted
+    expect(readFileSync(notePath(OLD), 'utf8')).not.toContain('revision:');
+    expect(existsSync(notePath(OLDER)), 'a pre-cutover day was given a daily note').toBe(false);
+    // …and all three are in SQLite, because a non-vault-bound entry is SKIPPED for the vault and
+    // never withheld from the wire — DD-016: read-only, not hidden. `putEntries` is
+    // DELETE-all-then-insert, so a day the server declined to send back would be deleted on the
+    // next keystroke.
+    const after = await admin('GET', '/api/state');
+    expect(after.json.entries.map((e) => e.id).sort()).toEqual(['a1', 'old', 'older']);
+  }, 30000);
+});
+
+// ---------------------------------------------------------------------------
 // DD-017 §2 — A COMMITTED SEGMENT NEVER SPLITS: the ledger wins over the date.
 //
 // PLAN-015 pays a coverage debt, not a code debt. `server/src/vault-write.js` has filtered
@@ -387,14 +457,17 @@ describe('the vault writer: a committed segment stays whole (DD-017 §2)', () =>
   });
 
   it('writes no note for ANY day of a frozen segment — including the ones after the cutover', async () => {
-    // A real save under `personal`: every entry changed, so nothing here can be the identity
-    // diff of case (1) declining to write.
+    // A real save under `personal` — the control entry changed, so nothing here is the identity
+    // diff of case (1) declining to write. The FROZEN rows ride along unchanged, which is not a
+    // convenience: PLAN-015 task 2's guard refuses a CHANGE to a frozen day at the route, so a
+    // save that edited them would 403 and never reach the writer at all. This is exactly the
+    // debounce a real personal client sends — whole state, one ordinary day different.
     const state = await admin('GET', '/api/state');
     const res = await admin('PUT', '/api/state', {
-      entries: ENTRIES.map((e) => ({ ...e, end: e.end + 15 })),
+      entries: ENTRIES.map((e) => (e.id === 'control' ? { ...e, end: e.end + 15 } : e)),
       version: state.json.version,
     });
-    expect(res.status).toBe(200);
+    expect(res.status, JSON.stringify(res.json)).toBe(200);
 
     const cutoverDay = state.json.settings.vaultCutover.slice(0, 10);
     const postCutover = segment.dates.filter((date) => date >= cutoverDay);
@@ -424,7 +497,7 @@ describe('the vault writer: a committed segment stays whole (DD-017 §2)', () =>
     // the entries are still the user's hours and still have to come back on the wire.
     const after = await admin('GET', '/api/state');
     expect(after.json.entries.map((e) => e.id).sort()).toEqual(ENTRIES.map((e) => e.id).sort());
-    const wanted = new Map(ENTRIES.map((e) => [e.id, e.end + 15]));
+    const wanted = new Map(ENTRIES.map((e) => [e.id, e.id === 'control' ? e.end + 15 : e.end]));
     for (const stored of after.json.entries) expect(stored.end, stored.id).toBe(wanted.get(stored.id));
   }, 30000);
 
@@ -437,11 +510,13 @@ describe('the vault writer: a committed segment stays whole (DD-017 §2)', () =>
     const his = `# ${day}\n\n## ${HEADING}\n\n| Time | Task |\n|---|---|\n| 08:00→09:00 | his own morning |\n\n## Captures\n\nmine\n`;
     writeFileSync(notePath(day), his);
     const state = await admin('GET', '/api/state');
+    // Again: only the control day moves. The frozen rows ride along verbatim, because the route
+    // refuses a change to them (PLAN-015 task 2) and a 403 would never reach the writer.
     const res = await admin('PUT', '/api/state', {
-      entries: ENTRIES.map((e) => ({ ...e, end: e.end + 30 })),
+      entries: state.json.entries.map((e) => (e.id === 'control' ? { ...e, end: e.end + 30 } : e)),
       version: state.json.version,
     });
-    expect(res.status).toBe(200);
+    expect(res.status, JSON.stringify(res.json)).toBe(200);
     await new Promise((r) => setTimeout(r, 200));
     expect(readFileSync(notePath(day), 'utf8')).toBe(his); // not one byte, and no anchor inserted
     expect(readFileSync(notePath(day), 'utf8')).not.toContain('revision:');

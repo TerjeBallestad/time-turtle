@@ -1094,6 +1094,11 @@ export interface TTModule {
    * `segmentKey` already takes a date. Under `personal`, `readOnlyDay` is the exact complement of
    * `vaultBound`; `context.admin` is read by the `team` branch and nowhere else.
    */
+  /**
+   * SB-102 / DD-017 §1+§4: why a frozen day refused an edit. The server's 403 body and the
+   * client's toast are the same string; i18n.ts carries the Norwegian against this English.
+   */
+  FROZEN_ENTRY_REFUSAL: string;
   committedOn(date: string, commits?: CommitSegment[] | null): boolean;
   preCutover(date: string, context: VaultRuleContext): boolean;
   frozenSegment(date: string, context: VaultRuleContext): boolean;

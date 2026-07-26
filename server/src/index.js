@@ -630,6 +630,61 @@ function commitCapabilityRefusal(userId, incoming) {
 }
 
 /**
+ * SB-102 / DD-017 §1: the FROZEN-DAY gate. Returns the refusal when this PUT would CHANGE
+ * anything inside a day the personal shape holds read-only, or null when it may proceed.
+ *
+ * SHAPE-GATED AND ROLE-BLIND, and that is the entire point of DD-017. `pinCommittedEntries`
+ * below cannot be reused for this: it runs `if (!admin)` and under `personal` the one user IS
+ * the seeded admin (DD-015 depth 2), so the existing lock never fires for the only person there
+ * is. It also PINS — silently reverting the edit — where this REFUSES, because a personal user
+ * editing their own pre-vault history deserves to be told no rather than to watch a keystroke
+ * evaporate.
+ *
+ * A CHANGE, NOT THE PRESENCE — same shape as `commitCapabilityRefusal` above and for the same
+ * sharp reason. `db.putEntries` is DELETE-all-then-insert and the client PUTs its whole state,
+ * so every frozen entry arrives on every debounce by construction; `useServerSync` re-queues any
+ * non-409 failure and re-arms a 4 s timer forever, so refusing the presence of pre-vault history
+ * would be a permanent toast loop for anyone with any history at all. Strictly worse than no
+ * guard.
+ *
+ * Compared as SETS of canonicalised entries, which catches all four kinds of change at once: a
+ * modified field, a row added, a row removed, and a row MOVED into or out of a frozen day (it is
+ * in one subset and not the other). `TT.entryMatchKey` is the canonical form because it
+ * normalises exactly the way `db.putEntries` does — project null→'', label/note trimmed, billable
+ * truthy→1 — so a stored row re-sent by the client keys identically and cannot false-positive.
+ * The id is prefixed because DD-017 freezes rows, not just their contents.
+ *
+ * `editedByAdmin` is deliberately not in the key: `pinEditedByAdmin` already pins it to the
+ * stored value for every caller, so it cannot be moved through this route anyway.
+ * @param {number} userId @param {any[]} incoming @returns {string | null}
+ */
+function frozenEntryRefusal(userId, incoming) {
+  if (activeShape() !== 'personal') return null;
+  /** The same context `vault-write.js` builds. No `admin` — the personal branch never reads it. */
+  const ctx = {
+    shape: 'personal',
+    vaultCutover: store.getSettings().vaultCutover,
+    commits: store.getCommits(userId),
+  };
+  /** @param {any[] | undefined} entries @returns {string[]} the frozen rows, canonical and sorted */
+  const frozenSet = (entries) => {
+    /** @type {string[]} */
+    const keys = [];
+    for (const entry of entries || []) {
+      if (!entry || typeof entry.date !== 'string') continue;
+      // U+001E, one level up from entryMatchKey's U+001F join, so no id can spell its way
+      // into the date field and collide with a different row.
+      if (TT.readOnlyDay(entry.date, ctx)) keys.push(String(entry.id) + '\u001E' + TT.entryMatchKey(entry));
+    }
+    return keys.sort();
+  };
+  const stored = frozenSet(store.getEntries(userId));
+  const wanted = frozenSet(incoming);
+  if (stored.length === wanted.length && stored.every((key, i) => key === wanted[i])) return null;
+  return TT.FROZEN_ENTRY_REFUSAL;
+}
+
+/**
  * SDD-002 ruling 7 (PLAN-006): the never-referenced true-delete guard, mapped to 409.
  * Archive is the default path; a HARD delete is a code/id ABSENT from the collection-
  * replace PUT (there is no DELETE route). The server allows a hard delete only when the
@@ -919,6 +974,18 @@ app.put('/api/state', requireUser, (req, res) => {
   if (body.commits !== undefined) {
     const refusal = commitCapabilityRefusal(req.user.id, body.commits);
     if (refusal) return res.status(403).json({ error: refusal });
+  }
+  // SB-102 / DD-017 §1: under `personal`, editable ⇔ vault-bound. A day that does not reach a
+  // daily note cannot be typed into — and that has to be enforced HERE, not in the grid: a stale
+  // tab, a second machine and a hand-rolled PUT all arrive at this route. Same compare-not-reject
+  // shape as the guards above, so an unchanged frozen set rides along on every debounce.
+  //
+  // Before any write, and before `reconcileCommits`/`pinCommittedEntries` touch the body, so a
+  // refused PUT writes nothing at all — a 403 raised after `putEntries` is indistinguishable from
+  // outside the process.
+  if (body.entries !== undefined) {
+    const frozen = frozenEntryRefusal(req.user.id, body.entries);
+    if (frozen) return res.status(403).json({ error: frozen });
   }
   const expected = body.version;
   if (expected !== undefined && (typeof expected !== 'object' || expected === null)) {

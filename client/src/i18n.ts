@@ -27,6 +27,17 @@ const NO: Record<string, string> = {
     'innsending er av i den personlige formen: innsendingsloggen hører hjemme i ukenotatene, som kommer i fase 3 — en SQLite-logg per maskin ville sprikt i stillhet (DD-008). Bytt tilbake til lagform for å sende inn.',
   'applying markdown edits is off in the personal shape: the vault’s daily notes are the markdown surface now, and the v2 mirror files this would restore from are no longer maintained (DD-011). Copy and download still work.':
     'å ta i bruk markdown-endringer er av i den personlige formen: dagsnotatene i hvelvet er markdown-flaten nå, og v2-speilfilene dette ville gjenopprettet fra vedlikeholdes ikke lenger (DD-011). Kopier og last ned virker fortsatt.',
+  // SB-102 / DD-017 §1: the frozen-day refusal. Same discipline as the two capability refusals
+  // above and for the same reason — `useServerSync` toasts `err.message`, which is the server's
+  // raw string, so without this key a Norwegian user gets an English sentence at the one moment
+  // the app is telling them no. The English side is TT.FROZEN_ENTRY_REFUSAL VERBATIM
+  // (shared/core.js); if you edit one, edit core.js in the same commit.
+  //
+  // DD-017 §4 governs the words in BOTH languages: it says what is frozen and that the hours are
+  // already saved, it promises no phase-3 import (there is no importer), and neither side says
+  // `cutover` — "før hvelvet ditt" is Terje's ruled "before your vault".
+  'these hours are read-only: the day is from before your vault, or it sits inside a week you committed. They are already saved exactly as they are — Time Turtle keeps them and will not rewrite them.':
+    'disse timene er skrivebeskyttet: dagen er fra før hvelvet ditt, eller den ligger inne i en uke du har sendt inn. De er allerede lagret nøyaktig som de er — Time Turtle beholder dem og skriver dem ikke om.',
   // SB-056 / DD-006: the single-user refusals. These reach the user as a TOAST — setShape
   // surfaces the server's error verbatim — so without these keys a Norwegian admin got an
   // English sentence at the one moment the app is telling them no. English side is

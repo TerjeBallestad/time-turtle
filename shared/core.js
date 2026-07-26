@@ -373,6 +373,25 @@ const SHAPE_OFF_REASONS = {
     'the markdown mirror is off in the personal shape: the vault’s daily notes are the markdown surface, and two markdown copies of the same hours in one vault is what this avoids (DD-011).',
 };
 /**
+ * WHY A FROZEN DAY REFUSED THE EDIT — DD-017 §1's other half, worded once (SB-102).
+ *
+ * NOT a row in SHAPE_OFF_REASONS above, deliberately: nothing here is "off". Committing is a
+ * capability the shape does not have; this is a day that is read-only *because the hours in it
+ * are not the vault's*, in a shape where the two are exact complements (`TT.readOnlyDay` is
+ * `TT.vaultBound` negated). Same discipline though — the server puts this in the 403 body,
+ * `useServerSync` toasts it VERBATIM, and `client/src/i18n.ts` carries the Norwegian with the
+ * English side copied byte-for-byte. Edit one, edit the other in the same commit.
+ *
+ * DD-017 §4 governs every word of it. It says what is frozen and that the hours are already
+ * saved. It does NOT promise that phase 3 will import anything — there is no importer and
+ * §4 forbids implying one. And it never says `cutover` or `pre-cutover`: those are the repo's
+ * words, and Terje's ruled vocabulary for the same fact is "before your vault".
+ * @type {string}
+ */
+TT.FROZEN_ENTRY_REFUSAL =
+  'these hours are read-only: the day is from before your vault, or it sits inside a week you committed. They are already saved exactly as they are — Time Turtle keeps them and will not rewrite them.';
+
+/**
  * Why a capability is unavailable under this shape, or null when it IS available.
  * @param {keyof import('./types.ts').ShapeCapabilities} capability
  * @param {string | null} [shape] @returns {string | null}
