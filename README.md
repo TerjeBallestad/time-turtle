@@ -34,6 +34,19 @@ mirror stops (and the files already written are retired — see below), committi
 the weekly-note rollup lands, and markdown paste-back is off. Nothing yet syncs the SQLite
 index from vault files; that is SB-057.
 
+**One vault, one person.** A vault has a single `Calendar/Daily` tree, so there is no answer to
+whose daily note a second person's hours would land in. The server refuses to add a user while
+`vault` is active, refuses to switch to `vault` while more than one user exists, and — the case
+a copied data dir creates — **refuses to start** when it boots into `vault` with several users
+already stored. Recover from that with:
+
+```sh
+TT_BACKEND_LOCK=1 TT_BACKEND=sqlite tt serve
+```
+
+The lock is the load-bearing half: `TT_BACKEND=sqlite` on its own loses to the stored `vault`
+setting, so only the locked form gets a wedged install back up.
+
 **Roles:**
 
 - `admin` — everything: clients, projects, rates, invoicing, users, settings.

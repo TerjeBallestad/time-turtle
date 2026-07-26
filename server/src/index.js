@@ -103,6 +103,44 @@ app.post('/api/users/:id/password', requireUser, requireAdmin, (req, res) => {
   res.json({ ok: true });
 });
 
+// ---- SB-056 / DD-006 consequence 1: the single-user guard ----
+//
+// A vault belongs to ONE person. There is no sane answer to whose `Calendar/Daily/2026-07-26.md`
+// two employees' entries land in, so this is ruled out by construction rather than deferred to
+// a merge story nobody wants to write. It is also what makes the seam line in store.js correct:
+// identity stays in SQLite under both backends precisely BECAUSE the vault holds one user.
+//
+// THREE DIRECTIONS, and the third is the one the ticket does not spell out:
+//   1. `POST /api/users` under `vault`             → 403 (below)
+//   2. switching TO `vault` with >1 user stored    → 403 (in PUT /api/state)
+//   3. BOOTING with an effective `vault` backend against a data dir that already holds
+//      several users → the server refuses to start (before app.listen).
+//
+// Direction 3 exists because no runtime guard can fire there: nobody wrote anything, the
+// combination simply arrived — a copied data dir, a restored backup, `TT_BACKEND=vault` typed
+// on the wrong machine. Two alternatives were considered and rejected. Falling back to
+// `sqlite` would restart the mirror INTO the vault, re-creating the two-representations hazard
+// DD-011 just closed. A refused-writes read-only mode is more surface, and the recovery still
+// needs a shell. Refusing to start is the loudest available reading of DD-006's "loud and
+// explicit", and it is the only one that cannot be mistaken for working.
+//
+// It is a BACKEND claim, not a role claim — under `vault` there is exactly one user and they
+// are an admin — so its evidence uses an admin session and that is the right evidence here,
+// not a shortcut around the role-evidence rule.
+
+/** The ONLY string that beats a stored `vault` setting. It belongs verbatim in every refusal. */
+const BACKEND_RECOVERY = 'TT_BACKEND_LOCK=1 TT_BACKEND=sqlite';
+const SECOND_USER_REFUSAL =
+  'a vault belongs to one person, so the vault backend allows exactly one user (DD-006): there is no answer to whose daily note a second person’s hours would land in. Switch to the sqlite backend to add users.';
+/** @param {number} count how many users are already stored */
+const backendSwitchRefusal = (count) =>
+  `cannot switch to the vault backend: a vault belongs to one person and this install has ${count} users (DD-006). Delete the others first, or stay on the sqlite backend.`;
+
+/** Is the effective backend one that permits only a single user? @returns {boolean} */
+function singleUserBackend() {
+  return activeBackend() === 'vault';
+}
+
 // ---- state ----
 // Employees never see hourly rates: stripped server-side, not just hidden in the UI.
 /** @param {User} user */
@@ -576,6 +614,13 @@ app.put('/api/state', requireUser, (req, res) => {
   ) {
     return res.status(403).json({ error: 'storage backend is locked by server configuration (TT_BACKEND_LOCK)' });
   }
+  // SB-056 / DD-006 consequence 1, direction 2: refuse to switch TO `vault` while more than one
+  // user exists. Same compare-not-reject shape as the two locks above — the client re-sends the
+  // whole settings object, so this only fires on an actual CHANGE to `vault`.
+  if (body.settings && body.settings.backend === 'vault' && store.getSettings().backend !== 'vault') {
+    const users = db.listUsers().length;
+    if (users > 1) return res.status(403).json({ error: backendSwitchRefusal(users) });
+  }
   // SB-056 / DD-008: committing is a CAPABILITY of the backend, and under `vault` there is
   // nowhere to persist a commit — the ledger belongs in weekly notes, which are phase 3.
   //
@@ -1048,6 +1093,11 @@ app.post('/api/clients/:id/rename', requireUser, requireAdmin, (req, res) => {
 // ---- user management (admin) ----
 app.get('/api/users', requireUser, requireAdmin, (req, res) => res.json({ users: db.listUsers() }));
 app.post('/api/users', requireUser, requireAdmin, (req, res) => {
+  // SB-056 / DD-006 consequence 1, direction 1: refuse a second user while `vault` is on.
+  // Before `db.createUser` is reached, so a refusal really does leave the user table alone.
+  // There is no sane answer to whose Calendar/Daily/2026-07-26.md two employees' entries land
+  // in, which is why this is ruled out by construction rather than deferred to a merge story.
+  if (singleUserBackend()) return res.status(403).json({ error: SECOND_USER_REFUSAL });
   const { email, name, role, password } = req.body || {};
   if (!email || !name || !password) return res.status(400).json({ error: 'email, name and password are required' });
   if (db.findUserByEmail(email)) return res.status(409).json({ error: 'a user with that email already exists' });
@@ -1085,6 +1135,28 @@ const BACKEND_SOURCE = {
   env: 'TT_BACKEND',
   default: 'default',
 };
+
+// SB-056 / DD-006 consequence 1, direction 3: the boot refusal. No runtime guard can fire
+// here — nobody wrote anything, the combination simply ARRIVED (a copied data dir, a restored
+// backup, TT_BACKEND=vault on the wrong machine). Refusing to start is the loudest reading of
+// "loud and explicit", and the only one that cannot be mistaken for working; the rejected
+// alternatives are argued at the single-user guard's comment block above.
+//
+// The recovery is printed VERBATIM because it is not guessable: TT_BACKEND alone loses to the
+// stored setting, so only the lock gets you out.
+{
+  const users = db.listUsers().length;
+  if (singleUserBackend() && users > 1) {
+    console.error(
+      `[time-turtle] refusing to start: the vault backend allows exactly one user (DD-006) and this data dir holds ${users}.`,
+    );
+    console.error(`[time-turtle] recover with:  ${BACKEND_RECOVERY}`);
+    console.error(
+      '[time-turtle] that combination beats the stored backend setting, which TT_BACKEND on its own does not.',
+    );
+    process.exit(1);
+  }
+}
 
 app.listen(PORT, () => {
   const backend = backendTarget();
