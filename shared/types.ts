@@ -469,45 +469,16 @@ export interface VaultEntry extends Entry {
  * Structural (the locator): the two anchors, the `##` hard stop, the region's shape.
  * Schema and row level (the parser): the header vocabulary and each row's cells.
  * Output (the writer): the spliced result would not parse back.
+ *
+ * SB-109: THE MEMBERS AND THEIR PROSE LIVE IN `VAULT_BLOCK_QUARANTINE_REASONS`
+ * (shared/core.js) and this type is derived from that array — one home, and a value the
+ * runtime can hand a test. Add a reason there, not here; the union follows automatically.
+ * The completeness guard in tests/roundtrip.test.js used to scrape this declaration with a
+ * regex, which meant a semicolon in a doc comment truncated it and a member name quoted as
+ * 'no-revision' inflated it — both silently, as a confident wrong count. This very comment
+ * contains both; it is now inert, and roundtrip.test.js says so out loud.
  */
-export type VaultBlockQuarantineReason =
-  // --- locator: the block cannot be bounded ---
-  | 'no-heading'
-  | 'crlf-line-endings'
-  | 'multiple-headings'
-  | 'no-revision'
-  /**
-   * The bottom anchor is THERE — the note carries `` `revision: N …` `` inside the block — but
-   * TT cannot read it, because the digest half is malformed: empty, the wrong length, non-hex,
-   * uppercase, or separated by something other than ` · ` (SB-090). Distinct from `no-revision`
-   * because that one says "the line is missing" about a line the human is looking straight at,
-   * which is the same lie SB-084 fixed for CRLF with a different cause. Distinct from
-   * `digest-mismatch` too — there the token is well-formed and describes different bytes, here
-   * the token is not a token. TT refuses either way and repairs neither (SB-083), it just says
-   * which of the two it is. NOT produced for lines that merely resemble the anchor without
-   * carrying its inline-code span. See `MALFORMED_REVISION_RE` in shared/core.js.
-   */
-  | 'malformed-revision'
-  | 'revision-past-next-heading'
-  | 'multiple-revisions'
-  | 'no-table'
-  | 'unexpected-content-in-block'
-  /**
-   * The bottom anchor's payload digest is present and does NOT match the table it labels —
-   * DD-009. This is the one reason that means "the block is structurally fine and semantically
-   * wrong": Obsidian's diff-merge (SB-051) keeps TT's anchor line and the buffer's rows, so
-   * every other check passes. Never fires on a digest-less block, which is unverified, not
-   * wrong.
-   */
-  | 'digest-mismatch'
-  // --- parser: the schema or a row cannot be read ---
-  | 'unknown-header'
-  | 'duplicate-header'
-  | 'row-cell-count'
-  | 'unparseable-time'
-  | 'bad-bill-cell'
-  // --- writer: what TT would emit is not readable back ---
-  | 'write-would-corrupt';
+export type VaultBlockQuarantineReason = (typeof import('./core.js').VAULT_BLOCK_QUARANTINE_REASONS)[number];
 
 /**
  * SB-058: the refusals that only the CATALOG note can produce (`Time Turtle/Catalog.md`).

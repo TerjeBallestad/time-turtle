@@ -37,9 +37,19 @@
 // with no catalog, spaces and `|` unescaped, an empty Mode cell parsed as `[]`, the passthrough
 // re-added as a fallback, a re-canonicalised header set, and a mirror token for `vaultNote`.
 // ## Verified red-green: 2026-07-26
+// SB-109: the quarantine-reason completeness guard stops scraping prose. It imports
+// `VAULT_BLOCK_QUARANTINE_REASONS` from shared/core.js, which the `VaultBlockQuarantineReason`
+// union is now derived from. RED FIRST on the old guard: a single sentence added to a doc comment
+// inside the union — one semicolon, one member name in single quotes — made it report "expected
+// 10 to be 16", a confident wrong number naming nothing near its cause. That same prose is now
+// permanent (in the array's comments and on the derived type) and the guard is unmoved. RED on
+// the new guard, five ways, each with its own message: a member deleted (15≠16), the list arriving
+// empty (0≠16 — never a quiet pass), a member added with nothing emitting it, a member emitted
+// with no refusal golden, a catalog-only reason leaking into the block half, and a duplicate.
+// ## Verified red-green: 2026-07-27
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
-import TT from '../shared/core.js';
+import TT, { VAULT_BLOCK_QUARANTINE_REASONS } from '../shared/core.js';
 
 // ---- V1 fixture (byte-identical to the pre-SDD-002 golden) ----
 const V1_FIXTURE = [
@@ -1715,9 +1725,20 @@ describe('vault block round-trip (SB-055)', () => {
 
     it('covers every quarantine reason the parser and locator can produce', () => {
       // A guard against a new reason being added without a refusal golden beside it. The
-      // vocabulary's home is the VaultBlockQuarantineReason union in shared/types.ts, so the list
-      // is read from there rather than kept as a second hand-maintained copy — and every
-      // reason in it must ALSO be emitted somewhere in core.js, which catches a dead one.
+      // vocabulary's home is `VAULT_BLOCK_QUARANTINE_REASONS` in shared/core.js, IMPORTED here as
+      // a value — and every reason in it must ALSO be emitted somewhere in core.js, which catches
+      // a dead one. `VaultBlockQuarantineReason` in shared/types.ts is derived from that same
+      // array, so the type and this list cannot disagree by construction.
+      //
+      // SB-109 KILLED THE SCRAPE that used to stand here. It read the union declaration out of
+      // shared/types.ts with `/export type VaultBlockQuarantineReason =([\s\S]*?);/` and matched
+      // members with `/'([a-z-]+)'/g`, so a semicolon anywhere in a doc comment inside the union
+      // truncated the list, and a member name quoted in a comment inflated it. Both were SILENT:
+      // the guard reported a confident wrong number (SB-090 got "6 reasons instead of 16") with
+      // nothing pointing at punctuation, and that author reworded its prose to appease it. A
+      // cleverer regex is the same bug with a longer fuse, so there is no regex — an import
+      // cannot be confused by prose. The doc comment on the derived type in shared/types.ts now
+      // deliberately carries both a semicolon and a quoted reason name, and this test is unmoved.
       //
       // SB-058 SPLIT THE UNION and this guard follows the BLOCK half. The catalog note
       // (`Time Turtle/Catalog.md`) adds refusals only it can produce, and their goldens live in
@@ -1725,12 +1746,22 @@ describe('vault block round-trip (SB-055)', () => {
       // union would have made each guard demand goldens the other file owns. The type a boot scan
       // switches on is still the single `VaultQuarantineReason`, which is both halves; the
       // catalog half has the same guard beside its own goldens.
+      const reasons = VAULT_BLOCK_QUARANTINE_REASONS;
+      // The vocabulary must arrive INTACT or fail loudly — an empty or broken list must never
+      // read as "nothing left to cover". This is the failure mode SB-109 was filed about.
+      expect(Array.isArray(reasons), 'VAULT_BLOCK_QUARANTINE_REASONS is not an array').toBe(true);
+      expect(reasons.every((r) => typeof r === 'string' && /^[a-z][a-z-]*$/.test(r)), `not all reasons are reason codes: ${JSON.stringify(reasons)}`).toBe(true); // prettier-ignore
+      expect(new Set(reasons).size, `duplicate reason in the vocabulary: ${JSON.stringify(reasons)}`).toBe(reasons.length); // prettier-ignore
+      // Pinned, not `toBeGreaterThan(0)`: a pin is what turns "a reason was added" into a
+      // deliberate edit here, and what makes a shrunken list red instead of quietly easier.
+      expect(reasons.length, 'the block quarantine vocabulary changed size — add a refusal golden, then update this pin').toBe(16); // prettier-ignore
+      // The block half must not quietly acquire a catalog reason. tests/catalog.test.js asserts
+      // the same thing from its side by scraping the union text, which this change makes vacuous
+      // there (the members no longer live in the declaration) — so it is asserted here, on the
+      // list itself, where it cannot go vacuous. SB-123 owns that file.
+      expect(reasons.filter((r) => r.startsWith('catalog-')), 'a catalog-only reason leaked into the block vocabulary').toEqual([]); // prettier-ignore
+
       const produced = new Set(REFUSALS.map(([reason]) => reason));
-      const types = readFileSync(new URL('../shared/types.ts', import.meta.url), 'utf8');
-      const union = /export type VaultBlockQuarantineReason =([\s\S]*?);/.exec(types);
-      expect(union, 'VaultBlockQuarantineReason union not found in shared/types.ts').toBeTruthy();
-      const reasons = [...union[1].matchAll(/'([a-z-]+)'/g)].map((m) => m[1]);
-      expect(reasons.length).toBe(16);
       const core = readFileSync(new URL('../shared/core.js', import.meta.url), 'utf8');
       // covered by their own tests in the end-gate review-regression section below.
       // 'no-revision' is on this list as of DD-012: `writeVaultBlock` can no longer produce it,
@@ -1739,7 +1770,11 @@ describe('vault block round-trip (SB-055)', () => {
       // suite above, and in the adoption suite below as the sole gate adoption may act on.
       const elsewhere = new Set(['crlf-line-endings', 'write-would-corrupt', 'no-revision']);
       for (const reason of reasons) {
-        expect(core.includes(`'${reason}'`), `reason declared but never emitted: ${reason}`).toBe(true);
+        // `- 1` discounts the vocabulary's OWN declaration, which now lives in this same file and
+        // would otherwise make "declared but never emitted" trivially true. Exactly one, because
+        // the no-duplicates assertion above says so.
+        const mentions = core.split(`'${reason}'`).length - 1;
+        expect(mentions - 1 >= 1, `reason declared but never emitted: ${reason}`).toBe(true);
         if (elsewhere.has(reason)) continue;
         expect(produced.has(reason), `no refusal golden for reason: ${reason}`).toBe(true);
       }
