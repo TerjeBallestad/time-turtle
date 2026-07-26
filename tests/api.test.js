@@ -12,6 +12,9 @@ import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { freePort } from './util.js';
 import TT from '../shared/core.js';
+// SB-067: the client's own id generator, so the api rung asserts against what the app
+// really mints rather than a hand-copied string that could drift away from it.
+import { nextClientId, derivedClientId } from '../client/src/clientIds.ts';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const SERVER = join(ROOT, 'server', 'src', 'index.js');
@@ -294,6 +297,94 @@ describe('auth + roles', () => {
     const after = await admin('GET', '/api/state');
     expect(after.json.projects.some((p) => p.code === 'PIPE|X')).toBe(false);
     expect(after.json.clients.some((c) => c.id === 'hostile')).toBe(false);
+  });
+});
+
+// SB-067: the duplicate-client-id save-lock, TRIGGERED rather than reasoned about. The
+// ticket established it by reading the code ("worth a test that actually reproduces it"),
+// so this fires the real PUT at a real server and pins what actually comes back: the
+// `clients.id` PRIMARY KEY refuses the second row, `db.transaction` rolls the whole write
+// back, and the caller gets 400. The 400 is the BACKSTOP working — the fix is upstream, in
+// the generator (see client-ids.test.js); `putClients` deliberately stays a plain INSERT so
+// a duplicate can never be silently accepted.
+describe('SB-067: duplicate client ids', () => {
+  it('a PUT carrying two clients with the same id is refused, rolled back, and stays refused on retry', async () => {
+    const admin = session();
+    await admin('POST', '/api/auth/login', { email: 'admin@timeturtle.local', password: 'testpw' });
+    const before = await admin('GET', '/api/state');
+
+    // Exactly the state the positional generator produced: a second client minted onto an
+    // id that is still in use (three clients, delete the middle, add → 'client3' again).
+    const dupe = { id: 'dupe', name: 'First', rounding: 'exact', rate: null, archived: false };
+    const body = { clients: [...before.json.clients, dupe, { ...dupe, name: 'Second' }] };
+
+    const put = await admin('PUT', '/api/state', body);
+    expect(put.status).toBe(400);
+    expect(put.json.error).toMatch(/save failed/);
+    expect(put.json.error).toMatch(/UNIQUE/i);
+
+    // Nothing landed: neither of the two rows, and the rest of the catalog is untouched.
+    const after = await admin('GET', '/api/state');
+    expect(after.json.clients.some((c) => c.id === 'dupe')).toBe(false);
+    expect(after.json.clients.length).toBe(before.json.clients.length);
+
+    // This is the save-LOCK, not a transient blip: the client holds the bad state in
+    // memory and re-sends it on every debounce, so the identical PUT fails again — the
+    // catalog cannot be saved at all until the page is reloaded.
+    const retry = await admin('PUT', '/api/state', body);
+    expect(retry.status).toBe(400);
+
+    // …and a legitimate, unrelated catalog save still works once the duplicate is gone,
+    // proving the lock is the body's fault and not a poisoned server.
+    const clean = await admin('PUT', '/api/state', { clients: [...before.json.clients, dupe] });
+    expect(clean.status).toBe(200);
+    expect((await admin('PUT', '/api/state', { clients: before.json.clients })).status).toBe(200); // restore
+    expect((await admin('GET', '/api/state')).json.clients.some((c) => c.id === 'dupe')).toBe(false);
+  });
+
+  // Fix 2's load-bearing premise, proven against the real server rather than assumed:
+  // swapping an UNREFERENCED client's id in a single ordinary PUT needs no server-side
+  // reconciliation at all, while the same swap on a REFERENCED client is refused — which
+  // is exactly why `derivedClientId` declines to touch a referenced client (that case is
+  // fix 3: an endpoint that re-points Project.clientId in the same transaction).
+  it('an unreferenced client id can be swapped in one PUT; a referenced one is refused', async () => {
+    const admin = session();
+    await admin('POST', '/api/auth/login', { email: 'admin@timeturtle.local', password: 'testpw' });
+    const before = await admin('GET', '/api/state');
+
+    // The ids are the REAL generator's output, not hand-written strings — so this also
+    // pins that what the client actually mints and derives is what the server accepts.
+    const mintedId = nextClientId(before.json.clients);
+    const minted = { id: mintedId, name: 'Ballestad Studios', rounding: 'exact', rate: null, archived: false };
+    const withMinted = [...before.json.clients, minted];
+    expect((await admin('PUT', '/api/state', { clients: withMinted })).status).toBe(200);
+
+    // unreferenced → the derive lands as a plain catalog write
+    const derivedId = derivedClientId(withMinted, before.json.projects, mintedId, 'New client');
+    expect(derivedId).toBe('ballestad-studios');
+    const derived = { ...minted, id: derivedId };
+    expect((await admin('PUT', '/api/state', { clients: [...before.json.clients, derived] })).status).toBe(200);
+    const after = await admin('GET', '/api/state');
+    expect(after.json.clients.some((c) => c.id === mintedId)).toBe(false);
+    expect(after.json.clients.find((c) => c.id === derivedId).name).toBe('Ballestad Studios');
+
+    // now reference it, and the identical swap is a 409 — the old id cannot just vanish
+    const proj = { code: 'BAL', name: 'Bal', clientId: derivedId, rate: null, billable: true, archived: false };
+    expect((await admin('PUT', '/api/state', { projects: [...before.json.projects, proj] })).status).toBe(200);
+    const renamed = await admin('PUT', '/api/state', {
+      clients: [...before.json.clients, { ...derived, id: 'ballestad-as' }],
+    });
+    expect(renamed.status).toBe(409);
+    expect(renamed.json.error).toMatch(new RegExp('cannot delete client ' + derivedId));
+    // …and that refusal is precisely the case `derivedClientId` now declines to attempt.
+    expect(derivedClientId([{ ...derived }], [proj], derivedId, 'New client')).toBeNull();
+
+    // teardown in reference order: project first, then the client
+    expect((await admin('PUT', '/api/state', { projects: before.json.projects })).status).toBe(200);
+    expect((await admin('PUT', '/api/state', { clients: before.json.clients })).status).toBe(200);
+    const end = await admin('GET', '/api/state');
+    expect(end.json.clients.some((c) => c.id === derivedId)).toBe(false);
+    expect(end.json.projects.some((p) => p.code === 'BAL')).toBe(false);
   });
 });
 

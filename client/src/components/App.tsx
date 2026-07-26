@@ -5,6 +5,7 @@ import { Toast, ToastStack } from '../ds';
 import styles from './App.module.css';
 import { api } from '../api';
 import { isAdmin } from '../roles';
+import { nextClientId, derivedClientId } from '../clientIds';
 import { TodayView } from './views/TodayView';
 import { WeekView } from './views/WeekView';
 import { ReportsView } from './views/ReportsView';
@@ -182,7 +183,7 @@ export function App() {
         clients: [
           ...current.clients,
           {
-            id: 'client' + (current.clients.length + 1),
+            id: nextClientId(current.clients),
             name: TT.t('New client'),
             rounding: 'exact',
             rate: null,
@@ -195,6 +196,21 @@ export function App() {
         ...current,
         clients: current.clients.map((client) => (client.id === id ? { ...client, ...patch } : client)),
       })),
+    // SB-067: the name is edited live (per keystroke, above); the ID is derived once, at the
+    // deliberate commit boundary — blur — mirroring ProjectCodeInput's onCommit. Per keystroke
+    // would freeze the id on the first character typed and remount the row (key={client.id})
+    // under the user's cursor. `derivedClientId` returns null unless the client is still on its
+    // minted id AND unreferenced, so this is a no-op for everything else; returning `current`
+    // unchanged means React bails out and useServerSync never sees a diff.
+    commitClientName: (id) =>
+      updateState((current) => {
+        const next = derivedClientId(current.clients, current.projects, id, TT.t('New client'));
+        if (!next) return current;
+        return {
+          ...current,
+          clients: current.clients.map((client) => (client.id === id ? { ...client, id: next } : client)),
+        };
+      }),
     // SDD-002 ruling 7: archive, never delete. Archiving a client hides it from the
     // creation pickers but leaves its projects' clientId INTACT (the old removeClient
     // nulled them — dropped) and keeps history resolving. Restore just un-archives.

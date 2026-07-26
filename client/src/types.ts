@@ -16,6 +16,8 @@ export interface UiActions {
   removeTask: (id: string) => void;
   addClient: () => void;
   updateClient: (id: string, patch: Partial<Client>) => void;
+  /** SB-067: the name is committed (blur) — derive the id from it while the client is still unnamed & unreferenced. */
+  commitClientName: (id: string) => void;
   // SDD-002 ruling 7: clients & projects are ARCHIVED, never deleted — archive hides them
   // from creation pickers but keeps history resolving; restore un-hides them.
   archiveClient: (id: string) => void;

@@ -38,6 +38,11 @@ export function ClientsSection({ state, ui }: SettingsProps) {
           <Input
             value={client.name}
             onChange={(e) => ui.updateClient(client.id, { name: e.target.value })}
+            // SB-067: the id is derived from the name at this commit boundary (see App.commitClientName).
+            onBlur={() => ui.commitClientName(client.id)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') e.currentTarget.blur();
+            }}
             className={st.small}
           />
           <Select
