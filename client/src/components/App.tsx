@@ -343,6 +343,17 @@ export function App() {
       // TT_SHAPE alone never fires a settings write"): `state.shape` reads `personal` while
       // `settings.shape` reads its `team` default, so guarding on the stored value made
       // clicking Team a no-op — no request, no toast, no way out of `personal` from the UI.
+      //
+      // SB-133 LOOKED AT THIS LINE AND LEFT IT ALONE, which is worth saying because the ticket
+      // named it. It is not what swallowed the repair: an install wrongly stamped `team` has an
+      // EFFECTIVE `team`, so clicking Personal differs from it, fires, and moves the install —
+      // pinned by 'an install wrongly stamped team can be moved back' in tests/shape-echo.test.js,
+      // which passed before the fix as well as after. The one gesture this does swallow is
+      // clicking the shape you are ALREADY effectively on, to pin it against the env — and that
+      // is the first-run question SB-098 owns (DD-015 keeps the OPEN state deliberately open, so
+      // writing a row here would answer it on the user's behalf). `state.settings.shape` now
+      // carries the STORED shape and is absent when nothing was chosen, so SB-098 has the
+      // distinction it needs the day it wants to offer that.
       if (shape === (state.shape ?? 'team')) return;
       void api
         .putState({ settings: { ...state.settings, shape } })

@@ -166,7 +166,11 @@ describe('Settings.shape', () => {
     // Whitelisted, not rejected — the enum discipline vaultTimeSeparator already uses.
     expect(put.status).toBe(200);
     const after = await admin('GET', '/api/state');
-    expect(after.json.settings.shape).toBe('team');
+    // SB-133: `undefined`, and this assertion got STRONGER rather than being relaxed. It used to
+    // read `toBe('team')` — the defaulted value, which "stored team" and "nothing stored" both
+    // produced, so it could not actually tell whether `persona` had reached the store. Absent is
+    // the claim the test's own name makes.
+    expect(after.json.settings.shape).toBeUndefined();
     expect(after.json.shape).toBe('team');
   });
 });
@@ -182,7 +186,9 @@ describe('TT_SHAPE_LOCK', () => {
     expect(put.json.error).toMatch(/TT_SHAPE_LOCK/);
 
     const after = await admin('GET', '/api/state');
-    expect(after.json.settings.shape).toBe('team');
+    // SB-133: same strengthening — "the setting does not sneak in" is now literally asserted
+    // (nothing stored) instead of being read off a default that looks identical to a stored `team`.
+    expect(after.json.settings.shape).toBeUndefined();
     expect(after.json.shape).toBe('team');
   });
 
@@ -195,7 +201,10 @@ describe('TT_SHAPE_LOCK', () => {
     expect(put.status).toBe(200);
     const after = await admin('GET', '/api/state');
     expect(after.json.settings.currency).toBe('EUR');
-    expect(after.json.settings.shape).toBe('team');
+    // SB-133: nothing stored, before or after. This install runs on TT_SHAPE + the lock, and the
+    // whole-object round trip that just happened did not turn either of those into a row.
+    expect(after.json.settings.shape).toBeUndefined();
+    expect(after.json.shape).toBe('team');
   });
 
   it('beats a `personal` already stored in the database — the documented recovery', async () => {

@@ -243,6 +243,41 @@ function vaultQuarantinedNotes() {
       detectedAt: row.quarantinedAt ?? null,
     }));
 }
+/**
+ * SB-133: the settings object AS IT GOES ON THE WIRE — `shape` is the value that was CHOSEN,
+ * and ABSENT when nobody has chosen one. `getSettings()` keeps defaulting it to `team` for every
+ * server-side reader, which is right (DD-015: `team` is the safe row); what is wrong is putting
+ * that invented value in front of a client that PUTs the whole object back.
+ *
+ * That round trip was a live defect, not a tidiness point. An install started `TT_SHAPE=personal`
+ * with nothing stored received `shape: 'team'` here, echoed it back with the first vault path
+ * typed into Settings, and STORED it — and a stored value beats the env (SB-100's precedence,
+ * working exactly as designed), so the backend derived to `sqlite` and the vault went quiet while
+ * TT went on accepting hours. No error, no toast, no refusal: the silent divergence this whole
+ * map exists to kill, arriving through the settings page.
+ *
+ * THE SEAM IS HERE AND NOT AT THE WRITE EDGE, because the write edge cannot tell the two apart.
+ * An incoming `shape: 'team'` is either a person choosing Team or a client parroting a default it
+ * was handed, and those are the same bytes; a server-side compare could only guess, and guessing
+ * wrong in one direction stores a choice nobody made while guessing wrong in the other silently
+ * swallows a real one. Nothing that was never SENT has to be guessed about. It also fixes the
+ * class rather than the instance: the next instance-local field with a meaningful default would
+ * do this again. (`mdDir` escapes only because its default is `''`, a value nobody can mean —
+ * see the `getStoredShape` comment in db.js, which is the same distinction one field over.)
+ *
+ * The EFFECTIVE shape is not lost by this: it has its own field, `AppState.shape`, which is what
+ * every client capability check already reads, and `shape?: Shape` in the type has said "absent
+ * behaves as `team` AND is distinguishable from a stored `team`" since SB-100.
+ * @returns {import('../../shared/types.ts').Settings & { mdDir: string }}
+ */
+function wireSettings() {
+  const settings = store.getSettings();
+  const stored = store.getStoredShape();
+  if (stored) return { ...settings, shape: stored };
+  const { shape: _defaulted, ...rest } = settings;
+  return /** @type {import('../../shared/types.ts').Settings & { mdDir: string }} */ (rest);
+}
+
 // Employees never see hourly rates: stripped server-side, not just hidden in the UI.
 /** @param {User} user */
 function stateFor(user) {
@@ -275,7 +310,9 @@ function stateFor(user) {
     // and additive; empty under `team`, which has no vault. No resolution ACTION — SB-103 rules
     // what a human may do about one, and every option there is additive on top of this.
     vaultQuarantined: vaultQuarantinedNotes(),
-    settings: store.getSettings(),
+    // SB-133: `wireSettings()`, never `store.getSettings()` — the defaulted `shape` must not
+    // leave the server, because the client PUTs this object straight back.
+    settings: wireSettings(),
     clients: store.getClients().map(strip),
     projects: store.getProjects().map(strip),
     tasks: store.getTasks(user.id),
@@ -713,11 +750,18 @@ app.put('/api/state', requireUser, (req, res) => {
   // the STORED value rather than rejecting the key — the client PUTs the whole settings object
   // on every currency edit, and a blanket 403 would wedge it: `useServerSync` re-queues any
   // non-409 failure and retries every 4 s forever, so an unchanged value has to ride along.
+  //
+  // SB-133: `getStoredShape()`, and now it really is the stored value the sentence above always
+  // claimed. `getSettings().shape` defaults to `team`, so a locked install with nothing stored
+  // used to let an incoming `team` through this guard and STORE it — a row the lock was there to
+  // prevent, invisible until the day someone removed TT_SHAPE_LOCK and the install moved. The
+  // ride-along is untouched: `stateFor` no longer sends a shape nobody chose, so an unchanged
+  // settings object carries no `shape` key at all, and one that does carries the stored value.
   if (
     shapeLocked() &&
     body.settings &&
     body.settings.shape !== undefined &&
-    String(body.settings.shape) !== store.getSettings().shape
+    String(body.settings.shape) !== store.getStoredShape()
   ) {
     return res.status(403).json({ error: 'the instance shape is locked by server configuration (TT_SHAPE_LOCK)' });
   }
@@ -906,7 +950,9 @@ app.get('/api/users/:id/timesheet', requireUser, requireAdmin, (req, res) => {
   if (!target) return res.status(404).json({ error: 'no such user' });
   res.json({
     user: target,
-    settings: store.getSettings(),
+    // SB-133: the same rule as `stateFor` — both OUTBOUND seams say what was chosen, so no
+    // client anyone writes against either of them can echo a default back as a decision.
+    settings: wireSettings(),
     clients: store.getClients(),
     projects: store.getProjects(),
     tasks: store.getTasks(id),
