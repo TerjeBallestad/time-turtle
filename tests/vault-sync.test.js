@@ -119,9 +119,11 @@ describe('the vault sync engine', () => {
     const after = db.getVaultIndex(notePath());
     const version = db.getVersions(userId).entries;
 
-    // If the skip did not fire, this pass would re-import and mint fresh runtime ids — so the ids
-    // staying put IS the evidence that no parse reached the store. (SB-117 will make ids stable
-    // across a real import too; today they are not, which is what makes this assertion sharp.)
+    // If the skip did not fire, this pass would re-import — and the ids staying put was once the
+    // evidence that no parse reached the store. SB-117 has since made ids stable across a real
+    // import too, so this assertion no longer distinguishes a skip from an import on its own; the
+    // `counts.skip` and the un-bumped version below are what carry the claim now. Kept because a
+    // skip must still not disturb an id, which is a weaker but real statement.
     const idsBefore = db.getEntries(userId).map((e) => e.id);
     const counts = await sync.scanVault();
     expect(counts.skip).toBe(1);
@@ -432,6 +434,171 @@ describe('the vault sync engine', () => {
   });
 });
 
+// ---- SB-117 / DD-019 ruling 3: an import preserves runtime ids ----
+//
+// WHAT THESE PROVE, and it is the actual contract: after an import, a row whose content did not
+// change carries the SAME `entry.id` it carried before. `TimeGrid` keys its rows on that id, so a
+// stable id is what stops the refresh after a 409 from remounting the whole day and destroying the
+// `NoteCell` draft the user is typing into.
+//
+// WHAT THEY CANNOT PROVE: that a caret actually survives. These assert the id, which is the thing
+// the contract is about; a caret surviving is a browser claim and no green run here is evidence for
+// it. Named so nobody reads this block as the ergonomic verdict — that is SB-121's, and it is a
+// feel-gate.
+describe('an import preserves runtime ids (SB-117)', () => {
+  const idOf = (rows, label) => rows.find((row) => row.label === label).id;
+
+  it('keeps the ids of unchanged rows and mints a fresh one for the row that changed', async () => {
+    writeFileSync(
+      notePath(),
+      note(
+        [
+          entry('a', 540, 600, 'morning stand-up'),
+          entry('b', 600, 720, 'the actual work'),
+          entry('c', 780, 840, 'code review'),
+        ],
+        4,
+      ),
+    );
+    await sync.scanVault();
+    const first = db.getEntries(userId);
+    expect(first).toHaveLength(3);
+
+    // the other machine moves ONE row's end time and bumps the revision
+    writeFileSync(
+      notePath(),
+      note(
+        [
+          entry('a', 540, 600, 'morning stand-up'),
+          entry('b', 600, 730, 'the actual work'), // 12:00 → 12:10
+          entry('c', 780, 840, 'code review'),
+        ],
+        5,
+      ),
+    );
+    expect((await sync.scanVault()).import).toBe(1);
+    const second = db.getEntries(userId);
+    expect(second).toHaveLength(3);
+
+    expect(idOf(second, 'morning stand-up')).toBe(idOf(first, 'morning stand-up'));
+    expect(idOf(second, 'code review')).toBe(idOf(first, 'code review'));
+    // and the changed row is genuinely re-minted — a remount is CORRECT where the content moved
+    expect(idOf(second, 'the actual work')).not.toBe(idOf(first, 'the actual work'));
+    expect(second.find((row) => row.label === 'the actual work').end).toBe(730);
+  });
+
+  it('two identical rows on one day keep BOTH ids — matched in row order (DD-008 rule 9)', async () => {
+    const twins = (revision, thirdLabel) =>
+      note(
+        [entry('p', 540, 570, 'triage'), entry('q', 540, 570, 'triage'), entry('r', 600, 660, thirdLabel)],
+        revision,
+      );
+    writeFileSync(notePath(), twins(4, 'something else'));
+    await sync.scanVault();
+    const before = db.getEntries(userId);
+    const twinIdsBefore = before.filter((row) => row.label === 'triage').map((row) => row.id);
+    expect(twinIdsBefore).toHaveLength(2);
+    expect(new Set(twinIdsBefore).size).toBe(2); // two rows, two distinct ids — never collapsed
+
+    writeFileSync(notePath(), twins(5, 'something ELSE entirely')); // forces a real re-parse
+    expect((await sync.scanVault()).import).toBe(1);
+    const after = db.getEntries(userId);
+    const twinIdsAfter = after.filter((row) => row.label === 'triage').map((row) => row.id);
+    expect(new Set(twinIdsAfter)).toEqual(new Set(twinIdsBefore));
+    expect(idOf(after, 'something ELSE entirely')).not.toBe(idOf(before, 'something else'));
+  });
+
+  it('a row REMOVED from the note frees nothing for the rows that remain', async () => {
+    // The pool is drawn from, never re-used: a deleted row's id must not be handed to a row that
+    // genuinely changed, which would make an edit look like a rename of something else.
+    writeFileSync(notePath(), note([entry('a', 540, 600, 'kept'), entry('b', 600, 660, 'deleted')], 4));
+    await sync.scanVault();
+    const first = db.getEntries(userId);
+    const deletedId = idOf(first, 'deleted');
+
+    writeFileSync(notePath(), note([entry('a', 540, 600, 'kept'), entry('c', 600, 660, 'brand new')], 5));
+    expect((await sync.scanVault()).import).toBe(1);
+    const second = db.getEntries(userId);
+    expect(idOf(second, 'kept')).toBe(idOf(first, 'kept'));
+    expect(idOf(second, 'brand new')).not.toBe(deletedId);
+  });
+
+  it('a Mode-only change keeps the id — the recorded consequence of the index having no tags column', async () => {
+    // NOT an accident, and NOT the ticket's contract being met by luck. `getEntries` returns no
+    // `tags` (server/src/db.js says so in its own Omit), so the stored side of the comparison can
+    // never carry a Mode value and `TT.entryMatchKey` leaves the slot out. The benign direction:
+    // the row updates in place with its new tags instead of remounting. If a tags column ever lands
+    // in SQLite, this expectation is the one that should flip — deliberately, not silently.
+    const tagged = (revision, tags) => {
+      const row = entry('a', 540, 600, 'deep work');
+      if (tags) row.tags = tags;
+      return note([row], revision);
+    };
+    writeFileSync(notePath(), tagged(4, ['#deep']));
+    await sync.scanVault();
+    const before = db.getEntries(userId);
+    expect(before).toHaveLength(1);
+
+    writeFileSync(notePath(), tagged(5, ['#admin']));
+    expect((await sync.scanVault()).import).toBe(1);
+    const after = db.getEntries(userId);
+    expect(after).toHaveLength(1);
+    expect(after[0].id).toBe(before[0].id);
+  });
+});
+
+describe('TT.entryMatchKey (SB-117)', () => {
+  const row = (over) => ({
+    id: 'ignored',
+    date: DATE,
+    start: 540,
+    end: 600,
+    durMin: null,
+    project: null,
+    label: 'work',
+    note: '',
+    billable: true,
+    ...over,
+  });
+
+  it('ignores the runtime id — that is the whole point', () => {
+    expect(TT.entryMatchKey(row({ id: 'e1-abc' }))).toBe(TT.entryMatchKey(row({ id: 'e9-zzz' })));
+  });
+
+  it('separates the three time shapes and the empty cell (DD-008 rule 4)', () => {
+    const keys = [
+      TT.entryMatchKey(row({ start: 540, end: 600 })), // range
+      TT.entryMatchKey(row({ start: 540, end: null })), // running
+      TT.entryMatchKey(row({ start: null, end: null, durMin: 60 })), // duration
+      TT.entryMatchKey(row({ start: null, end: null })), // none
+    ];
+    expect(new Set(keys).size).toBe(4);
+  });
+
+  it('distinguishes every field it claims to carry', () => {
+    const base = TT.entryMatchKey(row());
+    for (const over of [
+      { date: '2026-07-21' },
+      { project: 'ACME' },
+      { label: 'other' },
+      { note: 'a note' },
+      { billable: false },
+    ])
+      // prettier-ignore
+      expect(TT.entryMatchKey(row(over)), JSON.stringify(over)).not.toBe(base);
+  });
+
+  it('trims label and note, because putEntries already did on the way in', () => {
+    expect(TT.entryMatchKey(row({ label: '  work  ', note: ' hi ' }))).toBe(TT.entryMatchKey(row({ note: 'hi' })));
+  });
+
+  it('cannot be spoofed by moving text across the field boundary', () => {
+    // Rule 3's U+001F join. A markdown cell cannot carry U+001F through TT's parser, so no typed
+    // content can make two different rows key the same way.
+    expect(TT.entryMatchKey(row({ label: 'a', note: 'b' }))).not.toBe(TT.entryMatchKey(row({ label: 'ab', note: '' })));
+  });
+});
+
 /** Poll until the predicate holds, or give up. The watcher is debounced; a fixed sleep is a flake. */
 async function until(predicate, { timeout = 5000, step = 20 } = {}) {
   const deadline = Date.now() + timeout;
@@ -490,3 +657,6 @@ describe('the write scope rule (design decision 2)', () => {
 });
 
 // ## Verified red-green: 2026-07-26
+// ## Verified red-green: 2026-07-27 (SB-117 — the four id-preservation cases go red with
+//    `TT.preserveEntryIds` reverted out of `importEntries`; the spoofing case goes red with rule 3's
+//    U+001F join replaced by an empty string)

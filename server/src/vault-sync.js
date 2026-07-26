@@ -364,12 +364,28 @@ export function applyVerdict(path, date, verdict, ctx) {
  * `putEntries` is a whole-collection replace, so the day is spliced into the user's current set
  * here rather than there. Every other date comes back byte-identical — including the days a scan
  * skipped as dataless, which is the same rule the writer follows on its side.
+ *
+ * SB-117 / DD-019 ruling 3: rows whose content is unchanged KEEP the runtime id the index already
+ * holds for them. The parse minted a fresh `nid()` for every row (DD-008 — the runtime id is
+ * ephemeral), and handing those straight to `putEntries` remounted every grid row on the imported
+ * day, destroying whatever `NoteCell` draft was open. Only genuinely-changed rows carry their new
+ * id through. The matching rule and why its field set is what it is live on `TT.preserveEntryIds`.
+ *
+ * ONE `getEntries` CALL FEEDS BOTH HALVES — the split is by date, so the same read that supplies
+ * the other days supplies the day's existing rows. Inside the transaction, so the rows matched
+ * against are the rows replaced.
  * @param {number} userId @param {string} date @param {Entry[]} entries
  */
 function importEntries(userId, date, entries) {
   db.transaction(() => {
-    const others = db.getEntries(userId).filter((entry) => entry.date !== date);
-    db.putEntries(userId, others.concat((entries || []).map((entry) => ({ ...entry, date }))));
+    const held = db.getEntries(userId);
+    const others = held.filter((entry) => entry.date !== date);
+    const sameDay = held.filter((entry) => entry.date === date);
+    const imported = TT.preserveEntryIds(
+      (entries || []).map((entry) => ({ ...entry, date })),
+      sameDay,
+    );
+    db.putEntries(userId, others.concat(imported));
     // DC-001, design decision 10. Without this the client's next whole-set PUT silently overwrites
     // what was just imported.
     db.bumpEntriesVersion(userId);

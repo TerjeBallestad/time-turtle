@@ -1103,6 +1103,18 @@ export interface TTModule {
     entry: Entry,
     context: { shape?: string | null; vaultCutover?: string | null; commits?: CommitSegment[] },
   ): boolean;
+  /**
+   * SB-117: the field-equality key that decides whether an imported row is the row the index
+   * already holds. NOT DD-008's persistence key — nothing is hashed and nothing is stored, and
+   * `mode`/passthrough are deliberately absent because the SQLite index cannot carry them. The
+   * reasoning lives in one place, beside the implementation in shared/core.js.
+   */
+  entryMatchKey(entry: Entry): string;
+  /**
+   * SB-117 / DD-019 ruling 3: hand each incoming row the runtime id its unchanged counterpart
+   * already holds, so an import does not remount every grid row on the day it touched. Pure.
+   */
+  preserveEntryIds(incoming: Entry[], existing: Entry[]): Entry[];
   nowMin(): number;
   isRunning(entry: Entry): boolean;
   entryMinutes(entry: Entry): number;

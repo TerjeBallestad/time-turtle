@@ -2645,6 +2645,92 @@ TT.writeVaultCatalog = function (md, catalog, opts) {
 //   loses its `commitSnapshot` link. Filed as SB-079 rather than decided here, because whether
 //   phase 3 needs identity to survive an edit is SB-057's arbitration question, not this spec's.
 
+// ---- id preservation across an import (SB-117, DD-019 ruling 3) ----
+//
+// WHAT THIS IS FOR. `TimeGrid` keys every grid row `key={entry.id}` and DD-008 makes the runtime id
+// EPHEMERAL — re-minted by every parse. So an import of day D used to change every id on day D, and
+// the refresh that followed remounted every row on that day. `NoteCell` holds the sentence you are
+// typing in local component state until blur, so a remount destroyed it and ejected the caret. With
+// ids preserved, a 409 reload is very nearly invisible: unchanged rows do not remount, and only
+// genuinely-changed rows flicker.
+//
+// THIS IS NOT DD-008's PERSISTENCE KEY, and must not be mistaken for it. Nothing is hashed and
+// nothing is stored — rule 10 stays phase 3's to choose. This is field equality between an incoming
+// parsed row and a row already in the index, computed in memory and thrown away in the same tick.
+//
+// THE FIELD SET IS DD-008 rule 2's ORDER WITH TWO SLOTS DELIBERATELY EMPTY — `mode` (field 3) and
+// the passthrough columns (field 8+). Not an oversight, and not a disagreement with the spec: the
+// SQLite index has no `tags` column and no `vaultCells` column (see `getEntries` in server/src/db.js,
+// where the `Omit` says so out loud), so the stored side of this comparison can never carry either.
+// Including them would make every Mode-bearing row fail to match its own unchanged self and mint a
+// fresh id — turning this off for exactly the rows Terje puts tags on.
+//
+// The cost of leaving them out, stated rather than discovered: a row whose ONLY change is its Mode
+// cell reads as unchanged and keeps its id. That is the benign direction. Keeping the id means React
+// updates the row in place with the new tags instead of remounting it, which is the outcome this
+// ticket wants anyway; the harm the ticket is about is the remount, not the id.
+//
+// TRIM ON BOTH SIDES. `putEntries` trims `label` and `note` on the way in, so an untrimmed parsed
+// row would otherwise never match the trimmed copy of itself that the previous import stored.
+/**
+ * The field-equality key two rows must share to count as the same row. In-memory only.
+ * @param {Entry} entry @returns {string}
+ */
+TT.entryMatchKey = function (entry) {
+  // DD-008 rule 4's three legal shapes plus the empty cell. Minutes since midnight; the emitted
+  // separator is not part of it, so flipping `vaultTimeSeparator` (SB-063) re-keys nothing.
+  const time =
+    entry.start != null && entry.end != null
+      ? 'range:' + entry.start + '-' + entry.end
+      : entry.start != null
+        ? 'running:' + entry.start
+        : entry.durMin != null
+          ? 'duration:' + entry.durMin
+          : 'none';
+  // Rule 3's join: U+001F, which no markdown table cell can carry through TT's parser, so empty
+  // fields stay unambiguous without rule 5 needing a placeholder.
+  return [
+    entry.date || '',
+    time,
+    entry.project == null ? '' : String(entry.project),
+    String(entry.label ?? '').trim(),
+    String(entry.note ?? '').trim(),
+    entry.billable ? '1' : '0', // rule 7: no Bill column at all parses to billable, so it keys as `1`
+  ].join('\u001F');
+};
+
+/**
+ * Give each incoming row the id its unchanged counterpart already holds in the index.
+ *
+ * DUPLICATES ARE MATCHED IN ROW ORDER — DD-008 rule 9's answer to the same problem. Two identical
+ * rows on one day share a key, so their ids form a pool that is drawn from top to bottom. Which of
+ * the two gets which id is unobservable by construction: the rows are identical.
+ *
+ * `existing` arrives in `getEntries` order (`ORDER BY date, id`), which is NOT the note's row order.
+ * That only matters for duplicates, where by the paragraph above it does not matter at all.
+ *
+ * Pure: returns new objects and mutates neither argument.
+ * @param {Entry[]} incoming rows just parsed out of the note, in the note's row order
+ * @param {Entry[]} existing rows the index already holds for that day
+ * @returns {Entry[]} `incoming`, with ids reused wherever the content is unchanged
+ */
+TT.preserveEntryIds = function (incoming, existing) {
+  /** @type {Map<string, string[]>} */
+  const pool = new Map();
+  for (const entry of existing || []) {
+    const key = TT.entryMatchKey(entry);
+    const ids = pool.get(key);
+    if (ids) ids.push(entry.id);
+    else pool.set(key, [entry.id]);
+  }
+  return (incoming || []).map((entry) => {
+    const ids = pool.get(TT.entryMatchKey(entry));
+    const id = ids && ids.length ? ids.shift() : null;
+    // A genuinely-changed row keeps the id its parse just minted — the remount is correct there.
+    return id == null ? entry : { ...entry, id };
+  });
+};
+
 TT.serializeMd = function (state) {
   const lines = [
     '# timesheet',
