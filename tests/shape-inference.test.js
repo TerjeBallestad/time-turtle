@@ -30,7 +30,6 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import TT from '../shared/core.js';
 import { startServer, stopServer, stopAllServers, adminOn, runServerUntilExit } from './util.js';
 
 afterAll(stopAllServers);
@@ -53,6 +52,24 @@ function storedSetting(data, key) {
   } finally {
     db.close();
   }
+}
+
+/**
+ * "The stamp is NOW, not some default" — said about the INSTANT, bracketed by the window the
+ * test itself measured. `before` is read immediately before whatever stamps, `after`
+ * immediately after the read that observes it.
+ *
+ * SB-143: this used to be `expect(stamped.slice(0, 10)).toBe(TT.todayStr())`, which compares a
+ * UTC instant to a LOCAL day and so was red for every run between local midnight and UTC
+ * midnight — two hours a night in CEST, deterministically, on a clean main. Bracketing the
+ * instant is timezone-free AND strictly tighter than the day check it replaces: it pins the
+ * stamp to milliseconds, so a default, a hardcoded date, or a stamp remembered from an earlier
+ * run all still fail.
+ */
+function expectStampedDuring(stamped, before, after) {
+  const at = Date.parse(stamped);
+  expect(at).toBeGreaterThanOrEqual(before);
+  expect(at).toBeLessThanOrEqual(after);
 }
 
 const EMPLOYEE = { email: 'second@timeturtle.local', name: 'Second', role: 'employee', password: 'secondpw' };
@@ -184,6 +201,26 @@ describe('the inference rule does not fire where it must not', () => {
 //   FIRST time this mutation was run the gap was 4 ms, then 6 ms — a guard one clock tick from
 //   passing. `team stamps nothing, ever` stays green under every mutation here, correctly:
 //   there is nothing for any of them to get wrong when no personal shape is ever stored.
+//
+// ## Verified red-green: 2026-07-27, TRANSCRIBED. SB-143 replaced the "it is NOW" check in both
+//   cutover tests (`stamped.slice(0, 10)` vs `TT.todayStr()`) with `expectStampedDuring`.
+//   RED BY CLOCK, no faketime needed — the real wall clock at 00:21 CEST is inside the window
+//   where the local day and the UTC day disagree, and the OLD assertions were failing there on a
+//   clean main, 2 of 7:
+//     FAIL  storing `personal` stamps the cutover with the instant it happened, once, server-side
+//     FAIL  a boot into `personal` stamps it too — the env is a way in as much as the setting is
+//           AssertionError: expected '2026-07-26' to be '2026-07-27' // Object.is equality
+//   GREEN after the change, and green in FOUR timezones at that same instant — 7 of 7 under
+//   TZ unset (CEST), TZ=UTC, TZ=Pacific/Kiritimati (UTC+14) and TZ=Pacific/Midway (UTC-11).
+//   The old form is red in two of those four; that spread is the whole point.
+//
+//   AND IT IS TIGHTER, NOT QUIETER. Mutation: stamp `new Date(Date.now() - 60_000)` in
+//   stampVaultCutover — a stamp one minute stale, on the SAME local day. The old assertion
+//   passed it 7 of 7 (run under TZ=UTC so midnight could not confound the result); the new one
+//   fails 2 of 7:
+//     AssertionError: expected 1785104568579 to be greater than or equal to 1785104628578
+//   A second mutation, the hardcoded default the comment names (`'2000-01-01T00:00:00.000Z'`),
+//   also fails 2 of 7: expected 946684800000 to be greater than or equal to 1785104619868.
 describe('the cutover stamp (DD-016)', () => {
   it('storing `personal` stamps the cutover with the instant it happened, once, server-side', async () => {
     const { data, md } = dataDir('cutover-store');
@@ -193,13 +230,15 @@ describe('the cutover stamp (DD-016)', () => {
     expect((await admin('GET', '/api/state')).json.settings.vaultCutover).toBe('');
 
     const state = await admin('GET', '/api/state');
+    const before = Date.now();
     expect((await admin('PUT', '/api/state', { settings: { ...state.json.settings, shape: 'personal' } })).status).toBe(
       200,
     );
 
     const stamped = (await admin('GET', '/api/state')).json.settings.vaultCutover;
+    const after = Date.now();
     expect(stamped).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/); // an ISO instant
-    expect(stamped.slice(0, 10)).toBe(TT.todayStr()); // …and it is NOW, not some default
+    expectStampedDuring(stamped, before, after); // …and it is NOW, not some default
 
     // THE SLEEP IS WHAT MAKES EVERY ASSERTION BELOW MEAN SOMETHING. All of them say "the stamp
     // did not move", and without a measurable gap a re-stamping implementation produces an
@@ -243,11 +282,13 @@ describe('the cutover stamp (DD-016)', () => {
     // the same live vault without ever storing anything, and an unstamped vault store is one
     // with NO pre-cutover history at all — every entry eligible, which is the hazard inverted.
     const { data, md } = dataDir('cutover-boot');
+    const before = Date.now();
     const personal = await startServer({ TT_DATA_DIR: data, TT_MD_DIR: md, TT_SHAPE: 'personal' });
     const admin = await adminOn(personal.port);
     const stamped = (await admin('GET', '/api/state')).json.settings.vaultCutover;
+    const after = Date.now();
     expect(stamped).toMatch(/^\d{4}-\d{2}-\d{2}T/);
-    expect(stamped.slice(0, 10)).toBe(TT.todayStr());
+    expectStampedDuring(stamped, before, after);
     await stopServer(personal.child);
 
     // The SHAPE is still not stored — the boot stamped the date, it did not answer the
