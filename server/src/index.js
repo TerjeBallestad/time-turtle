@@ -18,7 +18,16 @@ import { mirrorTarget, mirrorPath, mirrorBlockFor, acknowledgeMirrorBlock, retir
 // SB-057: the sync engine. Imported here and nowhere else in the API layer — the routes have no
 // business knowing the vault is being watched, and the only thing this file does with it is start
 // it once the server is answering.
-import { startVaultSync, scanVault, vaultSyncConfig, forgetOwnWrites } from './vault-sync.js';
+import { startVaultSync, scanVault, vaultSyncConfig, forgetOwnWrites, setVaultRewriter } from './vault-sync.js';
+import { rewriteVaultDate } from './vault-write.js';
+
+// SB-057: the two arbitration verdicts that need a WRITE are handed back to the writer HERE, at
+// the one place that already imports both. The engine never imports the writer, so the dependency
+// runs one way: store → vault-write → vault-sync → db.
+setVaultRewriter((date, rev) => {
+  const config = vaultSyncConfig();
+  if (config) rewriteVaultDate(config.userId, date, rev);
+});
 import { teamReport } from './reports.js';
 import TT from '../../shared/core.js';
 

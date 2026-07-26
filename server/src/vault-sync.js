@@ -42,10 +42,18 @@ import { statSync, readFileSync, readdirSync, watch } from 'node:fs';
 import { readFile as readFileAsync } from 'node:fs/promises';
 import { join, basename } from 'node:path';
 import TT from '../../shared/core.js';
-import * as store from './store.js';
-// Identity, called on db.js DIRECTLY — the storage seam deliberately excludes it (see store.js's
-// header). Under `personal` the user table holds exactly one row (DD-006 consequence 1), which is
-// what makes "the user" a well-defined thing for an import to belong to.
+// db.js DIRECTLY, and not through `store.js` — this module is INSIDE the seam, not a caller of it.
+// `store.js` dispatches the vault implementation, so going back through it would be a cycle
+// (store → vault-write → vault-sync → store); server/src/markdown.js imports db.js for the same
+// reason, spelled out at its own import site. It matters in one place beyond the cycle: the import
+// path writes entries with `db.putEntries`, which deliberately does NOT trigger the vault write
+// fan-out — the file it came from is already the authority, and re-writing it would be TT echoing
+// its own import back at itself.
+//
+// `listUsers` is identity, which the seam excludes anyway. Under `personal` the user table holds
+// exactly one row (DD-006 consequence 1), which is what makes "the user" a well-defined thing for
+// an import to belong to.
+import * as store from './db.js';
 import { listUsers } from './db.js';
 import { activeBackend } from './backend.js';
 import { arbitrate, describeVaultFile, fileSha } from './vault-arbitrate.js';

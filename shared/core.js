@@ -147,6 +147,44 @@ TT.shapeCapabilities = (shape) => (shape && SHAPE_CAPABILITIES[shape]) || SHAPE_
 TT.backendFor = (shape) => (shape && SHAPE_BACKEND[shape]) || SHAPE_BACKEND.team;
 
 /**
+ * IS THIS ENTRY THE VAULT'S? — DD-016 + DD-017, and SB-100 hands it to SB-057 by name.
+ *
+ * A non-vault-bound entry is written to SQLite and NEVER to a daily note, and never triggers
+ * DD-012 adoption on its behalf. Three conditions, and each one closes a specific hazard:
+ *
+ *   1. THE SHAPE. Only `personal` has a vault at all.
+ *   2. THE CUTOVER (DD-016). `TT.seedMd()` dates its demo entries relative to FIRST BOOT — `T`,
+ *      `T-1`, `T-2`, `T-7`, `T-8`, `T-9` (see the seed below) — so without this a fresh personal
+ *      install ADOPTS six of Terje's real daily notes and writes Fjellheim AS demo hours into
+ *      them. The cutover is stored as an ISO instant and compared day-grained, because
+ *      `Entry.date` is a day; `stampVaultCutover` stores the finer value precisely so this can
+ *      choose, and `''` (never stamped) means no history is excluded.
+ *   3. THE LEDGER (DD-017). `TT.weekSegments` cuts on (ISO week ∩ month) and NEVER on a date, so
+ *      committing the current week and then switching mid-week leaves a frozen money snapshot
+ *      astride the cutover. A committed segment stays whole: not one of its days reaches a note.
+ *
+ * ONE HOME, deliberately. SB-102 wants the same predicate; whoever lands first writes it and the
+ * second consumes it. A second copy is a rule that agrees today and diverges on the first ruling.
+ *
+ * SKIPPED, NOT REFUSED, at the call site: `useServerSync` re-queues any non-409 failure and
+ * retries every 4 s forever, so turning this into a 403 would be a permanent toast loop for
+ * anyone with pre-cutover history.
+ * @param {Entry} entry
+ * @param {{ shape?: string | null, vaultCutover?: string | null, commits?: import('./types.ts').CommitSegment[] }} context
+ * @returns {boolean}
+ */
+TT.vaultBound = function (entry, context) {
+  const ctx = context || {};
+  if (ctx.shape !== 'personal') return false;
+  if (!entry || typeof entry.date !== 'string') return false;
+  const cutoverDay = String(ctx.vaultCutover || '').slice(0, 10);
+  if (cutoverDay && entry.date < cutoverDay) return false;
+  const key = TT.segmentKey(entry.date);
+  for (const segment of ctx.commits || []) if (segment && segment.key === key) return false;
+  return true;
+};
+
+/**
  * Where inside the vault TT reads and writes, when nothing has been chosen. HERE, not in
  * server/src/db.js and not in the client's fallback, because SB-057/SB-058 extend this shape
  * ADDITIVELY: the moment they add a key, a second copy silently produces a `VaultPaths` missing

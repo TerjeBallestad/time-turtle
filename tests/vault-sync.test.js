@@ -27,6 +27,8 @@ let sync;
 let db;
 /** @type {typeof import('../server/src/vault-arbitrate.js')} */
 let arb;
+/** @type {typeof import('../server/src/vault-write.js')} */
+let writer;
 
 let vaultRoot = '';
 let dailyDir = '';
@@ -62,6 +64,9 @@ beforeAll(async () => {
   db = await import('../server/src/db.js');
   sync = await import('../server/src/vault-sync.js');
   arb = await import('../server/src/vault-arbitrate.js');
+  // Imported HERE, after TT_DATA_DIR is set: db.js binds its file at import time, and a static
+  // import in a file that has not set the env would open (and migrate) the repo's own server/data.
+  writer = await import('../server/src/vault-write.js');
   const user = db.createUser({ email: 'solo@timeturtle.local', name: 'Solo', role: 'admin', password: 'pw' });
   userId = user.id;
 });
@@ -289,12 +294,27 @@ describe('the vault sync engine', () => {
     });
   });
 
-  it('the watcher fires on a local change, and tears down without leaking a handle', async () => {
+  it('the watcher fires on a local change, and tears down without leaking a handle', { timeout: 30_000 }, async () => {
     // A LOCAL write only. This says nothing about an iCloud landing — see the header.
     expect(sync.startVaultSync({ debounceMs: 20, intervalMs: 3_600_000 })).toBe(true);
+    // THE ARMING WINDOW, measured rather than guessed. `watch()` returns before macOS has actually
+    // armed the FSEvents stream, so a write microseconds later races it and is silently missed:
+    // without this pause the case failed 2 runs in 15 of the full suite — the watcher never
+    // delivered at all, even given 20 s. With it, 0 in 25.
+    //
+    // PRODUCTION IS NOT EXPOSED TO THIS and does not need the pause: `startVaultSync` is followed
+    // by a full `scanVault`, so a note written during the arming window is picked up by the scan,
+    // and anything later by the interval. It is also a standing argument for that interval — an
+    // fs.watch that can miss a LOCAL write is not one to bet an iCloud landing on.
+    await new Promise((r) => setTimeout(r, 250));
     writeFileSync(notePath(), note([entry('e1', 540, 600, 'saved in Obsidian')], 1));
-    const landed = await until(() => db.getEntries(userId).length === 1);
-    expect(landed).toBe(true);
+    // 20 s, and it is not padding: macOS delivers fs.watch through FSEvents, whose latency is not
+    // bounded by anything Node controls. Measured on this machine the event is usually well under
+    // 100 ms and occasionally seconds. That variance is itself why SB-057 specifies the slow
+    // interval as a SECOND trigger rather than as belt and braces — and why no green here says
+    // anything about an iCloud landing, which is a different code path again.
+    const landed = await until(() => db.getEntries(userId).length === 1, { timeout: 20_000 });
+    expect(landed, 'the watcher never delivered a locally-written note').toBe(true);
     expect(db.getEntries(userId)[0].label).toBe('saved in Obsidian');
     // idempotent start, then a clean stop — a handle leaked per settings change is invisible for
     // weeks on a detached `tt serve`
@@ -320,5 +340,52 @@ async function until(predicate, { timeout = 5000, step = 20 } = {}) {
     await new Promise((r) => setTimeout(r, step));
   }
 }
+
+// The write scope rule ITSELF, in isolation. The api suite above proves the OUTCOME — that a cold
+// machine's unread days come out byte-identical — but that outcome is closed by `writeEligibility`
+// as well, so a break in the scope rule alone would not show up there. This block is what makes
+// the rule independently provable: it is the one function that decides which dates a save is even
+// allowed to consider, and a folder glob is the failure it exists to refuse.
+describe('the write scope rule (design decision 2)', () => {
+  const on = (date) => ({ id: 'x' + date, date, start: 540, end: 600, durMin: null, project: null, label: '', note: '', billable: true }); // prettier-ignore
+  const index = (states) => (date) => (states[date] ? { state: states[date] } : null);
+
+  it('includes every date in the incoming set', () => {
+    expect(writer.writeScope([on('2026-07-20'), on('2026-07-22')], [], index({}))).toEqual([
+      '2026-07-20',
+      '2026-07-22',
+    ]);
+  });
+
+  it('includes a date that HAD entries, is now absent, and whose file TT has read — a real deletion', () => {
+    const scope = writer.writeScope([on('2026-07-20')], [on('2026-07-20'), on('2026-07-21')], index({ '2026-07-21': 'known' })); // prettier-ignore
+    expect(scope).toEqual(['2026-07-20', '2026-07-21']);
+  });
+
+  it('EXCLUDES a date TT has not confirmed reading, even though it had entries', () => {
+    // `putEntries` is DELETE-all and the client PUTs everything it has, so an evicted day is simply
+    // absent from the PUT. Reading that absence as "the day is now empty" writes a blank block over
+    // hours TT never read — which is invariant 1 on the write side.
+    for (const state of ['unknown', 'quarantined']) {
+      expect(
+        writer.writeScope([on('2026-07-20')], [on('2026-07-20'), on('2026-07-21')], index({ '2026-07-21': state })),
+      ).toEqual([
+        // prettier-ignore
+        '2026-07-20',
+      ]);
+    }
+    // and with no index row at all — TT has never even looked
+    expect(writer.writeScope([on('2026-07-20')], [on('2026-07-20'), on('2026-07-21')], index({}))).toEqual([
+      '2026-07-20',
+    ]);
+  });
+
+  it('is never a folder glob: a date TT knows about but that this save does not mention is out of scope', () => {
+    // The whole daily folder could be `known` and full of notes; a save that mentions none of them
+    // touches none of them.
+    const states = { '2026-07-18': 'known', '2026-07-19': 'known', '2026-07-21': 'known' };
+    expect(writer.writeScope([on('2026-07-20')], [on('2026-07-20')], index(states))).toEqual(['2026-07-20']);
+  });
+});
 
 // ## Verified red-green: 2026-07-26

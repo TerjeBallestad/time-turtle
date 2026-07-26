@@ -972,6 +972,15 @@ export interface TTModule {
    * the server's 403 body and the client's on-screen explanation cannot drift.
    */
   shapeOffReason(capability: keyof ShapeCapabilities, shape?: string | null): string | null;
+  /**
+   * SB-057 / DD-016 + DD-017: is this entry the vault's? A false answer means the entry lives in
+   * SQLite and never reaches a daily note — and never triggers DD-012 adoption on its behalf.
+   * The one home of the predicate; SB-102 consumes this rather than adding a second copy.
+   */
+  vaultBound(
+    entry: Entry,
+    context: { shape?: string | null; vaultCutover?: string | null; commits?: CommitSegment[] },
+  ): boolean;
   nowMin(): number;
   isRunning(entry: Entry): boolean;
   entryMinutes(entry: Entry): number;
