@@ -7,8 +7,8 @@
 //
 // What a green run here does NOT prove, stated once so a green suite is never reported as "the
 // catalog works": no file is ever opened, no arbitration between two machines is exercised, and
-// byte equality is structurally blind to a severed reference — which is what Family C below is
-// for.
+// byte equality is structurally blind to a severed reference — which is what the task 4 suite
+// (`a severed reference`) is for.
 //
 // ## Verified red-green: 2026-07-26
 // Task 1 (TASK-042): the section registry, and the two tables that carry money.
@@ -141,6 +141,30 @@ describe('catalog note — Clients and Projects (SB-058 task 1)', () => {
       const md = region('clients', [{ id: 'x', name: 'a|b\\c', rate: 1, rounding: 'exact', archived: false }]);
       expect(md).toContain('| a\\|b\\\\c |');
       expect(parse('clients', md).rows[0].name).toBe('a|b\\c');
+    });
+
+    it('an EMPTY table (header row only) serializes and parses for both money tables', () => {
+      // On TASK-042's golden list and missed first time round. A catalog with no clients yet is
+      // the first-boot state, so it has to be expressible — and the locator has to accept a table
+      // whose only rows are the header and the delimiter.
+      for (const section of ['clients', 'projects']) {
+        const md = region(section, [], 2);
+        expect(md.split('\n')).toHaveLength(6); // heading, blank, header, delimiter, blank, anchor
+        const parsed = parse(section, md);
+        expect(parsed.quarantine).toBe(false);
+        expect(parsed.rows).toEqual([]);
+        expect(region(section, parsed.rows, parsed.revision)).toBe(md);
+      }
+    });
+
+    it('a `|` in a PROJECT name is escaped and comes back intact', () => {
+      // The client-name case was covered; the project one was not, and it is the table where a
+      // split row would take a rate with it.
+      const md = region('projects', [{ ...DRIFT, name: 'Drift | support \\ 2026' }]);
+      expect(md).toContain('| Drift \\| support \\\\ 2026 |');
+      const parsed = parse('projects', md);
+      expect(parsed.rows[0].name).toBe('Drift | support \\ 2026');
+      expect(parsed.rows[0].rate).toBe(1400); // the cell after it did not shift
     });
 
     it('a project with no vaultNote emits a blank Note cell and parses back with the field ABSENT', () => {
@@ -280,7 +304,9 @@ describe('catalog note — Clients and Projects (SB-058 task 1)', () => {
       const union = /export type VaultCatalogQuarantineReason =([\s\S]*?);/.exec(types.replace(/\/\*[\s\S]*?\*\//g, '')); // prettier-ignore
       expect(union, 'VaultCatalogQuarantineReason union not found in shared/types.ts').toBeTruthy();
       const reasons = [...union[1].matchAll(/\|\s*'([a-z-]+)'/g)].map((m) => m[1]);
-      expect(reasons.length).toBeGreaterThan(0);
+      // Pinned, like the block guard it mirrors: `toBeGreaterThan(0)` would let coverage shrink
+      // silently if the scrape ever under-matched.
+      expect(reasons.length).toBe(6);
       const core = readFileSync(new URL('../shared/core.js', import.meta.url), 'utf8');
       // A golden is either a row of the section-level table above or an assertion anywhere else
       // in this file — the whole-note reasons (a revision disagreement, a dangling client) can
@@ -442,7 +468,7 @@ describe('catalog note — Task templates and Settings (SB-058 task 2)', () => {
       expect(TT.VAULT_CATALOG_SETTING_KEYS).toEqual(['currency', 'language', 'vaultTimeSeparator']);
     });
 
-    it('none of them can reach the note’s bytes, however it is passed in', () => {
+    it('none of them survives TT.vaultCatalogSettingRows — the one place rows are built', () => {
       // The bootstrap loop, stated as bytes: `shape`, `vaultPaths` and `mdDir` are how TT FINDS
       // this note, and `vaultCutover` is per-instance by DD-017 — "the date THIS instance's vault
       // history begins". All four stay in SQLite under BOTH shapes.
@@ -464,6 +490,23 @@ describe('catalog note — Task templates and Settings (SB-058 task 2)', () => {
       for (const key of FORBIDDEN) expect(md).not.toContain(key);
       for (const value of ['personal', 'vault', '/Users/x/Inbox', '2026-07-26', 'Calendar/Daily'])
         expect(md).not.toContain(value);
+    });
+
+    it('…and the guarantee stops there — going around that function DOES reach the bytes', () => {
+      // The honest limit of the rule, pinned so nobody reads the exclusion as a byte-boundary
+      // filter. `serializeVaultCatalog` emits the ROWS it is handed, and it must: the unknown-row
+      // rule requires a key from a newer TT to survive a read-write cycle untouched, and a filter
+      // at the byte boundary cannot tell that key from a forbidden one.
+      //
+      // So this is a rule about ONE FUNCTION, and this test is what stops the comment beside it
+      // from drifting back into claiming more. The end-gate review caught exactly that overclaim.
+      const handRolled = [{ key: 'vaultPaths', value: '{"root":"/Users/x/Vault"}' }];
+      expect(region('settings', handRolled, 1)).toContain('| vaultPaths |');
+
+      // What is guaranteed in BOTH directions is that such a row is never APPLIED — it stays
+      // bytes, and never becomes a Settings value TT acts on.
+      expect(TT.vaultCatalogSettings(handRolled)).toEqual({});
+      expect(TT.vaultCatalogSettingRows(TT.vaultCatalogSettings(handRolled))).toEqual([]);
     });
 
     it('one of them arriving as a CARRIED unknown row is not laundered into settings', () => {
@@ -615,6 +658,29 @@ describe('catalog note — the whole note (SB-058 task 3)', () => {
       }
     });
 
+    it('a PARTIAL catalog leaves the sections it does not mention alone', () => {
+      // The atomicity rule arriving through the write direction, and a real defect the end-gate
+      // review caught: with `|| []` instead of `??`, `writeVaultCatalog(note, { clients })` — the
+      // call a `Partial<VaultCatalog>` signature invites — reported `quarantine: false` and
+      // returned a note whose other three tables had been EMPTIED. The output gate cannot see it,
+      // because a header-only table parses perfectly well.
+      const res = TT.writeVaultCatalog(NOTE, { clients: [{ ...FJELLHEIM, rate: 1500 }, BRYGGA] });
+      expect(res.quarantine).toBe(false);
+      const reparsed = TT.parseVaultCatalog(res.md);
+      expect(reparsed.clients[0].rate).toBe(1500); // the section that WAS mentioned changed
+      expect(reparsed.projects).toEqual(CATALOG.projects); // the ones that were not, did not
+      expect(reparsed.tasks).toEqual(CATALOG.tasks);
+      expect(reparsed.settings).toEqual(CATALOG.settings);
+    });
+
+    it('…while an EXPLICIT empty list still empties that section', () => {
+      // `[]` and "absent" must stay distinguishable, or clearing a section becomes impossible.
+      const res = TT.writeVaultCatalog(NOTE, { ...CATALOG, tasks: [] });
+      const reparsed = TT.parseVaultCatalog(res.md);
+      expect(reparsed.tasks).toEqual([]);
+      expect(reparsed.clients).toEqual(CATALOG.clients);
+    });
+
     it('the revision is not bumped by a write — that is SB-057’s arbitration', () => {
       expect(TT.parseVaultCatalog(TT.writeVaultCatalog(NOTE, CATALOG).md).revision).toBe(3);
       const set = TT.writeVaultCatalog(NOTE, CATALOG, { revision: 9 });
@@ -708,6 +774,21 @@ describe('catalog note — the whole note (SB-058 task 3)', () => {
       const res = TT.writeVaultCatalog(NOTE, { ...CATALOG, clients: [{ ...FJELLHEIM, name: 'Fjell\nheim' }, BRYGGA] });
       expect(res.quarantine).toBe(true);
       expect(res.reason).toBe('write-would-corrupt');
+      expect(res.md).toBe(NOTE);
+      // and it names WHICH table it could not read back — "TT could not read back what it wrote"
+      // is not something a human can act on without that
+      expect(res.section).toBe('clients');
+    });
+
+    it('a caller’s own dangling clientId is caught by the output gate, and the section is named', () => {
+      // The input note is fine; the CATALOG being written is not. It cannot land as
+      // `catalog-dangling-client` (that is a verdict about a note TT read), so it arrives as
+      // `write-would-corrupt` — which is why carrying the section matters here.
+      const orphan = { ...CATALOG, projects: [{ ...NETT, clientId: 'vanished' }] };
+      const res = TT.writeVaultCatalog(NOTE, orphan);
+      expect(res.quarantine).toBe(true);
+      expect(res.reason).toBe('write-would-corrupt');
+      expect(res.section).toBe('projects');
       expect(res.md).toBe(NOTE);
     });
 
@@ -891,18 +972,33 @@ describe('catalog note — money resolves the same through a parsed catalog (SB-
       });
 
     it('there is no route from a damaged rate to a resolved rate of 0', () => {
-      // The whole class, stated once: for every damaged rate cell, either the parse refuses, or
-      // every rate it produces is one a human wrote. Nothing in between.
-      for (const bad of ['1,250', '1250 kr', '-50', 'tbd', 'NaN', 'Infinity', '1e3', '0x10']) {
+      // The whole class, stated once: for every damaged rate cell, either the parse refuses FOR
+      // THE RIGHT REASON, or every rate it produces is one a human wrote. Nothing in between.
+      //
+      // The reason has to be asserted inside the refusing branch, not skipped past. Written as a
+      // bare `if (quarantine) continue` this test executed ZERO expects — every value quarantines,
+      // so the body never ran and the four cases that exist only here (`NaN`, `Infinity`, `1e3`,
+      // `0x10`) were unproven. It would also have stayed green if `sign()` broke and every fixture
+      // degraded to `digest-mismatch`. Caught by the end-gate review, and it is the exact failure
+      // this file's own honesty rules are about: green for a reason that is not the requirement.
+      const BAD = ['1,250', '1250 kr', '-50', 'tbd', 'NaN', 'Infinity', '1e3', '0x10'];
+      let refused = 0;
+      for (const bad of BAD) {
         const damaged = NOTE.replace(
           region('clients', CLIENTS, 5),
           sign(edit(region('clients', CLIENTS, 5), '| 1250 |', `| ${bad} |`)),
         );
         const parsed = TT.parseVaultCatalog(damaged);
-        if (parsed.quarantine) continue;
+        if (parsed.quarantine) {
+          expect(parsed.reason, `wrong refusal for ${bad}`).toBe('catalog-bad-number');
+          refused++;
+          continue;
+        }
         for (const client of parsed.clients) expect(client.rate === null || client.rate > 0).toBe(true);
         expect(parsed.clients.find((client) => client.id === 'fjellheim').rate).not.toBe(0);
       }
+      // …and the loop actually ran. Without this a future `BAD = []` would pass silently.
+      expect(refused).toBe(BAD.length);
     });
   });
 });
