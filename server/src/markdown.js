@@ -9,7 +9,16 @@ import { DATA_DIR, MD_DIR, MD_DIR_LOCKED, MD_DIR_FROM_ENV } from './config.js';
 // `writeMirror` only ever runs in the `team` shape — under `personal` the mirror is off
 // entirely (DD-011) — so routing it through `store.js` would imply the mirror has a vault
 // meaning it does not have. Under sqlite the two are the same tables anyway.
-import { getSettings, getClients, getProjects, getTasks, getEntries, getCommits, listUsers } from './db.js';
+import {
+  getSettings,
+  getClients,
+  getProjects,
+  getTasks,
+  getEntries,
+  getCommits,
+  listUsers,
+  getMirrorSlug,
+} from './db.js';
 
 /** @typedef {{ dir: string, source: 'env-locked' | 'setting' | 'env' | 'default', shadowed: string | null }} MirrorTarget */
 /** @typedef {import('../../shared/types.ts').MirrorBlock} MirrorBlock */
@@ -36,16 +45,31 @@ export function mirrorDir() {
   return mirrorTarget().dir;
 }
 
-// SB-088 — THE ONE TT.slug CALLER THAT READS AN EXISTING VALUE. This path is DERIVED on
-// every write, never stored, so a user called "Bærum" mirrors to `timesheet-b-rum.md` today
-// and to `timesheet-baerum.md` after the transliteration fix — the next save writes the new
-// file and the old one simply stops being updated. Nothing is renamed, moved or deleted, and
-// no bytes are lost: the old path is still a key in the guard ledger, so `retireMirrors`
-// still sweeps it on a backend switch. The same fork already happens whenever a user changes
-// their display name, which is why it is left alone rather than migrated.
+// SB-088 found this: THE ONE TT.slug CALLER THAT READ AN EXISTING VALUE. The filename used to be
+// re-derived from `user.name` on every write, so it was a function of a mutable field — rename
+// the user and the next save writes a NEW file and silently abandons the old one, which stays on
+// disk looking like a current timesheet.
+//
+// SB-112 pins it instead: `users.mirror_slug` is settled once, at creation, and never recomputed
+// (server/src/db.js). That is what every other derived identifier here already does — client ids,
+// `TT.projectCode`, task ids — and DC-005's rule that a rename is a deliberate, server-reconciled
+// act rather than a silent re-derivation.
+//
+// NOTHING WAS MIGRATED AND NOTHING MOVED. The backfill seeds each existing row with exactly the
+// slug this function used to compute, so every file stays where it is. No rename, no move, no
+// delete — and because the paths are unchanged, every key already in the guard ledger stays a
+// valid key, so `retireMirrors` still sweeps them on a backend switch. If a rename ever does fork
+// a path (a hand-edited row, an unpinned user), the abandoned path is still a ledger key and is
+// still swept; it is simply never written again.
+//
+// THE FALLBACK IS THE OLD BEHAVIOUR, ON PURPOSE. A row with no pinned slug keeps deriving from the
+// name — i.e. keeps writing to the file it is writing to today. Defaulting to something "safer"
+// like the id would move that user's mirror to a new filename on the next save, which is the exact
+// harm this ticket is about.
 /** Where one user's mirror file lives right now. @param {import('../../shared/types.ts').User} user */
 export function mirrorPath(user) {
-  return join(mirrorDir(), 'timesheet-' + TT.slug(user.name || user.email.split('@')[0]) + '.md');
+  const slug = getMirrorSlug(user.id) ?? TT.slug(user.name || user.email.split('@')[0]);
+  return join(mirrorDir(), 'timesheet-' + slug + '.md');
 }
 
 // ---- SB-065: the never-clobber guard ----
