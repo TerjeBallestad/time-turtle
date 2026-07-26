@@ -970,6 +970,62 @@ function isHeadingAnchor(line, heading) {
   return !!m && nfc(m[1].trim()) === heading;
 }
 /**
+ * Every way TT can refuse a vault BLOCK — the vocabulary itself, as a runtime value.
+ *
+ * SB-109 MOVED THE VOCABULARY HERE FROM THE TYPE. `VaultBlockQuarantineReason` in
+ * shared/types.ts is now DERIVED from this array (`(typeof …)[number]`), not restated beside
+ * it, so the type and the list cannot disagree by construction — and the completeness guard in
+ * tests/roundtrip.test.js imports this array instead of scraping the union out of a `.ts` file
+ * with a regex. That scrape was truncated by any semicolon inside a doc comment and inflated by
+ * any reason name quoted inside one; it reported a wrong count confidently rather than a parse
+ * failure, and it cost SB-090 real time. Prose cannot lie to an import.
+ *
+ * Enumerated rather than left as `string` so SB-057's boot scan gets a compiler check when it
+ * switches on these — a typo'd reason is otherwise silent.
+ *
+ * Ordered by the stage that produces the refusal: locator, parser, writer.
+ *
+ * DOCUMENT THE MEMBERS FREELY. The comments below deliberately contain semicolons and
+ * neighbouring reason names in single quotes — the two shapes of prose that used to break the
+ * old scrape — precisely so that the coverage guard's indifference to them is standing evidence
+ * and not a claim. Nobody should ever again have to reword a comment to satisfy a test.
+ */
+export const VAULT_BLOCK_QUARANTINE_REASONS = /** @type {const} */ ([
+  // --- locator: the block cannot be bounded (the two anchors, the `##` hard stop, the region) ---
+  'no-heading',
+  'crlf-line-endings',
+  'multiple-headings',
+  'no-revision',
+  // The bottom anchor is THERE — the note carries `revision: N …` inside the block — but TT
+  // cannot read it, because the digest half is malformed: empty, the wrong length, non-hex,
+  // uppercase, or separated by something other than ` · ` (SB-090). Distinct from 'no-revision'
+  // because that one says "the line is missing" about a line the human is looking straight at,
+  // which is the same lie SB-084 fixed for CRLF with a different cause. Distinct from
+  // 'digest-mismatch' too — there the token is well-formed and describes different bytes; here
+  // the token is not a token. TT refuses either way and repairs neither (SB-083), it just says
+  // which of the two it is. NOT produced for lines that merely resemble the anchor without
+  // carrying its inline-code span. See `MALFORMED_REVISION_RE` below.
+  'malformed-revision',
+  'revision-past-next-heading',
+  'multiple-revisions',
+  'no-table',
+  'unexpected-content-in-block',
+  // The bottom anchor's payload digest is present and does NOT match the table it labels —
+  // DD-009. This is the one reason that means "the block is structurally fine and semantically
+  // wrong": Obsidian's diff-merge (SB-051) keeps TT's anchor line and the buffer's rows, so
+  // every other check passes. Never fires on a digest-less block, which is unverified, not
+  // wrong; contrast 'no-revision', which is about an anchor that is not there at all.
+  'digest-mismatch',
+  // --- parser: the schema or a row cannot be read ---
+  'unknown-header',
+  'duplicate-header',
+  'row-cell-count',
+  'unparseable-time',
+  'bad-bill-cell',
+  // --- writer: what TT would emit is not readable back ---
+  'write-would-corrupt',
+]);
+/**
  * @param {import('./types.ts').VaultQuarantineReason} reason
  * @returns {{ quarantine: true, reason: import('./types.ts').VaultQuarantineReason }}
  */
