@@ -183,11 +183,22 @@ export type Backend = 'sqlite' | 'vault';
  *   `mdImport`  — paste a v2 mirror back INTO the database (Settings → Markdown mirror).
  *                 Off under `personal` (DD-011) because it is a WRITE path into the store from
  *                 mirror bytes, and those bytes stop being maintained.
+ *   `identity`  — there is more than one human here, so the app may ask who you are and say
+ *                 what you are allowed to do: the login screen, the Users section, roles, the
+ *                 password section, sign-out, the admin review surface. Off under `personal`
+ *                 (DD-015 depth 2), where the surfaces are ABSENT rather than disabled — a
+ *                 greyed-out Users section still asserts that other users are a thing here.
+ *                 The user RECORD underneath is untouched: `user_id 1` stays, every join stays,
+ *                 and that record is what makes DD-014's later personal → team import land
+ *                 somewhere. This row is what the surfaces read; the SERVER half of it (an
+ *                 implicit local session in place of a cookie challenge) is keyed off the
+ *                 effective shape in `requireUser` and never off anything a client sends.
  */
 export interface ShapeCapabilities {
   mirror: boolean;
   committing: boolean;
   mdImport: boolean;
+  identity: boolean;
 }
 
 /**
@@ -354,6 +365,21 @@ export interface AppState extends Catalog {
   shape?: Shape;
   /** DC-002: TT_SHAPE_LOCK is set, so the shape is env-only and read-only in the UI. */
   shapeLocked?: boolean;
+  /**
+   * SB-098 / DD-015: the OPEN STATE — nobody has chosen a shape, and this is an install whose
+   * question has two real answers (nothing stored, no TT_SHAPE, no lock, exactly one user, and
+   * the caller is that admin). True means the first-run question is owed; the client renders it
+   * and cannot skip it.
+   *
+   * It is REPORTED rather than re-derived, and that is the whole reason it exists as a field.
+   * `settings.shape` being absent says only that nothing is STORED (SB-133) — an install running
+   * `TT_SHAPE=team` has answered by env and stores nothing, and re-asking it would let a modal
+   * overwrite what its operator typed on the command line. Only the server can tell "unanswered"
+   * from "answered elsewhere", because only the server holds `shapeTarget().source`.
+   *
+   * Absent (an older server) behaves as false: never ask. The safe direction is silence.
+   */
+  shapeOpen?: boolean;
   /**
    * SB-057: the daily notes TT has stopped writing to. Additive and read-only, the same shape
    * `mirrorBlocked` takes and for the identical reason — a note that silently stops syncing still
@@ -971,6 +997,23 @@ export interface PasswordSetRequest {
 
 export interface OkResponse {
   ok: boolean;
+}
+/**
+ * SB-098 / SB-139 — `POST /api/shape`, admin only. The deliberate shape-choosing gesture, and
+ * the one channel both surfaces that can choose a shape use: the first-run question and the
+ * Settings selector.
+ *
+ * `shape` is the EFFECTIVE shape after the write, not the one that was asked for — a lock or a
+ * TT_SHAPE can beat a stored row, so echoing the request back would be the client believing a
+ * choice that is not in force.
+ *
+ * Unlike the debounced `PUT /api/state`, nothing retries this, so it may refuse outright: 403
+ * for the lock and for DD-006's single-user guard, 400 for a name that is not a shape.
+ */
+export interface ShapeChoiceResponse {
+  ok: boolean;
+  shape: Shape;
+  version: StateVersion;
 }
 /**
  * SB-065 / SB-085 — POST /api/mirror/acknowledge. `cleared` is false when there was no

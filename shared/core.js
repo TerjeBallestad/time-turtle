@@ -115,12 +115,14 @@ TT.TIME_SEPARATOR_VALUES = /** @type {string[]} */ (Object.keys(TIME_SEPARATORS)
 /** @type {Record<string, import('./types.ts').ShapeCapabilities>} */
 const SHAPE_CAPABILITIES = {
   // The repo default and the company deployment. Everything on; SB-069 froze these bytes.
-  team: { mirror: true, committing: true, mdImport: true },
+  team: { mirror: true, committing: true, mdImport: true, identity: true },
   // DD-006/DD-008/DD-011. The vault's daily notes are the markdown surface, so the v2
   // `|`-mirror stops (and is retired — see retireMirrors in server/src/markdown.js) and
   // paste-back, a WRITE path into the store from mirror bytes, goes with it. Committing is
   // off until phase 3 lands the weekly-note rollup that gives the ledger somewhere to live.
-  personal: { mirror: false, committing: false, mdImport: false },
+  // SB-098 adds `identity`: DD-015 depth 2 — one human, so there is nobody to be told apart
+  // from, no role to hold and no session to sign out of.
+  personal: { mirror: false, committing: false, mdImport: false, identity: false },
 };
 /** DD-015: the backend each shape DERIVES. Nobody selects a backend; this is the whole map. */
 const SHAPE_BACKEND = /** @type {Record<string, import('./types.ts').Backend>} */ ({
@@ -271,6 +273,13 @@ TT.VAULT_PATHS_DEFAULT = {
 //
 // English, because the server has no locale. The Norwegian UI translates these in i18n.ts;
 // the CLAIM is what must match, not the bytes.
+//
+// `identity` DELIBERATELY HAS NO ENTRY, and that is not an omission. Every reason here explains
+// a verb that is VISIBLY MISSING from a surface that still exists — the commit button, the
+// apply-markdown button. `identity: false` removes the surfaces themselves (DD-015 depth 2:
+// Users, roles, passwords, review, the login screen), so there is no control left to carry an
+// explanation, and nobody to read one: under `personal` the one human already knows they are
+// the only one. `TT.shapeOffReason('identity')` therefore reads null, which is the honest answer.
 /** @type {Record<string, string>} */
 const SHAPE_OFF_REASONS = {
   committing:
