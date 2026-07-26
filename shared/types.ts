@@ -402,7 +402,7 @@ export interface VaultEntry extends Entry {
  * Schema and row level (the parser): the header vocabulary and each row's cells.
  * Output (the writer): the spliced result would not parse back.
  */
-export type VaultQuarantineReason =
+export type VaultBlockQuarantineReason =
   // --- locator: the block cannot be bounded ---
   | 'no-heading'
   | 'crlf-line-endings'
@@ -440,6 +440,54 @@ export type VaultQuarantineReason =
   | 'bad-bill-cell'
   // --- writer: what TT would emit is not readable back ---
   | 'write-would-corrupt';
+
+/**
+ * SB-058: the refusals that only the CATALOG note can produce (`Time Turtle/Catalog.md`).
+ *
+ * Split out of the block union above rather than appended to it, because the two are proved by
+ * different goldens: every member of `VaultBlockQuarantineReason` has a refusal golden in
+ * tests/roundtrip.test.js over a daily note, and every member of this one has a refusal golden
+ * in tests/catalog.test.js over a catalog note. One flat union would have made each guard
+ * demand goldens the other file owns. `VaultQuarantineReason` below is still the single type a
+ * boot scan switches on, so nothing downstream sees the seam.
+ *
+ * Everything the catalog shares with a daily block keeps the block spelling and is NOT
+ * duplicated here — the locator verdicts (a missing heading, a missing or malformed revision
+ * line, a digest mismatch), plus `unknown-header`, `duplicate-header`, `row-cell-count` and
+ * `write-would-corrupt`. A catalog refusal additionally names the SECTION it came from
+ * (`VaultCatalogQuarantine.section`), which is what makes a shared reason unambiguous.
+ */
+export type VaultCatalogQuarantineReason =
+  /**
+   * A `Rate` or `Rounding` cell that will not parse. THE money rule of SB-058, stated as a
+   * refusal so it cannot degrade into a value: an unreadable rate must never become NaN and
+   * above all never 0, because a 0 rate invoices as free work with no error anywhere.
+   */
+  | 'catalog-bad-number'
+  /**
+   * A checkmark column carrying something that is neither the check mark nor blank —
+   * `Billable` or `Archived`. Same refusal-over-guess rule as the daily block's Bill cell,
+   * under its own name because these columns are the catalog's and the diagnosis should say so.
+   */
+  | 'catalog-bad-flag-cell'
+  /**
+   * A row with no identity: its id cell is blank, or the section declares no id column at all.
+   * Such a row can be neither referenced nor rewritten, and dropping it silently is how a
+   * client disappears out of the file that resolves the rates.
+   */
+  | 'catalog-missing-id'
+  /**
+   * Two rows in one section share an id. Under the vault shape there is no database uniqueness
+   * constraint behind this file, so the parse is the only place it can be caught. Resolution
+   * takes the first match, which would make the second row invisible rather than wrong.
+   */
+  | 'catalog-duplicate-id';
+
+/**
+ * Every refusal TT's vault codecs can produce — what a boot scan records and surfaces, and the
+ * one type it may switch on.
+ */
+export type VaultQuarantineReason = VaultBlockQuarantineReason | VaultCatalogQuarantineReason;
 
 /**
  * The block was refused. `reason` is a stable code SB-057's boot scan can record and
@@ -511,6 +559,50 @@ export interface VaultBlockParse {
 }
 
 export type VaultBlockParseResult = VaultBlockParse | VaultQuarantine;
+
+// ---- the catalog note (SB-058) ----
+/**
+ * SB-058: the four independently-anchored sections of `Time Turtle/Catalog.md`. Each one is the
+ * SAME shape as a daily-note block — `## <Heading>`, one table, one `` `revision: N` `` line —
+ * so `TT.locateVaultBlock` parses them with no change at all.
+ */
+export type VaultCatalogSectionName = 'clients' | 'projects' | 'tasks' | 'settings';
+
+/**
+ * One row of the Settings section, exactly as the note carries it. DECODED values, not cell
+ * bytes. Rows are kept in note order and re-emitted in it, INCLUDING keys this TT does not know:
+ * a settings key written by a newer TT must survive a read-write cycle by an older one, and
+ * quarantining on it would freeze the file that holds the rates over a cosmetic setting. That is
+ * the deliberate opposite of the unknown-COLUMN rule, which quarantines — see
+ * `TT.parseVaultCatalogSection`.
+ */
+export interface VaultCatalogSettingRow {
+  key: string;
+  value: string;
+}
+
+/** A refusal from the catalog codec, naming the SECTION it came from. */
+export interface VaultCatalogQuarantine {
+  quarantine: true;
+  reason: VaultQuarantineReason;
+  /** which section refused, or null for a verdict about the note as a whole */
+  section: VaultCatalogSectionName | null;
+}
+
+/** One parsed catalog section. `rows` is the model type that section carries. */
+export interface VaultCatalogSectionParse {
+  quarantine: false;
+  section: VaultCatalogSectionName;
+  heading: string;
+  revision: number;
+  /** the section's OWN declared header labels, in its own order and spelling */
+  headers: string[];
+  rows: Client[] | Project[] | Task[] | VaultCatalogSettingRow[];
+  /** propagated from the locator — see `VaultBlockRegion.verified` (DD-009) */
+  verified: boolean;
+}
+
+export type VaultCatalogSectionResult = VaultCatalogSectionParse | VaultCatalogQuarantine;
 
 // ---- parsed time cell (discriminated union) ----
 export type ParsedTime =
@@ -858,6 +950,25 @@ export interface TTModule {
       projects?: Project[];
     },
   ): { md: string; quarantine: boolean; reason: VaultQuarantineReason | null; adopted: boolean };
+  /**
+   * SB-058: ONE section of `Time Turtle/Catalog.md` — the region bytes, `## <Heading>` through
+   * the `` `revision: N` `` line, no trailing newline. Header row always, no totals row (a
+   * catalog table has nothing to total), and `Archived` emitted only when some row is archived.
+   * The whole note is `TT.serializeVaultCatalog`.
+   */
+  serializeVaultCatalogSection(
+    section: VaultCatalogSectionName,
+    rows: Client[] | Project[] | Task[] | VaultCatalogSettingRow[],
+    opts?: { revision?: number },
+  ): string;
+  /**
+   * SB-058: parse ONE catalog section, located by the SHARED `locateVaultBlock` on that
+   * section's heading. Any SUBSET of the section's columns in any ORDER parses (SB-045's
+   * vocabulary rule); a label outside it quarantines, because a dropped column is data loss
+   * with no database behind it. The whole-note entry point — and the only one that enforces
+   * whole-catalog atomicity — is `TT.parseVaultCatalog`.
+   */
+  parseVaultCatalogSection(md: string, section: VaultCatalogSectionName): VaultCatalogSectionResult;
   serializeMd(state: Catalog): string;
   newId(): string;
   parseMd(md: string): Catalog;

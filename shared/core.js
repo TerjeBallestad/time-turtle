@@ -6,6 +6,7 @@
 /** @typedef {import('./types.ts').Task} Task */
 /** @typedef {import('./types.ts').Project} Project */
 /** @typedef {import('./types.ts').Client} Client */
+/** @typedef {import('./types.ts').Rounding} Rounding */
 /** @typedef {import('./types.ts').Catalog} Catalog */
 /** @typedef {import('./types.ts').ParsedTime} ParsedTime */
 /** @typedef {import('./types.ts').VaultTimeSeparator} VaultTimeSeparator */
@@ -1571,6 +1572,388 @@ TT.writeVaultBlock = function (md, entries, opts) {
   if (parseAnchoredBlock(out, opts).quarantine)
     return { md: input, quarantine: true, reason: 'write-would-corrupt', adopted: false };
   return { md: out, quarantine: false, reason: null, adopted };
+};
+
+// ---- the catalog note: `Time Turtle/Catalog.md` (SB-058) ----
+//
+// The one piece of vault state outside the calendar: clients, projects (rates, billable
+// defaults, archived flags, `Project.vaultNote`), task templates, and the settings the note
+// genuinely owns. FOUR INDEPENDENTLY-ANCHORED SECTIONS, each the same shape as a daily-note
+// block, so `TT.locateVaultBlock` parses them unchanged — the catalog is a CONSUMER of the
+// locator and modifies nothing about it. Everything outside the four regions is Terje's.
+//
+// NOT ONE LINE OF FILE I/O IS HERE. Every function takes a string and returns a string or a
+// model. Finding, opening and safely replacing the real file is SB-057's.
+//
+// WHY THIS FILE IS MONOLITHIC when SDD-003 rejected a monolithic mirror for ENTRIES. Not
+// convenience — CONTENTION. A single mirror is the worst shape for iCloud because every save
+// rewrites the whole file and two machines contend on the same bytes forever, which is why the
+// entries shard per day. Clients, projects and rates change MONTHLY, so the odds of two machines
+// writing this file inside one sync window are negligible. Low write frequency is the whole
+// argument. If the catalog ever becomes a thing that changes several times a day (a per-project
+// timer preset, a per-entry rate override written back), the argument expires and this file has
+// to shard. "Monolithic is fine" is not a general licence here.
+//
+// THE MONEY RULES, each one stated as a refusal because each one silently costs money otherwise:
+//
+//   • WHOLE-CATALOG ATOMICITY, on both sides. One section quarantining quarantines the whole
+//     note, and no section is written. `TT.rateOf` resolves project → client → rate, so a
+//     catalog that returns projects and silently drops clients makes every rate 0 with no error
+//     anywhere. Losing the client/rate catalog is worse than losing a day of entries: refused
+//     beats partial. Enforced in `TT.parseVaultCatalog` / `TT.writeVaultCatalog`.
+//   • UNKNOWN COLUMN → QUARANTINE. UNKNOWN SETTINGS ROW → CARRIED VERBATIM. The asymmetry is
+//     deliberate. A column is a FIELD: dropping one on rewrite loses data with no database
+//     behind it to restore from, because under the vault shape this file IS the database. A row
+//     is DATA: a settings key from a newer TT has to survive a read-write cycle by an older one,
+//     and quarantining on it would freeze the rates over a cosmetic setting. Row-extensible by
+//     construction is also what makes SB-044 adding `vaultColumns` purely additive.
+//   • A NUMBER THAT CANNOT BE READ IS A REFUSAL, NEVER A VALUE. A `Rate` or `Rounding` cell that
+//     does not parse quarantines. It must never become NaN and above all never 0 — a silent 0
+//     rate is the failure mode this whole ticket exists to prevent.
+//
+// TABLES, not the v2 mirror's `- a | b | c` bullet rows, for two independent reasons: the
+// locator REQUIRES a header row and a delimiter row, so a bullet list is not locatable at all,
+// and SB-058's own bar is "a legitimate reference note Terje would be happy to open" — a rates
+// table renders, a bullet list does not.
+//
+// DD-007 HOLDS: headings and column labels are canonical ENGLISH, never localized. They are
+// storage, not UI, exactly as the daily block's headers are.
+
+/**
+ * THE SECTION REGISTRY — the ONE home for every heading name, every column label and every
+ * per-column codec in this note. SB-106 is the feel-gate on the NAMES (section headings, column
+ * labels, whether `Archived` should be a column at all), so a different answer from Terje has to
+ * be a one-place change: nothing below reads a literal heading or label, only this table.
+ *
+ * Each column is `{ label, read, write }` and optionally `when`:
+ *   • `read(cell, row)` decodes the STILL-ESCAPED cell onto the row, returning a quarantine
+ *     reason or null. Cells arrive escaped because that is what `vaultRowCells` produces, and
+ *     structure must be read out of a cell before `TT.decodeCell` collapses the escapes.
+ *   • `write(row)` produces the escaped cell.
+ *   • `when(rows)` decides whether the column is EMITTED at all. Only `Archived` has one: the
+ *     column appears only when at least one row in that table is archived — the emit-when-set
+ *     discipline the v2 mirror's ` | archived` token uses, lifted to the column, so a note with
+ *     nothing archived carries no column for it.
+ *
+ * THE READ SIDE ACCEPTS ANY SUBSET IN ANY ORDER, exactly as the daily block does (SB-045's
+ * vocabulary rule): a note written before a column existed keeps parsing, and a missing column
+ * simply leaves its field at the row default. THE WRITE SIDE EMITS THE CANONICAL SET, which is
+ * where the catalog deliberately DIVERGES from `TT.serializeVaultBlock` — that one re-emits the
+ * block's own headers. Here the model is complete and the file is the only copy, so echoing a
+ * narrower header set would DROP fields that have no database behind them. That is the same
+ * data-loss argument the unknown-column rule makes, in the other direction.
+ */
+const CATALOG_CHECK = BILL_YES; // U+2713 — one check mark in this file, shared with the Bill cell
+/**
+ * A `Rate` cell. A plain non-negative decimal or nothing at all. No thousands separator, no
+ * currency suffix, no sign: those are all shapes a human might type, and every one of them
+ * would have to be GUESSED at, which on this column means guessing at money.
+ */
+const CATALOG_NUMBER_RE = /^\d+(?:\.\d+)?$/;
+const CATALOG_ROUNDING_EXACT = 'exact';
+/** @param {string} cell @returns {{ value: number | null } | { reason: 'catalog-bad-number' }} */
+function readCatalogRate(cell) {
+  // An ABSENT rate is a different fact from a rate of 0: it means INHERIT (a project takes its
+  // client's rate). `TT.rateOf` depends on that distinction, so an empty cell has to reach the
+  // model as null and can never be flattened to 0.
+  if (cell === '') return { value: null };
+  if (!CATALOG_NUMBER_RE.test(cell)) return { reason: 'catalog-bad-number' };
+  return { value: +cell };
+}
+/** @param {number | null | undefined} rate @returns {string} */
+const writeCatalogRate = (rate) => (rate == null ? '' : String(rate));
+/**
+ * A `Rounding` cell — the word `exact`, or a whole number of minutes.
+ *
+ * An EMPTY cell reads as `exact` rather than refusing, and this is the one place a blank is
+ * given a meaning instead of a refusal. `Rounding` has no null in the model (`Rounding` is
+ * `'exact' | number`), and `TT.roundBill` already treats `exact` and 0 identically — so a blank
+ * is not an unreadable number, it is an absent one, and the absent value is spelled `exact`. The
+ * emitter always writes it out, so a TT-written note never has a blank here to interpret.
+ * @param {string} cell @returns {{ value: Rounding } | { reason: 'catalog-bad-number' }}
+ */
+function readCatalogRounding(cell) {
+  if (cell === '' || cell === CATALOG_ROUNDING_EXACT) return { value: CATALOG_ROUNDING_EXACT };
+  if (!/^\d+$/.test(cell)) return { reason: 'catalog-bad-number' };
+  return { value: +cell };
+}
+/**
+ * `0` emits as `exact`, following the v2 mirror's own `client.rounding || 'exact'`. The two
+ * spellings are the same behaviour — `TT.roundBill` reads 0 and `exact` identically — so this
+ * normalises a value rather than changing one.
+ * @param {Rounding} rounding @returns {string}
+ */
+const writeCatalogRounding = (rounding) =>
+  rounding === CATALOG_ROUNDING_EXACT || !rounding ? CATALOG_ROUNDING_EXACT : String(rounding);
+/**
+ * A checkmark cell — exactly the check mark, or exactly blank. Anything else is a hand edit
+ * whose intent TT cannot know on a column that decides billing or visibility, so it refuses
+ * instead of guessing. Same rule as the daily block's `Bill` cell (SB-045).
+ * @param {string} cell @returns {{ value: boolean } | { reason: 'catalog-bad-flag-cell' }}
+ */
+function readCatalogFlag(cell) {
+  if (cell === CATALOG_CHECK) return { value: true };
+  if (cell === '') return { value: false };
+  return { reason: 'catalog-bad-flag-cell' };
+}
+/** @param {boolean | undefined} on @returns {string} */
+const writeCatalogFlag = (on) => (on ? CATALOG_CHECK : '');
+/**
+ * The Projects table's `Note` column — `Project.vaultNote`, the note this project is written as
+ * in a daily-note `Project` cell (SB-059). The brackets are composed and stripped HERE, the same
+ * way `vaultProjectCell` does it, because the field holds the note NAME without them.
+ *
+ * A BARE value (no brackets) is honoured as the note name rather than refused, and re-emitted in
+ * canonical `[[…]]` form. Refusing would freeze the whole catalog — and with it every rate — over
+ * a missing pair of brackets on a cosmetic column, which is exactly the trade the unknown-settings
+ * -row rule already settles in the other direction. No value is lost either way.
+ * @param {string} cell still escaped @returns {string | undefined}
+ */
+function readCatalogNote(cell) {
+  if (cell === '') return undefined;
+  const m = WIKILINK_RE.exec(cell);
+  return TT.decodeCell(m ? m[1] : cell);
+}
+/** @param {string | undefined} note @returns {string} */
+const writeCatalogNote = (note) => (note ? '[[' + TT.encodeCell(note) + ']]' : '');
+
+/** @type {Record<string, import('./types.ts').VaultCatalogSectionName>} */
+const CATALOG_SECTION_NAMES = { clients: 'clients', projects: 'projects', tasks: 'tasks', settings: 'settings' };
+/**
+ * Which model field carries a section's identity. Beside the registry rather than inside a
+ * column, because the id is a property of the SECTION — duplicate detection and the blank-id
+ * refusal both ask about the row as a whole, not about one cell.
+ * @type {Record<string, string>}
+ */
+const CATALOG_ID_FIELD = { clients: 'id', projects: 'code', tasks: 'id', settings: 'key' };
+/**
+ * @typedef {{
+ *   label: string,
+ *   id?: boolean,
+ *   when?: (rows: any[]) => boolean,
+ *   read: (cell: string, row: any) => import('./types.ts').VaultQuarantineReason | null,
+ *   write: (row: any) => string,
+ * }} CatalogColumn
+ */
+/** @type {Record<string, { section: import('./types.ts').VaultCatalogSectionName, heading: string, blank: () => any, columns: CatalogColumn[] }>} */
+const CATALOG_SECTIONS = {
+  // THE MONEY TABLE. `Client` is the id the Projects table's `Client` column points at, so a
+  // change to either label moves a reference, not just a word.
+  clients: {
+    section: CATALOG_SECTION_NAMES.clients,
+    heading: 'Clients',
+    blank: () => /** @type {Client} */ ({ id: '', name: '', rate: null, rounding: CATALOG_ROUNDING_EXACT, archived: false }), // prettier-ignore
+    columns: [
+      { label: 'Client', id: true, read: (cell, row) => ((row.id = TT.decodeCell(cell)), null), write: (row) => TT.encodeCell(row.id) }, // prettier-ignore
+      { label: 'Name', read: (cell, row) => ((row.name = TT.decodeCell(cell)), null), write: (row) => TT.encodeCell(row.name) }, // prettier-ignore
+      {
+        label: 'Rate',
+        read: (cell, row) => {
+          const read = readCatalogRate(cell);
+          if ('reason' in read) return read.reason;
+          row.rate = read.value;
+          return null;
+        },
+        write: (row) => writeCatalogRate(row.rate),
+      },
+      {
+        label: 'Rounding',
+        read: (cell, row) => {
+          const read = readCatalogRounding(cell);
+          if ('reason' in read) return read.reason;
+          row.rounding = read.value;
+          return null;
+        },
+        write: (row) => writeCatalogRounding(row.rounding),
+      },
+      {
+        label: 'Archived',
+        when: (rows) => rows.some((row) => row.archived),
+        read: (cell, row) => {
+          const read = readCatalogFlag(cell);
+          if ('reason' in read) return read.reason;
+          row.archived = read.value;
+          return null;
+        },
+        write: (row) => writeCatalogFlag(row.archived),
+      },
+    ],
+  },
+  // The other money table, and the home `Project.vaultNote` never had. SB-059 added the field and
+  // its wikilink rendering, then SB-069 froze the v2 mirror — so until this column existed the
+  // field survived no round-trip anywhere.
+  projects: {
+    section: CATALOG_SECTION_NAMES.projects,
+    heading: 'Projects',
+    blank: () => /** @type {Project} */ ({ code: '', name: '', clientId: null, rate: null, billable: false, archived: false }), // prettier-ignore
+    columns: [
+      { label: 'Project', id: true, read: (cell, row) => ((row.code = TT.decodeCell(cell)), null), write: (row) => TT.encodeCell(row.code) }, // prettier-ignore
+      { label: 'Name', read: (cell, row) => ((row.name = TT.decodeCell(cell)), null), write: (row) => TT.encodeCell(row.name) }, // prettier-ignore
+      {
+        label: 'Client',
+        // An ABSENT client cell is `clientId: null` — a project with no client. Deliberately NOT
+        // the v2 mirror's `—` placeholder: SB-045 ruled `—` out of the vault format, and inside a
+        // table an empty cell is already unambiguous.
+        read: (cell, row) => ((row.clientId = cell === '' ? null : TT.decodeCell(cell)), null),
+        write: (row) => (row.clientId ? TT.encodeCell(row.clientId) : ''),
+      },
+      {
+        label: 'Rate',
+        read: (cell, row) => {
+          const read = readCatalogRate(cell);
+          if ('reason' in read) return read.reason;
+          row.rate = read.value;
+          return null;
+        },
+        write: (row) => writeCatalogRate(row.rate),
+      },
+      // `✓`/blank exactly as the daily block's `Bill` is. Note the row default is FALSE, not the
+      // model's "billable unless someone says otherwise": inside a note the cell is explicit, and
+      // a Projects table written with no `Billable` column at all is one where nothing said yes.
+      { label: 'Billable', read: (cell, row) => { const read = readCatalogFlag(cell); if ('reason' in read) return read.reason; row.billable = read.value; return null; }, write: (row) => writeCatalogFlag(row.billable) }, // prettier-ignore
+      {
+        label: 'Note',
+        read: (cell, row) => {
+          const note = readCatalogNote(cell);
+          if (note !== undefined) row.vaultNote = note;
+          return null;
+        },
+        write: (row) => writeCatalogNote(row.vaultNote),
+      },
+      {
+        label: 'Archived',
+        when: (rows) => rows.some((row) => row.archived),
+        read: (cell, row) => {
+          const read = readCatalogFlag(cell);
+          if ('reason' in read) return read.reason;
+          row.archived = read.value;
+          return null;
+        },
+        write: (row) => writeCatalogFlag(row.archived),
+      },
+    ],
+  },
+};
+
+/**
+ * The section's canonical header labels for a given set of rows — every column whose `when` says
+ * it applies. ONE definition, so the emitter and anything reasoning about the header set cannot
+ * drift about whether `Archived` is there.
+ * @param {{ columns: CatalogColumn[] }} spec @param {any[]} rows @returns {CatalogColumn[]}
+ */
+const catalogColumnsFor = (spec, rows) => spec.columns.filter((column) => !column.when || column.when(rows));
+
+/**
+ * THE ANCHOR EMITTER for a catalog section — one of exactly TWO places in this file that decide
+ * how the catalog's revision counter reaches and leaves the bytes (the reader is
+ * `catalogRevisionOf`). SB-104 is open on WHICH counter a per-file arbiter compares, and this
+ * pair is why the ruling is a one-place change: under both live options the sections each carry a
+ * revision line and the bytes are identical, and only the BUMP rule differs — which lives in
+ * SB-057's arbitration, not here.
+ *
+ * Delegates the line itself to `vaultRevisionLine` and the digest to `vaultPayloadDigest`, the
+ * daily block's sole emitter and sole hash. DD-009's digest is PER BLOCK, and that is decisive
+ * here rather than incidental: one file-level revision line spanning four tables would leave the
+ * Projects table with no digest of its own, so an Obsidian diff-merge (SB-051) that rewrites a
+ * RATE would be undetectable. On the one file where a silent rewrite costs money, the per-section
+ * digest is the reason the format looks like this.
+ *
+ * @param {import('./types.ts').VaultCatalogSectionName} section
+ * @param {any[]} rows
+ * @param {{ revision?: number }} [opts]
+ * @returns {string} the region bytes — `## <Heading>` through the revision line, no trailing newline
+ */
+TT.serializeVaultCatalogSection = function (section, rows, opts) {
+  const spec = CATALOG_SECTIONS[section];
+  const list = rows || [];
+  const columns = catalogColumnsFor(spec, list);
+  const revision = opts && opts.revision != null ? opts.revision : 1; // a first write starts at 1
+  const labels = columns.map((column) => column.label);
+  const lines = ['## ' + spec.heading, '', vaultRow(labels), '|' + labels.map(() => '---').join('|') + '|'];
+  for (const row of list) lines.push(vaultRow(columns.map((column) => column.write(row))));
+  // No totals row: the daily block's exists because a day has hours to add up, and this table has
+  // nothing to total. `lines.slice(2)` is therefore exactly the payload the digest covers —
+  // header, delimiter, data rows — taken before the blank line and the anchor are appended.
+  lines.push('', vaultRevisionLine(revision, vaultPayloadDigest(lines.slice(2))));
+  return lines.join('\n');
+};
+
+/**
+ * Parse ONE catalog section out of a note, or refuse. Locates with the SHARED
+ * `TT.locateVaultBlock` — same anchors, same hard stop at the next heading, same per-table
+ * digest — and then reads the table through the section registry.
+ *
+ * The whole-note entry point is `TT.parseVaultCatalog`, which is what enforces whole-catalog
+ * atomicity and the cross-section rules. This one is exposed because each half has to be
+ * testable on its own, and because SB-057 reporting "the Projects section is quarantined" is
+ * more use to a human than "the catalog is quarantined".
+ *
+ * @param {string} md @param {import('./types.ts').VaultCatalogSectionName} section
+ * @returns {import('./types.ts').VaultCatalogSectionResult}
+ */
+TT.parseVaultCatalogSection = function (md, section) {
+  const spec = CATALOG_SECTIONS[section];
+  const loc = TT.locateVaultBlock(md, { heading: spec.heading });
+  // propagated UNCHANGED, plus the section name — the locator owns its reasons, and a shared
+  // reason like 'no-heading' only becomes actionable once you know WHICH heading
+  if (loc.quarantine) return { quarantine: true, reason: loc.reason, section };
+  const lines = String(md == null ? '' : md).split('\n');
+
+  // the header row IS the schema (SB-045), read against this section's vocabulary
+  const headers = vaultRowCells(lines[loc.headerLine]);
+  /** @type {CatalogColumn[]} */
+  const columns = [];
+  for (const label of headers) {
+    const key = label.toLowerCase();
+    const column = spec.columns.find((candidate) => candidate.label.toLowerCase() === key);
+    // UNKNOWN COLUMN → QUARANTINE. A column is a field, and dropping one on rewrite is data loss
+    // with no database behind it to restore from. See the header comment for the row/column
+    // asymmetry this is one half of.
+    if (!column) return { quarantine: true, reason: 'unknown-header', section };
+    if (columns.includes(column)) return { quarantine: true, reason: 'duplicate-header', section };
+    columns.push(column);
+  }
+  const idColumn = spec.columns.find((column) => column.id);
+  const idField = idColumn ? /** @type {string} */ (CATALOG_ID_FIELD[section]) : '';
+  // A section with no id column declared cannot produce a referenceable row at all. Reported as
+  // the row-level fact rather than as a header problem, because that is what it costs.
+  if (idColumn && !columns.includes(idColumn)) return { quarantine: true, reason: 'catalog-missing-id', section };
+
+  /** @type {any[]} */
+  const rows = [];
+  const seen = new Set();
+  for (const ln of loc.rowLines) {
+    const cells = vaultRowCells(lines[ln]);
+    if (cells.length !== columns.length) return { quarantine: true, reason: 'row-cell-count', section };
+    const row = spec.blank();
+    for (let c = 0; c < columns.length; c++) {
+      const reason = columns[c].read(cells[c], row);
+      if (reason) return { quarantine: true, reason, section };
+    }
+    if (idField) {
+      const id = row[idField];
+      // A row with no identity can be neither referenced nor rewritten, and dropping it silently
+      // is how a client disappears out of the file that resolves the rates.
+      if (id === '') return { quarantine: true, reason: 'catalog-missing-id', section };
+      // Under the vault shape there is no database uniqueness constraint behind this file, so the
+      // parse is the only place a duplicate can be caught. Resolution takes the FIRST match
+      // (`TT.projectOf`, `TT.clientOf`), which would make the second row invisible rather than
+      // visibly wrong — the quiet direction, and therefore the one to refuse.
+      if (seen.has(id)) return { quarantine: true, reason: 'catalog-duplicate-id', section };
+      seen.add(id);
+    }
+    rows.push(row);
+  }
+
+  return {
+    quarantine: false,
+    section,
+    heading: loc.heading,
+    revision: loc.revision,
+    headers,
+    rows,
+    verified: loc.verified,
+  };
 };
 
 // ---- canonical row string (DD-008 spec obligation — nothing computes this in phase 1) ----
