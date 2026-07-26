@@ -14,6 +14,14 @@ const NO: Record<string, string> = {
   General: 'Generelt',
   'Markdown backend': 'Markdown-backend',
   // SB-056: the vault settings surface.
+  // SB-056 / DD-008 / DD-011: the two capability refusals. The English side of these keys is
+  // TT.backendOffReason's text VERBATIM (shared/core.js) — the server puts the same string in
+  // its 403 body, so the claim cannot drift between what the API says and what the screen says.
+  // Only the language differs here; if you edit one of these, edit core.js in the same commit.
+  'committing is off under the vault backend: the commit ledger lives in weekly notes, which phase 3 adds — a per-machine SQLite ledger would diverge silently (DD-008). Switch back to the sqlite backend to commit.':
+    'innsending er av under hvelv-backenden: innsendingsloggen hører hjemme i ukenotatene, som kommer i fase 3 — en SQLite-logg per maskin ville sprikt i stillhet (DD-008). Bytt tilbake til SQLite-backenden for å sende inn.',
+  'applying markdown edits is off under the vault backend: the vault’s daily notes are the markdown surface now, and the v2 mirror files this would restore from are no longer maintained (DD-011). Copy and download still work.':
+    'å ta i bruk markdown-endringer er av under hvelv-backenden: dagsnotatene i hvelvet er markdown-flaten nå, og v2-speilfilene dette ville gjenopprettet fra vedlikeholdes ikke lenger (DD-011). Kopier og last ned virker fortsatt.',
   Vault: 'Hvelv',
   'Storage backend': 'Lagringsbackend',
   SQLite: 'SQLite',

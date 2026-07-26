@@ -14,7 +14,14 @@ interface SettingsProps {
 export function MarkdownSection({ state, ui }: SettingsProps) {
   const md = TT.serializeMd(state);
   const [draft, setDraft] = React.useState<string | null>(null);
-  const dirty = draft != null && draft !== md;
+  // SB-056 / DD-011: paste-back is a WRITE path into the store from mirror bytes, and under
+  // `vault` those bytes stop being maintained (the mirror is off and the files already written
+  // are retired). So the write affordance goes, and the reason goes where it was.
+  //
+  // COPY AND DOWNLOAD STAY. Reading an export harms nothing, and removing them would lose a
+  // real capability for no reason — the gate is on the write, not on the section.
+  const importOff = TT.backendOffReason('mdImport', state.backend);
+  const dirty = !importOff && draft != null && draft !== md;
   const download = () => {
     const blob = new Blob([md], { type: 'text/markdown' });
     const link = document.createElement('a');
@@ -35,10 +42,14 @@ export function MarkdownSection({ state, ui }: SettingsProps) {
         )}
       </p>
       <MirrorDirRow state={state} ui={ui} />
+      {importOff && <div className={st.vaultWarn}>{TT.t(importOff)}</div>}
       <Textarea
         value={dirty ? draft : md}
         rows={14}
         spellCheck={false}
+        // Read-only rather than removed: the export is still worth seeing and copying, and a
+        // box you can type into whose edits go nowhere is worse than one that says so.
+        readOnly={!!importOff}
         onChange={(e) => setDraft(e.target.value)}
         className={st.mdArea}
       />
