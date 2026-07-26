@@ -3,15 +3,17 @@
 // linked command that runs the BUILT app (client/dist served by the API on one
 // origin) in the background, with a PID + log file so it can be stopped cleanly.
 //
-//   tt serve [--port N] [--build]   build if needed, run in the background
-//   tt stop                         stop the background server
-//   tt restart [--build] [--port N] stop, then serve
-//   tt status                       is it running, and where?
-//   tt build                        rebuild the client bundle
-//   tt logs                         print the log file path + last lines
+//   tt serve [--data DIR] [--port N] [--build]   build if needed, run in the background
+//   tt stop [--data DIR]                         stop the background server
+//   tt restart [--data DIR] [--build] [--port N] stop, then serve
+//   tt status [--data DIR]                       is it running, and where?
+//   tt build                                     rebuild the client bundle
+//   tt logs [--data DIR]                         print the log file path + last lines
 //
-// The DB, mirror, PID and log all live under server/data (or TT_DATA_DIR), so this
-// runner shares state with `npm run dev` — use one or the other, not both at once.
+// The DB, mirror, PID and log all live under server/data — or under --data DIR, or
+// TT_DATA_DIR when the flag is absent. That directory *is* the instance: two data dirs
+// on two ports are two independent installs sharing one checkout. Within one data dir
+// this runner shares state with `npm run dev` — use one or the other, not both at once.
 import { spawn, spawnSync } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync, unlinkSync, openSync, mkdirSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -19,12 +21,6 @@ import { fileURLToPath } from 'node:url';
 import { createConnection } from 'node:net';
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const DATA = process.env.TT_DATA_DIR ? resolve(process.env.TT_DATA_DIR) : join(REPO, 'server', 'data');
-const PID_FILE = join(DATA, '.tt-serve.pid');
-const LOG_FILE = join(DATA, 'tt-serve.log');
-const DIST = join(REPO, 'client', 'dist');
-const SERVER = join(REPO, 'server', 'src', 'index.js');
-const DEFAULT_PORT = +(process.env.PORT || 3001);
 
 const [cmd = 'help', ...rest] = process.argv.slice(2);
 const has = (name) => rest.includes('--' + name);
@@ -32,6 +28,28 @@ const opt = (name, def) => {
   const i = rest.indexOf('--' + name);
   return i >= 0 && rest[i + 1] ? rest[i + 1] : def;
 };
+
+// Which instance is this command about? --data wins, TT_DATA_DIR is the fallback,
+// server/data is the default. A bare `--data` with no directory after it is an error:
+// silently falling back to the default data dir would aim the command at the wrong install.
+if (has('data') && !opt('data', null)) {
+  console.error('✗ --data needs a directory: tt ' + cmd + ' --data <dir>');
+  process.exit(1);
+}
+const DATA_FLAG = opt('data', null);
+const DATA = DATA_FLAG
+  ? resolve(DATA_FLAG)
+  : process.env.TT_DATA_DIR
+    ? resolve(process.env.TT_DATA_DIR)
+    : join(REPO, 'server', 'data');
+/** Did the caller name an instance, or are we on the default data dir? */
+const DATA_CHOSEN = Boolean(DATA_FLAG || process.env.TT_DATA_DIR);
+const PID_FILE = join(DATA, '.tt-serve.pid');
+const LOG_FILE = join(DATA, 'tt-serve.log');
+const DIST = join(REPO, 'client', 'dist');
+const SERVER = join(REPO, 'server', 'src', 'index.js');
+const DEFAULT_PORT = +(process.env.PORT || 3001);
+
 const port = () => +opt('port', DEFAULT_PORT);
 
 /** The live server {pid, port}, or null (clearing a stale pid file on the way). */
@@ -91,7 +109,9 @@ async function serve() {
     cwd: REPO,
     detached: true,
     stdio: ['ignore', log, log],
-    env: { ...process.env, PORT: String(p) },
+    // TT_DATA_DIR follows the flag: the server must open the same instance the
+    // pid file, log and this runner are pointed at.
+    env: { ...process.env, PORT: String(p), TT_DATA_DIR: DATA },
   });
   writeFileSync(PID_FILE, `${child.pid} ${p}`);
   child.unref();
@@ -99,7 +119,9 @@ async function serve() {
     console.error(`✗ server did not come up within 10s — check the log:\n  ${LOG_FILE}`);
     process.exit(1);
   }
-  console.log(`✓ Time Turtle · http://localhost:${p} · pid ${child.pid}\n  log: ${LOG_FILE}`);
+  console.log(
+    `✓ Time Turtle · http://localhost:${p} · pid ${child.pid}\n  data: ${DATA}\n  log: ${LOG_FILE}`,
+  );
 }
 
 function stop() {
@@ -121,6 +143,12 @@ function status() {
   const s = live();
   if (s) console.log(`running · pid ${s.pid} · http://localhost:${s.port}`);
   else console.log('stopped');
+  console.log(`data: ${DATA}`);
+  // Status is per data dir and nothing more. A static hint, deliberately: the runner
+  // does not go looking for its siblings (DD-015 — no process manager over instances).
+  if (!DATA_CHOSEN) {
+    console.log('(this is the default data dir — other instances may be running under their own --data dirs)');
+  }
 }
 
 function logs() {
@@ -133,16 +161,22 @@ function logs() {
 
 const HELP = `Time Turtle — local app runner
 
-  tt serve [--port N] [--build]    build if needed, run the app in the background
-  tt stop                          stop the background server
-  tt restart [--build] [--port N]  stop, then serve
-  tt status                        is it running, and where?
-  tt build                         rebuild the client bundle
-  tt logs                          the log file path + last lines
+  tt serve [--data DIR] [--port N] [--build]  build if needed, run in the background
+  tt stop [--data DIR]                        stop the background server
+  tt restart [--data DIR] [--build] [--port N]  stop, then serve
+  tt status [--data DIR]                      is it running, and where?
+  tt build                                    rebuild the client bundle
+  tt logs [--data DIR]                        the log file path + last lines
 
 Serves the built client + API on one origin (default :3001). State (DB, mirror,
-pid, log) lives under server/data — so it shares data with \`npm run dev\`; run one
-at a time.`;
+pid, log) lives under the data dir — server/data by default, \`--data DIR\` to pick
+another, \`TT_DATA_DIR\` as the fallback when the flag is absent. Within one data dir
+it shares state with \`npm run dev\`; run one at a time.
+
+A data dir + a port is an instance. Two of them are two independent installs that
+happen to share this checkout — see "Two shapes, two instances" in the README:
+
+  tt serve --data ~/.time-turtle/personal --port 3002`;
 
 switch (cmd) {
   case 'serve':

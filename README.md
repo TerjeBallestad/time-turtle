@@ -80,6 +80,29 @@ tt logs            # log file path + last lines
 off disk, `tt build` refreshes the running app with no restart. Everything (pid, log)
 lives under `server/data`, which is gitignored.
 
+### Two shapes, two instances
+
+A data dir plus a port **is** an instance. `--data DIR` picks it on `serve`, `stop`,
+`restart`, `status` and `logs`; `TT_DATA_DIR` is the fallback when the flag is absent.
+So one checkout runs a personal install and a team-demo install side by side:
+
+```sh
+tt serve --data ~/.time-turtle/personal --port 3002   # personal — your real hours
+tt serve --port 3001                                  # team demo — the existing server/data
+```
+
+Stop, inspect or tail either one by naming it again — `tt stop --data ~/.time-turtle/personal`,
+`tt status --data ~/.time-turtle/personal`. Everything is per data dir: DB, markdown mirror,
+pid file, log, session secret, users, settings. Nothing is shared between instances but the
+code, and neither one knows the other exists — `tt status` answers only for the data dir you
+named, so a bare `tt status` saying `stopped` means *the default instance* is stopped.
+
+**A shape belongs to an instance; you don't flip it.** The storage backend (`sqlite` vs
+`vault`) and everything else in Settings are stored in the data dir, so the personal install
+can be a single-user vault install while the team demo stays multi-user SQLite. Switching the
+demo over would strand its 5 users (see **One vault, one person** above) — give the other
+shape its own data dir instead, and keep both.
+
 First run creates an admin user — **admin@timeturtle.local / turtle** — and seeds demo
 data. Change the password by deleting `server/data/` and restarting with env vars, or
 just make a real admin user in Settings → Users and delete the default one.
@@ -89,7 +112,7 @@ just make a real admin user in Settings → Users and delete the default one.
 | var                                    | default                             | purpose                                                                                   |
 | -------------------------------------- | ----------------------------------- | ----------------------------------------------------------------------------------------- |
 | `PORT`                                 | `3001`                              | API port                                                                                  |
-| `TT_DATA_DIR`                          | `server/data`                       | DB + secret location                                                                      |
+| `TT_DATA_DIR`                          | `server/data`                       | DB + secret location — the instance (`tt --data DIR` wins over it)                        |
 | `TT_MD_DIR`                            | `<data>/markdown`                   | markdown mirror dir fallback (Settings → Mirror folder wins)                              |
 | `TT_MD_DIR_LOCK`                       | unset                               | `1` freezes the mirror at `TT_MD_DIR` — Settings → Mirror folder is ignored and read-only |
 | `TT_BACKEND`                           | `sqlite`                            | default storage backend, `sqlite` or `vault` (Settings → Vault → Backend wins)            |
