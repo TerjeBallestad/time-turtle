@@ -1894,6 +1894,127 @@ const CATALOG_SECTIONS = {
 };
 
 /**
+ * The section's canonical header labels for a given set of rows — every column whose `when` says
+ * it applies. ONE definition, so the emitter and anything reasoning about the header set cannot
+ * drift about whether `Archived` is there.
+ * @param {{ columns: CatalogColumn[] }} spec @param {any[]} rows @returns {CatalogColumn[]}
+ */
+const catalogColumnsFor = (spec, rows) => spec.columns.filter((column) => !column.when || column.when(rows));
+
+/**
+ * THE ANCHOR EMITTER for a catalog section — one of exactly TWO places in this file that decide
+ * how the catalog's revision counter reaches and leaves the bytes (the reader is
+ * `catalogRevisionOf`). SB-104 is open on WHICH counter a per-file arbiter compares, and this
+ * pair is why the ruling is a one-place change: under both live options the sections each carry a
+ * revision line and the bytes are identical, and only the BUMP rule differs — which lives in
+ * SB-057's arbitration, not here.
+ *
+ * Delegates the line itself to `vaultRevisionLine` and the digest to `vaultPayloadDigest`, the
+ * daily block's sole emitter and sole hash. DD-009's digest is PER BLOCK, and that is decisive
+ * here rather than incidental: one file-level revision line spanning four tables would leave the
+ * Projects table with no digest of its own, so an Obsidian diff-merge (SB-051) that rewrites a
+ * RATE would be undetectable. On the one file where a silent rewrite costs money, the per-section
+ * digest is the reason the format looks like this.
+ *
+ * @param {import('./types.ts').VaultCatalogSectionName} section
+ * @param {any[]} rows
+ * @param {{ revision?: number }} [opts]
+ * @returns {string} the region bytes — `## <Heading>` through the revision line, no trailing newline
+ */
+TT.serializeVaultCatalogSection = function (section, rows, opts) {
+  const spec = CATALOG_SECTIONS[section];
+  const list = rows || [];
+  const columns = catalogColumnsFor(spec, list);
+  const revision = opts && opts.revision != null ? opts.revision : 1; // a first write starts at 1
+  const labels = columns.map((column) => column.label);
+  const lines = ['## ' + spec.heading, '', vaultRow(labels), '|' + labels.map(() => '---').join('|') + '|'];
+  for (const row of list) lines.push(vaultRow(columns.map((column) => column.write(row))));
+  // No totals row: the daily block's exists because a day has hours to add up, and this table has
+  // nothing to total. `lines.slice(2)` is therefore exactly the payload the digest covers —
+  // header, delimiter, data rows — taken before the blank line and the anchor are appended.
+  lines.push('', vaultRevisionLine(revision, vaultPayloadDigest(lines.slice(2))));
+  return lines.join('\n');
+};
+
+/**
+ * Parse ONE catalog section out of a note, or refuse. Locates with the SHARED
+ * `TT.locateVaultBlock` — same anchors, same hard stop at the next heading, same per-table
+ * digest — and then reads the table through the section registry.
+ *
+ * The whole-note entry point is `TT.parseVaultCatalog`, which is what enforces whole-catalog
+ * atomicity and the cross-section rules. This one is exposed because each half has to be
+ * testable on its own, and because SB-057 reporting "the Projects section is quarantined" is
+ * more use to a human than "the catalog is quarantined".
+ *
+ * @param {string} md @param {import('./types.ts').VaultCatalogSectionName} section
+ * @returns {import('./types.ts').VaultCatalogSectionResult}
+ */
+TT.parseVaultCatalogSection = function (md, section) {
+  const spec = CATALOG_SECTIONS[section];
+  const loc = TT.locateVaultBlock(md, { heading: spec.heading });
+  // propagated UNCHANGED, plus the section name — the locator owns its reasons, and a shared
+  // reason like 'no-heading' only becomes actionable once you know WHICH heading
+  if (loc.quarantine) return { quarantine: true, reason: loc.reason, section };
+  const lines = String(md == null ? '' : md).split('\n');
+
+  // the header row IS the schema (SB-045), read against this section's vocabulary
+  const headers = vaultRowCells(lines[loc.headerLine]);
+  /** @type {CatalogColumn[]} */
+  const columns = [];
+  for (const label of headers) {
+    const key = label.toLowerCase();
+    const column = spec.columns.find((candidate) => candidate.label.toLowerCase() === key);
+    // UNKNOWN COLUMN → QUARANTINE. A column is a field, and dropping one on rewrite is data loss
+    // with no database behind it to restore from. See the header comment for the row/column
+    // asymmetry this is one half of.
+    if (!column) return { quarantine: true, reason: 'unknown-header', section };
+    if (columns.includes(column)) return { quarantine: true, reason: 'duplicate-header', section };
+    columns.push(column);
+  }
+  const idColumn = spec.columns.find((column) => column.id);
+  const idField = idColumn ? /** @type {string} */ (CATALOG_ID_FIELD[section]) : '';
+  // A section with no id column declared cannot produce a referenceable row at all. Reported as
+  // the row-level fact rather than as a header problem, because that is what it costs.
+  if (idColumn && !columns.includes(idColumn)) return { quarantine: true, reason: 'catalog-missing-id', section };
+
+  /** @type {any[]} */
+  const rows = [];
+  const seen = new Set();
+  for (const ln of loc.rowLines) {
+    const cells = vaultRowCells(lines[ln]);
+    if (cells.length !== columns.length) return { quarantine: true, reason: 'row-cell-count', section };
+    const row = spec.blank();
+    for (let c = 0; c < columns.length; c++) {
+      const reason = columns[c].read(cells[c], row);
+      if (reason) return { quarantine: true, reason, section };
+    }
+    if (idField) {
+      const id = row[idField];
+      // A row with no identity can be neither referenced nor rewritten, and dropping it silently
+      // is how a client disappears out of the file that resolves the rates.
+      if (id === '') return { quarantine: true, reason: 'catalog-missing-id', section };
+      // Under the vault shape there is no database uniqueness constraint behind this file, so the
+      // parse is the only place a duplicate can be caught. Resolution takes the FIRST match
+      // (`TT.projectOf`, `TT.clientOf`), which would make the second row invisible rather than
+      // visibly wrong — the quiet direction, and therefore the one to refuse.
+      if (seen.has(id)) return { quarantine: true, reason: 'catalog-duplicate-id', section };
+      seen.add(id);
+    }
+    rows.push(row);
+  }
+
+  return {
+    quarantine: false,
+    section,
+    heading: loc.heading,
+    revision: loc.revision,
+    headers,
+    rows,
+    verified: loc.verified,
+  };
+};
+
+/**
  * The settings keys the catalog note carries, and the ONLY ones it may.
  *
  * `currency` and `language` are free text (`putSettings` writes them as given).
@@ -2142,127 +2263,6 @@ TT.writeVaultCatalog = function (md, catalog, opts) {
   if (TT.parseVaultCatalog(written).quarantine)
     return { md: input, quarantine: true, reason: 'write-would-corrupt', section: null };
   return { md: written, quarantine: false, reason: null, section: null };
-};
-
-/**
- * The section's canonical header labels for a given set of rows — every column whose `when` says
- * it applies. ONE definition, so the emitter and anything reasoning about the header set cannot
- * drift about whether `Archived` is there.
- * @param {{ columns: CatalogColumn[] }} spec @param {any[]} rows @returns {CatalogColumn[]}
- */
-const catalogColumnsFor = (spec, rows) => spec.columns.filter((column) => !column.when || column.when(rows));
-
-/**
- * THE ANCHOR EMITTER for a catalog section — one of exactly TWO places in this file that decide
- * how the catalog's revision counter reaches and leaves the bytes (the reader is
- * `catalogRevisionOf`). SB-104 is open on WHICH counter a per-file arbiter compares, and this
- * pair is why the ruling is a one-place change: under both live options the sections each carry a
- * revision line and the bytes are identical, and only the BUMP rule differs — which lives in
- * SB-057's arbitration, not here.
- *
- * Delegates the line itself to `vaultRevisionLine` and the digest to `vaultPayloadDigest`, the
- * daily block's sole emitter and sole hash. DD-009's digest is PER BLOCK, and that is decisive
- * here rather than incidental: one file-level revision line spanning four tables would leave the
- * Projects table with no digest of its own, so an Obsidian diff-merge (SB-051) that rewrites a
- * RATE would be undetectable. On the one file where a silent rewrite costs money, the per-section
- * digest is the reason the format looks like this.
- *
- * @param {import('./types.ts').VaultCatalogSectionName} section
- * @param {any[]} rows
- * @param {{ revision?: number }} [opts]
- * @returns {string} the region bytes — `## <Heading>` through the revision line, no trailing newline
- */
-TT.serializeVaultCatalogSection = function (section, rows, opts) {
-  const spec = CATALOG_SECTIONS[section];
-  const list = rows || [];
-  const columns = catalogColumnsFor(spec, list);
-  const revision = opts && opts.revision != null ? opts.revision : 1; // a first write starts at 1
-  const labels = columns.map((column) => column.label);
-  const lines = ['## ' + spec.heading, '', vaultRow(labels), '|' + labels.map(() => '---').join('|') + '|'];
-  for (const row of list) lines.push(vaultRow(columns.map((column) => column.write(row))));
-  // No totals row: the daily block's exists because a day has hours to add up, and this table has
-  // nothing to total. `lines.slice(2)` is therefore exactly the payload the digest covers —
-  // header, delimiter, data rows — taken before the blank line and the anchor are appended.
-  lines.push('', vaultRevisionLine(revision, vaultPayloadDigest(lines.slice(2))));
-  return lines.join('\n');
-};
-
-/**
- * Parse ONE catalog section out of a note, or refuse. Locates with the SHARED
- * `TT.locateVaultBlock` — same anchors, same hard stop at the next heading, same per-table
- * digest — and then reads the table through the section registry.
- *
- * The whole-note entry point is `TT.parseVaultCatalog`, which is what enforces whole-catalog
- * atomicity and the cross-section rules. This one is exposed because each half has to be
- * testable on its own, and because SB-057 reporting "the Projects section is quarantined" is
- * more use to a human than "the catalog is quarantined".
- *
- * @param {string} md @param {import('./types.ts').VaultCatalogSectionName} section
- * @returns {import('./types.ts').VaultCatalogSectionResult}
- */
-TT.parseVaultCatalogSection = function (md, section) {
-  const spec = CATALOG_SECTIONS[section];
-  const loc = TT.locateVaultBlock(md, { heading: spec.heading });
-  // propagated UNCHANGED, plus the section name — the locator owns its reasons, and a shared
-  // reason like 'no-heading' only becomes actionable once you know WHICH heading
-  if (loc.quarantine) return { quarantine: true, reason: loc.reason, section };
-  const lines = String(md == null ? '' : md).split('\n');
-
-  // the header row IS the schema (SB-045), read against this section's vocabulary
-  const headers = vaultRowCells(lines[loc.headerLine]);
-  /** @type {CatalogColumn[]} */
-  const columns = [];
-  for (const label of headers) {
-    const key = label.toLowerCase();
-    const column = spec.columns.find((candidate) => candidate.label.toLowerCase() === key);
-    // UNKNOWN COLUMN → QUARANTINE. A column is a field, and dropping one on rewrite is data loss
-    // with no database behind it to restore from. See the header comment for the row/column
-    // asymmetry this is one half of.
-    if (!column) return { quarantine: true, reason: 'unknown-header', section };
-    if (columns.includes(column)) return { quarantine: true, reason: 'duplicate-header', section };
-    columns.push(column);
-  }
-  const idColumn = spec.columns.find((column) => column.id);
-  const idField = idColumn ? /** @type {string} */ (CATALOG_ID_FIELD[section]) : '';
-  // A section with no id column declared cannot produce a referenceable row at all. Reported as
-  // the row-level fact rather than as a header problem, because that is what it costs.
-  if (idColumn && !columns.includes(idColumn)) return { quarantine: true, reason: 'catalog-missing-id', section };
-
-  /** @type {any[]} */
-  const rows = [];
-  const seen = new Set();
-  for (const ln of loc.rowLines) {
-    const cells = vaultRowCells(lines[ln]);
-    if (cells.length !== columns.length) return { quarantine: true, reason: 'row-cell-count', section };
-    const row = spec.blank();
-    for (let c = 0; c < columns.length; c++) {
-      const reason = columns[c].read(cells[c], row);
-      if (reason) return { quarantine: true, reason, section };
-    }
-    if (idField) {
-      const id = row[idField];
-      // A row with no identity can be neither referenced nor rewritten, and dropping it silently
-      // is how a client disappears out of the file that resolves the rates.
-      if (id === '') return { quarantine: true, reason: 'catalog-missing-id', section };
-      // Under the vault shape there is no database uniqueness constraint behind this file, so the
-      // parse is the only place a duplicate can be caught. Resolution takes the FIRST match
-      // (`TT.projectOf`, `TT.clientOf`), which would make the second row invisible rather than
-      // visibly wrong — the quiet direction, and therefore the one to refuse.
-      if (seen.has(id)) return { quarantine: true, reason: 'catalog-duplicate-id', section };
-      seen.add(id);
-    }
-    rows.push(row);
-  }
-
-  return {
-    quarantine: false,
-    section,
-    heading: loc.heading,
-    revision: loc.revision,
-    headers,
-    rows,
-    verified: loc.verified,
-  };
 };
 
 // ---- canonical row string (DD-008 spec obligation — nothing computes this in phase 1) ----
