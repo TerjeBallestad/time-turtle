@@ -1323,7 +1323,10 @@ describe('vault block serialize + splice (SB-055)', () => {
   it('it is impossible to write from a quarantined block — the input comes back byte-identical', () => {
     const QUARANTINED = [
       ['no heading', HOST.replace('## Time Log', '## Tidsloggen')],
-      ['no revision line', HOST.replace('`revision: 4 · 958a`\n', '')],
+      // DD-012 moved the bare "no revision line" case OUT of this list — that note is now
+      // adopted, and the adoption suite owns it. What still refuses is a missing anchor over a
+      // region TT cannot describe, so that is what this row asserts.
+      ['no revision line, and prose under the heading', HOST.replace('`revision: 4 · 958a`\n', '').replace('## Time Log\n', '## Time Log\n\na hand edit left this here\n')], // prettier-ignore
       ['revision past the next heading', HOST.replace('`revision: 4 · 958a`\n', '').replace('It went fine.', '`revision: 4 · 958a`')], // prettier-ignore
       ['unknown header', HOST.replace('| Time | Mode |', '| Time | Mood |')],
       ['a broken Time cell', HOST.replace('09:00→09:15', 'sometime this morning')],
@@ -1640,7 +1643,9 @@ describe('vault block round-trip (SB-055)', () => {
     const REFUSALS = [
       ['no-heading', OK.replace('## Time Log', '## Tidsloggen')],
       ['multiple-headings', OK + '\n## Time Log\n\n| Time |\n|---|\n\n`revision: 9`\n'],
-      ['no-revision', OK.replace('`revision: 3`\n', '')],
+      // DD-012: `OK` with its revision line deleted is an ADOPTABLE note now, not a refusal —
+      // heading once, one well-formed TT table, nothing else — so it moved to the adoption
+      // suite. 'no-revision' survives as a locator-only verdict; see `elsewhere` below.
       ['revision-past-next-heading', OK.replace('`revision: 3`\n', '').replace('- a stray thought', '`revision: 3`')],
       ['multiple-revisions', OK.replace('`revision: 3`', '`revision: 3`\n\n`revision: 4`')],
       ['no-table', OK.replace('| Time | Mode | Project | Task | Bill |\n|---|---|---|---|---|\n', '')],
@@ -1679,8 +1684,12 @@ describe('vault block round-trip (SB-055)', () => {
       const reasons = [...union[1].matchAll(/'([a-z-]+)'/g)].map((m) => m[1]);
       expect(reasons.length).toBe(15);
       const core = readFileSync(new URL('../shared/core.js', import.meta.url), 'utf8');
-      // covered by their own tests in the end-gate review-regression section below
-      const elsewhere = new Set(['crlf-line-endings', 'write-would-corrupt']);
+      // covered by their own tests in the end-gate review-regression section below.
+      // 'no-revision' is on this list as of DD-012: `writeVaultBlock` can no longer produce it,
+      // because a missing bottom anchor is now either adopted or refused for the specific reason
+      // TT could not describe the region. It stays a LOCATOR verdict — asserted in the locator
+      // suite above, and in the adoption suite below as the sole gate adoption may act on.
+      const elsewhere = new Set(['crlf-line-endings', 'write-would-corrupt', 'no-revision']);
       for (const reason of reasons) {
         expect(core.includes(`'${reason}'`), `reason declared but never emitted: ${reason}`).toBe(true);
         if (elsewhere.has(reason)) continue;
@@ -2387,5 +2396,262 @@ describe('vault Mode tags + Project vaultNote (SB-059)', () => {
     const back = TT.parseMd(TT.serializeMd(state));
     expect(back.projects[0].vaultNote).toBe(undefined);
     expect(back.entries[0].tags).toBe(undefined);
+  });
+});
+
+// ---- SB-091 / DD-012: TT adopts a daily note on first write ----
+// Terje, raising SB-089: *"if I create a daily note by hand, I can't write to it with TT? That
+// needs a solution."* Before this, `writeVaultBlock` required an already-located block and
+// `locateVaultBlock` demanded both anchors, so a note that did not come from the Templater
+// template was permanently unwritable — it quarantined forever while looking perfectly fine to a
+// human.
+//
+// The precondition is STRICT and this suite is mostly refusals, for the same reason the locator
+// suite is: adoption is the one path that creates an anchor, and a suite that fed it only
+// adoptable notes would prove the opposite of what it claims.
+//
+// THE EXPENSIVE ONE IS `refuses a real pre-cutover note` — 60 notes, 141 hand-written rows of
+// Terje's real work log, ruled untouched/unparsed/invisible by SB-049. Note what that test
+// actually measures, because the ticket's premise was wrong about it: those notes DO carry
+// `## Time Log` exactly once, and the region under it IS a single well-formed markdown table, so
+// they pass precondition 1 and the SHAPE half of precondition 2. What refuses them is the header
+// vocabulary — `Cat`/`Description`, uniform across all 66 header rows measured in the vault. A
+// shape-only precondition would have adopted every one of them. That is precisely why adoption
+// validates by running the real parser rather than a private opinion about "well-formed".
+// ## Verified red-green: 2026-07-26
+describe('adopting a hand-made daily note (SB-091 / DD-012)', () => {
+  /** @param {Partial<import('../shared/types.ts').VaultEntry>} o */
+  const E = (o) => ({ id: 'runtime-id', date: '2026-07-26', start: null, end: null, durMin: null, project: null, label: '', note: '', billable: false, ...o }); // prettier-ignore
+  /** the runtime id is ephemeral (DD-008) — never part of a round-trip claim */
+  const withoutId = (entries) => entries.map(({ id, ...rest }) => rest);
+  /** @param {Partial<import('../shared/types.ts').Project>} o */
+  const P = (o) => ({ code: 'X', name: 'X', clientId: null, rate: null, billable: true, archived: false, ...o });
+  const PROJECTS = [P({ code: 'LT-01', name: 'Lifelines Tycoon', vaultNote: 'Lifelines Tycoon' })];
+
+  /** Terje's own hand: no revision line anywhere, an hour already typed in, no totals row. */
+  const HAND_MADE = [
+    '---',
+    'date: 2026-07-26',
+    '---',
+    '',
+    '## Intentions',
+    '',
+    '- ship adoption',
+    '',
+    '## Time Log',
+    '',
+    '| Time | Mode | Project | Task | Bill |',
+    '|---|---|---|---|---|',
+    '| 09:00→10:30 | #deep | [[Lifelines Tycoon]] | Systems pass<br>- the economy loop | ✓ |',
+    '| 30m | #admin | FAG | Invoicing | |',
+    '',
+    '## Captures',
+    '',
+    '- something Terje wrote',
+    '',
+  ].join('\n');
+
+  /** The other adoptable shape: the heading is there and nothing at all is under it. */
+  const EMPTY_REGION = ['# 2026-07-26', '', '## Time Log', '', '## Captures', '', '- a thought', ''].join('\n');
+
+  // ---- 1. the two shapes that adopt ----
+
+  it('imports the rows of a hand-made table — the whole point of the ticket', () => {
+    const parsed = TT.parseVaultBlock(HAND_MADE, { date: '2026-07-26', projects: PROJECTS });
+    expect(parsed.quarantine).toBe(false);
+    expect(parsed.adopted).toBe(true);
+    expect(parsed.revision).toBe(1); // DD-012: a first write starts at 1
+    expect(parsed.headers).toEqual(['Time', 'Mode', 'Project', 'Task', 'Bill']);
+    // the rows went through the SAME parse and the same cell primitives as any other block —
+    // SB-059's tags and the `[[wikilink]]` → code resolution included, since adoption is a read
+    // path into the data model and not a shortcut into it
+    expect(withoutId(parsed.entries)).toEqual([
+      { date: '2026-07-26', start: 540, end: 630, durMin: null, project: 'LT-01', label: 'Systems pass', note: 'the economy loop', billable: true, tags: ['#deep'] }, // prettier-ignore
+      { date: '2026-07-26', start: null, end: null, durMin: 30, project: 'FAG', label: 'Invoicing', note: '', billable: false, tags: ['#admin'] }, // prettier-ignore
+    ]);
+  });
+
+  it('adopts a region that is completely empty', () => {
+    const parsed = TT.parseVaultBlock(EMPTY_REGION, { date: '2026-07-26' });
+    expect(parsed.quarantine).toBe(false);
+    expect(parsed.adopted).toBe(true);
+    expect(parsed.entries).toEqual([]); // an empty region is zero entries, not a refusal
+    const res = TT.writeVaultBlock(EMPTY_REGION, [E({ durMin: 45, label: 'First hour' })]);
+    expect(res.quarantine).toBe(false);
+    expect(res.adopted).toBe(true);
+    expect(res.md).toContain('| 45m | | | First hour | |');
+  });
+
+  it('NEVER reports `verified` on an adopted block, in either shape', () => {
+    // `verified` means "these bytes are what their writer wrote" (DD-009). TT is not the writer
+    // of a note it has never touched, and a digest taken at adoption time would be over the very
+    // bytes it is meant to check — vacuously true, and SB-057's arbitration is entitled to trust
+    // it. There is no forced flag behind this: the anchor adoption synthesises carries no digest,
+    // so DD-009's existing hand-made-block path reports it. The empty-region case is the trap —
+    // that block IS entirely TT's own bytes, and it must still come back unverified.
+    expect(TT.parseVaultBlock(HAND_MADE).verified).toBe(false);
+    expect(TT.parseVaultBlock(EMPTY_REGION).verified).toBe(false);
+  });
+
+  it('the anchor heading comes from settings — adoption hardcodes nothing', () => {
+    const renamed = HAND_MADE.replace('## Time Log', '## Tidsloggen');
+    expect(TT.parseVaultBlock(renamed).quarantine).toBe(true); // not TT's heading
+    const parsed = TT.parseVaultBlock(renamed, { heading: 'Tidsloggen' });
+    expect(parsed.adopted).toBe(true);
+    expect(parsed.entries).toHaveLength(2);
+    expect(TT.writeVaultBlock(renamed, [], { heading: 'Tidsloggen' }).md).toContain('## Tidsloggen');
+  });
+
+  // ---- 2. the write: an adopted note becomes an ordinary block ----
+
+  it('writes the anchor with its digest, and the second write is a fixed point', () => {
+    const day = TT.parseVaultBlock(HAND_MADE, { date: '2026-07-26', projects: PROJECTS }).entries;
+    const first = TT.writeVaultBlock(HAND_MADE, day, { projects: PROJECTS });
+    expect(first.quarantine).toBe(false);
+    expect(first.adopted).toBe(true);
+
+    // DD-012: `revision: 1` PLUS SB-080's payload digest — and it must verify, or adoption has
+    // minted a block that fails SB-080's own check the moment it is read back
+    const loc = TT.locateVaultBlock(first.md);
+    expect(loc.quarantine).toBe(false);
+    expect(loc.revision).toBe(1);
+    expect(loc.digest).toMatch(/^[0-9a-f]{4}$/);
+    expect(loc.verified).toBe(true);
+    expect(first.md).toContain('| **2h** | | | | **1.5h billable** |'); // TT's totals row now
+
+    // …and from here it is an ordinary block: no second adoption, and the bytes are a fixed point
+    const second = TT.writeVaultBlock(first.md, day, { projects: PROJECTS });
+    expect(second.adopted).toBe(false);
+    expect(second.md).toBe(first.md);
+    expect(TT.parseVaultBlock(first.md, { date: '2026-07-26', projects: PROJECTS }).adopted).toBe(false);
+  });
+
+  it('nothing outside the region moves — asserted on the bytes above and below it', () => {
+    const res = TT.writeVaultBlock(HAND_MADE, [E({ durMin: 15, label: 'A new hour' })]);
+    expect(res.quarantine).toBe(false);
+    const above = (md) => md.slice(0, md.indexOf('## Time Log'));
+    const below = (md) => md.slice(md.indexOf('## Captures'));
+    expect(above(res.md)).toBe(above(HAND_MADE)); // frontmatter + `## Intentions` untouched
+    expect(below(res.md)).toBe(below(HAND_MADE)); // Terje's `## Captures` untouched
+    // the same claim for the empty-region shape, where TT authors the table as well
+    const res2 = TT.writeVaultBlock(EMPTY_REGION, []);
+    expect(above(res2.md)).toBe(above(EMPTY_REGION));
+    expect(below(res2.md)).toBe(below(EMPTY_REGION));
+  });
+
+  // ---- 3. everything else still quarantines, and writes nothing ----
+
+  /** A real pre-cutover daily note (SB-049): `Calendar/Daily/2026-06-03.md`, shape verbatim. */
+  const PRE_CUTOVER = [
+    '---',
+    'date: 2026-06-03',
+    'day: Wednesday',
+    'work_mode: learn',
+    'main_project: "[[Lifelines]]"',
+    '---',
+    '',
+    '## Intentions',
+    '',
+    '### Theme',
+    'Step back from Lifelines fog.',
+    '',
+    '## Habits',
+    '',
+    '- [ ] 🧘 Meditation',
+    '',
+    '## Time Log',
+    '',
+    '| Time | Cat | Project | Description |',
+    '|------|-----|---------|-------------|',
+    '| 22:15-22:45 | #admin | [[Planning]] | Daily planning ritual |',
+    '#### Hours',
+    '',
+    '```dataviewjs',
+    'const content = await dv.io.load(dv.currentFilePath);',
+    'const rowRegex = /^\\|\\s*(\\d{2}:\\d{2})-(\\d{2}:\\d{2})\\s*\\|\\s*#?(\\w+)\\s*\\|/;',
+    'dv.table(["Category", "Hours"], rows);',
+    '```',
+    '',
+    '## Captures',
+    '',
+    'Loose thoughts, ideas, things to process later.',
+    '',
+    '## Reflection',
+    '',
+    '*What went well?*',
+    '',
+  ].join('\n');
+
+  const REFUSALS = [
+    {
+      name: 'prose under the heading',
+      reason: 'no-table',
+      md: HAND_MADE.replace('## Time Log\n', '## Time Log\n\nI worked on things today.\n'),
+    },
+    {
+      name: 'a second table under the heading',
+      reason: 'unexpected-content-in-block',
+      md: HAND_MADE.replace(
+        '| 30m | #admin | FAG | Invoicing | |\n',
+        '| 30m | #admin | FAG | Invoicing | |\n\n| Time | Task |\n|---|---|\n| 1h | Something else |\n',
+      ),
+    },
+    {
+      name: 'an unparseable row — the hour must never silently vanish',
+      reason: 'unparseable-time',
+      md: HAND_MADE.replace('| 30m |', '| after lunch |'),
+    },
+    {
+      name: 'a header outside the vocabulary',
+      reason: 'unknown-header',
+      md: HAND_MADE.replace('| Time | Mode |', '| Time | Mood |'),
+    },
+    {
+      // SB-084's signal is computed before any branch and must still win: a tainted file is not
+      // an adoptable one, and TT does not rewrite line endings it did not author (SB-083)
+      name: 'a CRLF-tainted note',
+      reason: 'crlf-line-endings',
+      md: HAND_MADE.replace(/\n/g, '\r\n'),
+    },
+    {
+      name: 'two anchor headings',
+      reason: 'multiple-headings',
+      md: HAND_MADE + '\n## Time Log\n\n| Time |\n|---|\n',
+    },
+    {
+      // the dangerous shape SB-057 made both anchors mandatory for. Adoption acts ONLY on
+      // 'no-revision', so a bottom anchor loose in someone else's section still refuses rather
+      // than getting a second one inserted above it.
+      name: 'a revision line loose past the next heading',
+      reason: 'revision-past-next-heading',
+      md: HAND_MADE.replace('- something Terje wrote', '`revision: 8`'),
+    },
+    {
+      name: 'a real pre-cutover note (SB-049 stays closed)',
+      reason: 'unknown-header',
+      md: PRE_CUTOVER,
+    },
+  ];
+
+  for (const { name, reason, md } of REFUSALS) {
+    it(`refuses: ${name}`, () => {
+      expect(TT.parseVaultBlock(md)).toEqual({ quarantine: true, reason });
+      expect(TT.parseVaultBlock(md).entries).toBeUndefined(); // no partial import
+      const res = TT.writeVaultBlock(md, [E({ durMin: 15, label: 'A new hour' })]);
+      expect(res).toEqual({ md, quarantine: true, reason, adopted: false }); // not one byte written
+    });
+  }
+
+  it('SB-049: a pre-cutover note passes precondition 1 — only the VOCABULARY keeps it closed', () => {
+    // Recorded because the ticket's premise was that these notes fail precondition 1 (no anchor
+    // heading). They do not. Measured across the vault's 66 pre-cutover Time Log tables, every
+    // one uses `| Time | Cat | Project | Description |` — so the header vocabulary is the single
+    // thing standing between adoption and importing 141 rows of Terje's personal work log.
+    expect(PRE_CUTOVER.match(/^## Time Log$/gm)).toHaveLength(1); // the anchor IS there, once
+    expect(TT.locateVaultBlock(PRE_CUTOVER).reason).toBe('no-revision'); // …and found by the locator
+    // the region is a well-shaped markdown table too: swap the two labels TT has no field for,
+    // and the very same note adopts. Nothing else about it changes.
+    const vocabularised = PRE_CUTOVER.replace('| Time | Cat | Project | Description |', '| Time | Mode | Project | Task |'); // prettier-ignore
+    expect(TT.parseVaultBlock(vocabularised).adopted).toBe(true);
   });
 });

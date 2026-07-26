@@ -364,8 +364,18 @@ export interface VaultBlockParse {
   revision: number;
   headers: string[];
   entries: VaultEntry[];
-  /** Propagated from the locator — see `VaultBlockRegion.verified` (DD-009). */
+  /**
+   * Propagated from the locator — see `VaultBlockRegion.verified` (DD-009). Forced `false` on an
+   * adopted block: TT did not write those bytes, so nothing about them verifies.
+   */
   verified: boolean;
+  /**
+   * DD-012: the note carried the anchor heading but no `` `revision: N` `` line, and TT
+   * synthesised one because it could describe the whole region — so these entries were IMPORTED
+   * from a block TT has never written. The note on disk is unchanged; adoption reaches disk only
+   * through `writeVaultBlock`.
+   */
+  adopted: boolean;
 }
 
 export type VaultBlockParseResult = VaultBlockParse | VaultQuarantine;
@@ -648,6 +658,12 @@ export interface TTModule {
    * SB-059: `opts.projects` is the catalog used to resolve a `[[Wikilink]]` Project cell
    * back to its project CODE (matched on `Project.vaultNote`). Absent — or no project
    * claiming that note — the cell is carried verbatim, exactly as before SB-059.
+   *
+   * DD-012: a note carrying the anchor heading but no bottom anchor is ADOPTED first, provided
+   * everything between the heading and the next `##` (or EOF) is empty or a single well-formed TT
+   * table — so its rows come back as entries, flagged `adopted: true` and never `verified`. This
+   * reads only; nothing is written. A missing bottom anchor is therefore no longer a refusal on
+   * its own, and 'no-revision' is a `locateVaultBlock`-only verdict.
    */
   parseVaultBlock(md: string, opts?: { heading?: string; date?: string; projects?: Project[] }): VaultBlockParseResult;
   /**
@@ -675,6 +691,11 @@ export interface TTModule {
    * located region survives untouched. On a quarantine verdict the input `md` is
    * returned byte-identical — it is impossible to write from a quarantined block. The
    * revision is not bumped here; that is SB-057's arbitration.
+   *
+   * DD-012: a note with the anchor heading and no bottom anchor is ADOPTED rather than refused
+   * when TT can describe its whole region, and `adopted` says so. That first write has no prior
+   * `(rev, hash)` in SB-057's index at all — a new arbitration row, not a variant of an existing
+   * one. `adopted` is false on every refusal, since a refusal writes nothing.
    */
   writeVaultBlock(
     md: string,
@@ -687,7 +708,7 @@ export interface TTModule {
       timeSeparator?: VaultTimeSeparator;
       projects?: Project[];
     },
-  ): { md: string; quarantine: boolean; reason: VaultQuarantineReason | null };
+  ): { md: string; quarantine: boolean; reason: VaultQuarantineReason | null; adopted: boolean };
   serializeMd(state: Catalog): string;
   newId(): string;
   parseMd(md: string): Catalog;

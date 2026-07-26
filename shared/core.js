@@ -619,6 +619,16 @@ function vaultProjectCode(value, projects) {
 // next line MUST be the `|---|` delimiter row, data rows run contiguously after it, and
 // between the table and the revision line only blank lines are allowed. Anything else is a
 // hand edit TT cannot account for, and it quarantines instead of splicing over it.
+//
+// ADOPTION (DD-012, ruled by Terje in SB-089). The locator above describes a note that ALREADY
+// has both anchors. A daily note made by hand — or on the phone, or before the Templater
+// template existed — has the heading and no `revision:` line, and before DD-012 that note was
+// permanently unwritable: it quarantined forever while looking perfectly fine to a human.
+// `vaultAdoptionCandidate` below is the one path that creates a bottom anchor, and it is
+// deliberately NOT in this function: a located region's fields are LINE OFFSETS, and handing
+// back offsets into a string the caller does not have is how a splice eats the wrong lines.
+// `locateVaultBlock` therefore keeps answering exactly one question — "is there a block here" —
+// and `parseVaultBlock` / `writeVaultBlock` run adoption first, on the note, before locating.
 const VAULT_HEADING = 'Time Log';
 // THE PAYLOAD DIGEST (DD-009, ruled by Terje in SB-078). The bottom anchor carries a short
 // digest of the table payload — `` `revision: 8 · a3f1` `` — because `revision` alone is
@@ -792,6 +802,37 @@ function markFences(lines) {
   return out;
 }
 /**
+ * The region bounds: the single anchor heading, and the hard stop that ends its region.
+ *
+ * ONE definition, shared by the locator and by adoption (DD-012). Adoption must never consider
+ * a wider region than the locator would — that is the whole safety argument for letting it
+ * insert an anchor — and two copies of this loop is exactly how that stops being true.
+ *
+ * @param {string[]} lines @param {boolean[]} fenced @param {string} heading already trimmed + NFC
+ * @returns {{ count: number, start: number, stop: number }} `count` is how many unfenced anchor
+ *   headings the note carries; `start` (the heading line) and `stop` (the next ATX heading of
+ *   any level, or `lines.length`) are meaningful ONLY when it is exactly 1.
+ */
+function vaultAnchorScan(lines, fenced, heading) {
+  let count = 0;
+  let start = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (fenced[i] || !isHeadingAnchor(lines[i], heading)) continue;
+    if (!count) start = i;
+    count++;
+  }
+  if (count !== 1) return { count, start: -1, stop: -1 };
+  let stop = lines.length;
+  for (let i = start + 1; i < lines.length; i++) {
+    if (fenced[i]) continue;
+    if (/^#{1,6}[ \t]/.test(lines[i])) {
+      stop = i;
+      break;
+    }
+  }
+  return { count, start, stop };
+}
+/**
  * Locate the vault block in a note, or refuse. Never throws.
  * @param {string} md @param {{ heading?: string }} [opts]
  * @returns {import('./types.ts').VaultBlockLocation}
@@ -812,30 +853,16 @@ TT.locateVaultBlock = function (md, opts) {
   // the bug class PLAN-009's review unified in the totals-row detection.
   const crlf = lines.some((line) => line.endsWith('\r'));
 
-  // 1. the top anchor — the heading TEXT compared exactly, never interpolated into a regex
-  /** @type {number[]} */
-  const anchors = [];
-  for (let i = 0; i < lines.length; i++) {
-    if (!fenced[i] && isHeadingAnchor(lines[i], heading)) anchors.push(i);
-  }
+  // 1. the top anchor — the heading TEXT compared exactly, never interpolated into a regex —
+  //    and 2. the hard stop, the next heading of any level, which ends the region full stop
+  const { count, start, stop } = vaultAnchorScan(lines, fenced, heading);
   // diagnose CRLF rather than blaming the heading — 'no-heading' would send a human looking in
   // the wrong place forever
-  if (!anchors.length) return vaultQuarantine(crlf ? 'crlf-line-endings' : 'no-heading');
+  if (!count) return vaultQuarantine(crlf ? 'crlf-line-endings' : 'no-heading');
   // two blocks with one name: nothing can say which is the day's, so neither is writable. This
   // one does NOT defer to `crlf` — it found MORE than it expected, which a `\r` cannot explain,
   // so the specific reason is the useful one (same for 'multiple-revisions' below).
-  if (anchors.length > 1) return vaultQuarantine('multiple-headings');
-  const start = anchors[0];
-
-  // 2. the hard stop — the next heading of any level ends the region, full stop
-  let stop = lines.length;
-  for (let i = start + 1; i < lines.length; i++) {
-    if (fenced[i]) continue;
-    if (/^#{1,6}[ \t]/.test(lines[i])) {
-      stop = i;
-      break;
-    }
-  }
+  if (count > 1) return vaultQuarantine('multiple-headings');
 
   // 3. the bottom anchor, which must sit BEFORE the hard stop
   /** @type {{ line: number, revision: number, digest: string | null }[]} */
@@ -909,6 +936,68 @@ TT.locateVaultBlock = function (md, opts) {
   };
 };
 
+// ---- adoption: TT writes the bottom anchor for a region it can describe (DD-012) ----
+// Terje, resolving SB-089: *"if I create a daily note by hand, I can't write to it with TT?
+// That needs a solution."* This is the solution, and its precondition is strict. Adoption
+// applies when BOTH hold:
+//
+//   1. the anchor heading is present EXACTLY ONCE (name from settings, never hardcoded), and
+//   2. everything between it and the next `##` — or EOF — is either EMPTY, or a single
+//      well-formed TT table and nothing else.
+//
+// Anything else still quarantines exactly as before: prose under the heading, a second table,
+// an unparseable row, a header outside the vocabulary, more than one anchor heading, and a
+// CRLF taint (SB-084's signal is computed before any branch and wins — a tainted file is not
+// an adoptable one).
+//
+// WHY THIS IS SAFE, given SB-057 made both anchors mandatory on purpose. That rule exists so a
+// missing bottom anchor can never let a write run into `## Captures`, and the
+// `revision-past-next-heading` check already bounds the scan to the region before the next
+// heading. Under the precondition above that region is one TT can describe COMPLETELY — so
+// inserting the anchor writes nothing TT did not author, which is the actual invariant being
+// protected. Two structural properties keep it that way, and both are asserted:
+//   • adoption is attempted ONLY when the locator's verdict is exactly 'no-revision', which
+//     already means: not CRLF-tainted, exactly one anchor heading, and no `revision:` line
+//     anywhere in the note — including past the hard stop, which stays its own refusal.
+//   • adoption only ever INSERTS lines, inside `vaultAnchorScan`'s bounds. It replaces no line
+//     and deletes none, so a byte outside the region cannot move even in principle.
+//
+// AND IT IMPORTS THE ROWS. A well-formed table already in the note becomes TT entries — the
+// point of the ticket, since a note Terje typed an hour into should work. That makes adoption a
+// READ path into the data model, not only a write path, so there is no shortcut anywhere here:
+// this function only synthesises the missing anchor, and the resulting note goes through the
+// same `parseAnchoredBlock` — the same header vocabulary, the same cell primitives, the same
+// row-level quarantine — as any block TT wrote itself. Validation is that parse, not a second
+// opinion living here; a shape-only precondition would have adopted all 60 pre-cutover notes
+// (they DO carry `## Time Log` and a well-shaped table — it is `Cat`/`Description` failing the
+// vocabulary that keeps SB-049 closed, not the heading).
+/**
+ * @param {string} md @param {{ heading?: string }} [opts]
+ * @returns {string | null} the note with the missing anchor inserted — an INPUT to the parse,
+ *   never bytes for disk — or null when adoption does not apply.
+ */
+function vaultAdoptionCandidate(md, opts) {
+  const loc = TT.locateVaultBlock(md, opts);
+  // 'no-revision' and nothing else. A located block needs no adopting, and every other refusal
+  // is one adoption is not entitled to overrule.
+  if (!loc.quarantine || loc.reason !== 'no-revision') return null;
+  const lines = md.split('\n');
+  const heading = nfc(((opts && opts.heading) || VAULT_HEADING).trim());
+  const { count, start, stop } = vaultAnchorScan(lines, markFences(lines), heading);
+  if (count !== 1) return null; // unreachable via 'no-revision'; the narrowing is the point
+  let last = -1; // the last non-blank line of the region
+  for (let i = start + 1; i < stop; i++) if (lines[i].trim() !== '') last = i;
+  // An EMPTY region needs a table before it can carry an anchor at all — the locator requires
+  // one — so TT authors that too, taken from the serializer rather than composed here so the
+  // block's shape keeps exactly one emitter. Its revision line is dropped in favour of the
+  // digest-less one below; everything before it is `['## <heading>', '', header, delimiter,
+  // totals]`, and the heading is dropped because the note already has it, byte for byte.
+  const empty = TT.serializeVaultBlock([], { heading }).split('\n').slice(1, -2);
+  const insert = last < 0 ? empty.concat('', VAULT_ADOPTED_ANCHOR) : ['', VAULT_ADOPTED_ANCHOR];
+  const at = last < 0 ? start + 1 : last + 1;
+  return lines.slice(0, at).concat(insert, lines.slice(at)).join('\n');
+}
+
 // ---- vault block parse (SB-055) ----
 // THE HEADER ROW IS THE SCHEMA (SB-045). Keys are the lowercased header labels
 // (`Task` → `task`); there is no `cols=` attribute anywhere. Headers are canonical
@@ -947,15 +1036,14 @@ const VAULT_COLUMNS = ['Time', 'Mode', 'Project', 'Task', 'Bill'];
 const VAULT_KEYS = VAULT_COLUMNS.map((label) => label.toLowerCase());
 const BILL_YES = '✓'; // U+2713. SB-045: `✓` or blank — never `—`, and nothing else parses.
 /**
- * Parse the vault block into entries, or propagate the locator's quarantine verdict.
- * `opts.date` is the note's date: SB-045's format has NO date column (the filename
- * carries it), so SB-056/SB-057 supply it here. It defaults to '' rather than today, so
- * a caller that forgets it produces a visibly dateless entry instead of a silently
- * misdated one.
+ * Parse a note that ALREADY carries both anchors, or propagate the locator's verdict. The
+ * adoption-aware entry point is `TT.parseVaultBlock` below, which is this function plus the
+ * DD-012 pre-step; everything that must not adopt twice — the adoption candidate's own
+ * validation, and `writeVaultBlock`'s output gate — calls this one.
  * @param {string} md @param {{ heading?: string, date?: string, projects?: Project[] }} [opts]
  * @returns {import('./types.ts').VaultBlockParseResult}
  */
-TT.parseVaultBlock = function (md, opts) {
+function parseAnchoredBlock(md, opts) {
   const loc = TT.locateVaultBlock(md, opts);
   if (loc.quarantine) return loc; // propagated UNCHANGED — the locator owns its reasons
   const lines = String(md == null ? '' : md).split('\n');
@@ -1039,7 +1127,43 @@ TT.parseVaultBlock = function (md, opts) {
   // `verified` rides along from the locator (DD-009): SB-057's arbitration matrix row 2 splits on
   // it — `file rev == index rev, hash differs` is a genuine bumpless hand-edit only when the block
   // verified, and a digest MISMATCH never reaches here at all (the locator quarantines it).
-  return { quarantine: false, heading: loc.heading, revision: loc.revision, headers, entries, verified: loc.verified };
+  return {
+    quarantine: false,
+    heading: loc.heading,
+    revision: loc.revision,
+    headers,
+    entries,
+    verified: loc.verified,
+    adopted: false, // overridden by TT.parseVaultBlock when the anchor was synthesised
+  };
+}
+/**
+ * Parse the vault block into entries, ADOPTING the note first if DD-012's precondition holds,
+ * or propagate the quarantine verdict. `opts.date` is the note's date: SB-045's format has NO
+ * date column (the filename carries it), so SB-056/SB-057 supply it here. It defaults to ''
+ * rather than today, so a caller that forgets it produces a visibly dateless entry instead of a
+ * silently misdated one.
+ *
+ * An adopted note reports `adopted: true` and `verified: false`. The `verified` half needs no
+ * special case here and deliberately does not have one: `VAULT_ADOPTED_ANCHOR` carries no digest,
+ * so DD-009's own machinery — a digest-less block parses UNVERIFIED, never quarantined, which is
+ * exactly the hand-made-block path it was written for — already reports it. Forcing it here as
+ * well would be a second lock on the same door, and two rules that merely agree today is the
+ * drift this file keeps unifying away.
+ * @param {string} md @param {{ heading?: string, date?: string, projects?: Project[] }} [opts]
+ * @returns {import('./types.ts').VaultBlockParseResult}
+ */
+TT.parseVaultBlock = function (md, opts) {
+  const input = String(md == null ? '' : md);
+  const candidate = vaultAdoptionCandidate(input, opts);
+  // The candidate is validated by the parse itself — that IS the "no shortcut" rule (DD-012).
+  // A candidate that will not parse quarantines on what actually stopped TT from describing the
+  // region ('no-table', 'unknown-header', 'unparseable-time', …), which is strictly more useful
+  // than the 'no-revision' it used to report; after DD-012 a missing bottom anchor is no longer
+  // a refusal by itself, so 'no-revision' is a locator-only verdict now.
+  const parsed = parseAnchoredBlock(candidate == null ? input : candidate, opts);
+  if (parsed.quarantine || candidate == null) return parsed;
+  return { ...parsed, adopted: true };
 };
 
 // ---- vault block serialize + splice (SB-055) ----
@@ -1078,6 +1202,22 @@ const vaultRow = (cells) => '|' + cells.map((c) => (c === '' ? ' ' : ' ' + c + '
 // instead of wrong.
 /** @param {number} revision @param {string} digest @returns {string} */
 const vaultRevisionLine = (revision, digest) => '`revision: ' + revision + ' · ' + digest + '`';
+// The anchor ADOPTION synthesises (DD-012) — `revision: 1`, and no digest.
+//
+// This does not reopen the rule above, because it is not an emitter option and these bytes never
+// reach disk: `vaultAdoptionCandidate` builds a note for the PARSER to read, and every write of
+// an adopted note re-serializes the whole region through `vaultRevisionLine`, so what lands on
+// disk carries a digest like any other block. What a digest here would mean is the problem —
+// taken over the hand-written rows it is supposed to verify, it says only "these bytes are these
+// bytes", and SB-057's arbitration is entitled to trust `verified`. Digest-less is DD-009
+// consequence 2's own shape for a block TT did not write, so this single choice is also what
+// makes an adopted parse report `verified: false`: no special case anywhere, in either branch —
+// including the empty region, whose table TT did author. Give this line a digest and adoption
+// starts claiming verification of bytes it has never seen before.
+//
+// Spelled against REVISION_RE, which is the sole matcher: `1` because DD-012 says a first write
+// starts there, and `serializeVaultBlock`'s own default agrees.
+const VAULT_ADOPTED_ANCHOR = '`revision: 1`';
 // SB-077 (Terje, ruled 2026-07-25): a RUNNING entry contributes 0 to the note's totals,
 // regardless of date. The daily note is a record of FINISHED work, not a live display — the
 // row is written once with its open range (`15:30→`) and left alone until an end time lands.
@@ -1192,19 +1332,32 @@ TT.serializeVaultBlock = function (entries, opts) {
  * The revision is NOT bumped here. `opts.revision` sets it; absent, the located revision is
  * re-emitted unchanged. When a write bumps the counter is SB-057's arbitration to rule on,
  * not this function's to assume.
+ *
+ * ADOPTION (DD-012). A note carrying the heading but no bottom anchor is written rather than
+ * quarantined, provided TT can describe its whole region — see `vaultAdoptionCandidate`. The
+ * splice then runs against the ADOPTED note, so the anchor it inserted is immediately replaced
+ * by the serialized one, digest and all; nothing outside `vaultAnchorScan`'s bounds is reachable
+ * either way. `adopted` rides on the result because an adopted note's first write has no prior
+ * `(rev, hash)` in SB-057's index at all — a genuinely new arbitration row, not a variant of an
+ * existing one — and inferring that from an empty index entry is a weaker signal than being told.
  * @param {string} md @param {VaultEntry[]} entries
  * @param {{ heading?: string, date?: string, headers?: string[], revision?: number, timeSeparator?: VaultTimeSeparator, projects?: Project[] }} [opts]
- * @returns {{ md: string, quarantine: boolean, reason: import('./types.ts').VaultQuarantineReason | null }}
+ * @returns {{ md: string, quarantine: boolean, reason: import('./types.ts').VaultQuarantineReason | null, adopted: boolean }}
  */
 TT.writeVaultBlock = function (md, entries, opts) {
   const input = String(md == null ? '' : md);
-  const parsed = TT.parseVaultBlock(input, opts);
-  if (parsed.quarantine) return { md: input, quarantine: true, reason: parsed.reason };
-  // Re-locating is not redundant: parseVaultBlock returns values, not line offsets, and this
+  const candidate = vaultAdoptionCandidate(input, opts);
+  const adopted = candidate != null;
+  // everything below reads `source`; every refusal hands back `input`, so a note that was
+  // adopted in memory and then refused downstream still comes back byte-identical
+  const source = adopted ? /** @type {string} */ (candidate) : input;
+  const parsed = parseAnchoredBlock(source, opts);
+  if (parsed.quarantine) return { md: input, quarantine: true, reason: parsed.reason, adopted: false };
+  // Re-locating is not redundant: parseAnchoredBlock returns values, not line offsets, and this
   // also narrows the union for @ts-check so `loc.heading` below is legal. Do not delete it.
-  const loc = TT.locateVaultBlock(input, opts);
-  if (loc.quarantine) return { md: input, quarantine: true, reason: loc.reason };
-  const lines = input.split('\n');
+  const loc = TT.locateVaultBlock(source, opts);
+  if (loc.quarantine) return { md: input, quarantine: true, reason: loc.reason, adopted: false };
+  const lines = source.split('\n');
   const region = TT.serializeVaultBlock(entries, {
     heading: loc.heading,
     // `[]` is truthy, so an explicit empty header list would silently fall through to the
@@ -1222,8 +1375,13 @@ TT.writeVaultBlock = function (md, entries, opts) {
     .slice(0, loc.start)
     .concat(region.split('\n'), lines.slice(loc.end + 1))
     .join('\n');
-  if (TT.parseVaultBlock(out, opts).quarantine) return { md: input, quarantine: true, reason: 'write-would-corrupt' };
-  return { md: out, quarantine: false, reason: null };
+  // The output gate reads `parseAnchoredBlock`, not `TT.parseVaultBlock`: what just came out of
+  // the serializer carries both anchors by construction, so an adoption pass here could only
+  // ever mask a missing one. The question this gate asks is "would TT's own parser read back
+  // what TT just wrote", and adoption is not part of that question.
+  if (parseAnchoredBlock(out, opts).quarantine)
+    return { md: input, quarantine: true, reason: 'write-would-corrupt', adopted: false };
+  return { md: out, quarantine: false, reason: null, adopted };
 };
 
 // ---- canonical row string (DD-008 spec obligation — nothing computes this in phase 1) ----
