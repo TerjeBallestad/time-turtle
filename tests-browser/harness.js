@@ -74,8 +74,9 @@ export async function startApp(opts = {}) {
   // Not a convenience. `TT_SHAPE=personal` with nothing stored leaves `settings.shape` reading its
   // `team` default, and the client PUTs the WHOLE settings object on every save — so the first
   // path typed into Settings → Vault stores `shape: 'team'` and flips the install out of the very
-  // shape it was started in. That is a real defect in the client's whole-object PUT (reported
-  // separately, SB-100's wiring), and it is not what these cases are about. A partial PUT of just
+  // shape it was started in. That is a real defect in the client's whole-object PUT — NOT filed on
+  // the board by this run (PLAN-012 reports adjacent defects rather than filing them), so do not go
+  // looking for a ticket number. It is not what these cases are about; a partial PUT of just
   // `{ shape }` is the state an install is in once a person has actually chosen Personal.
   if (opts.shape === 'personal') {
     const login = await fetch(`http://localhost:${port}/api/auth/login`, {

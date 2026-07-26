@@ -226,6 +226,13 @@ app.post('/api/users/:id/password', requireUser, requireAdmin, (req, res) => {
  * @returns {import('../../shared/types.ts').VaultQuarantinedNote[]}
  */
 function vaultQuarantinedNotes() {
+  // GATED ON THE SHAPE, and this is a privacy check rather than an optimisation. Every other field
+  // in `stateFor` is either stripped for employees, scoped to `user.id`, or admin-gated; this one
+  // would hand any authenticated caller the absolute filesystem paths of the vault owner's daily
+  // notes. Under `team` it happens to be empty today only because nothing writes `vault_index`
+  // there — not because anything checked — and a `personal → team` switch leaves those rows behind.
+  // Under `personal` there is exactly one user (DD-006 consequence 1), so there is nobody to leak to.
+  if (activeShape() !== 'personal') return [];
   return store
     .listVaultIndex()
     .filter((row) => row.state === 'quarantined')

@@ -1012,17 +1012,17 @@ export interface TTModule {
    * the server's 403 body and the client's on-screen explanation cannot drift.
    */
   shapeOffReason(capability: keyof ShapeCapabilities, shape?: string | null): string | null;
-  /**
-   * SB-057 / DD-016 + DD-017: is this entry the vault's? A false answer means the entry lives in
-   * SQLite and never reaches a daily note — and never triggers DD-012 adoption on its behalf.
-   * The one home of the predicate; SB-102 consumes this rather than adding a second copy.
-   */
   /** SB-057: the headline every quarantine opens with. One home, so server and screen agree. */
   VAULT_QUARANTINE_HEADLINE: string;
   /** SB-057: the line for a reason this build does not know — rendered instead of a blank. */
   VAULT_QUARANTINE_FALLBACK: string;
   /** SB-057: why a note stopped syncing, as a sentence. Unknown reasons take the fallback. */
   vaultQuarantineText(reason: string | null | undefined): string;
+  /**
+   * SB-057 / DD-016 + DD-017: is this entry the vault's? A false answer means the entry lives in
+   * SQLite and never reaches a daily note — and never triggers DD-012 adoption on its behalf.
+   * The one home of the predicate; SB-102 consumes this rather than adding a second copy.
+   */
   vaultBound(
     entry: Entry,
     context: { shape?: string | null; vaultCutover?: string | null; commits?: CommitSegment[] },

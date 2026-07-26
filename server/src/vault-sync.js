@@ -96,7 +96,7 @@ import TT from '../../shared/core.js';
 // `listUsers` is identity, which the seam excludes anyway. Under `personal` the user table holds
 // exactly one row (DD-006 consequence 1), which is what makes "the user" a well-defined thing for
 // an import to belong to.
-import * as store from './db.js';
+import * as db from './db.js';
 import { listUsers } from './db.js';
 import { activeBackend } from './backend.js';
 import { arbitrate, describeVaultFile, fileSha } from './vault-arbitrate.js';
@@ -173,7 +173,7 @@ export function setVaultRewriter(fn) {
  */
 export function vaultSyncConfig() {
   if (activeBackend() !== 'vault') return null;
-  const settings = store.getSettings();
+  const settings = db.getSettings();
   const paths = settings.vaultPaths || TT.VAULT_PATHS_DEFAULT;
   if (!paths.root) return null;
   const users = listUsers();
@@ -189,7 +189,7 @@ export function vaultSyncConfig() {
     userId: users[0].id,
     // SB-059: the catalog the Project column resolves through. Absent it, a `[[Wikilink]]` cell is
     // carried literally, which is the pre-SB-059 behaviour and never a refusal.
-    projects: store.getProjects(),
+    projects: db.getProjects(),
     timeSeparator: settings.vaultTimeSeparator,
   };
 }
@@ -280,11 +280,11 @@ export async function readVaultNote(path, io) {
  * @param {{ userId: number, sha?: string | null, payloadDigest?: string | null, parse?: any }} ctx
  */
 export function applyVerdict(path, date, verdict, ctx) {
-  const existing = store.getVaultIndex(path);
+  const existing = db.getVaultIndex(path);
   const seenAt = new Date().toISOString();
   /** @param {Partial<VaultIndexRow>} over */
   const write = (over) =>
-    store.putVaultIndex(
+    db.putVaultIndex(
       /** @type {VaultIndexRow} */ ({
         path,
         date,
@@ -317,9 +317,21 @@ export function applyVerdict(path, date, verdict, ctx) {
     case 'import':
     case 'import-and-rewrite': {
       importEntries(ctx.userId, date, ctx.parse ? ctx.parse.entries : []);
+      // THE ROW RECORDS WHAT IS ON DISK RIGHT NOW — the file's own revision, not the verdict's.
+      //
+      // They differ only on `import-and-rewrite`, where `verdict.rev` is `fileRev + 1`: the
+      // revision the file is about to be REWRITTEN to. Storing that against the digest of the
+      // payload at `fileRev` would put a pair in the row that no note ever carried, and the
+      // rewriter's own write would then roll THAT fabricated pair into `prev_rev`/
+      // `prev_payload_digest`. The damage is quiet and specific: `prevRev` would equal `rev`, so
+      // arbitration branch (a) — the provably-stale peer — could never match for this path again,
+      // and a peer that is genuinely one revision behind would quarantine as
+      // `unprovable-staleness` instead of being caught up. It fails safe, and it disables the one
+      // branch SB-061 had this ticket built for. The rewriter moves the pair honestly, one step
+      // later, from bytes that exist.
       write({
         state: 'known',
-        rev: verdict.rev ?? null,
+        rev: ctx.parse && ctx.parse.revision != null ? ctx.parse.revision : (verdict.rev ?? null),
         payloadDigest: ctx.payloadDigest ?? null,
         fileSha: ctx.sha ?? null,
         verified: ctx.parse ? !!ctx.parse.verified : null,
@@ -330,6 +342,12 @@ export function applyVerdict(path, date, verdict, ctx) {
     case 'rewrite-from-index':
       // No import: the file is provably behind, so its rows are TT's own older ones. The index is
       // already right; the FILE is what needs fixing, and the writer is what fixes it.
+      //
+      // The row is touched FIRST, and that is not bookkeeping. If the rewrite is refused, nothing
+      // else here would record that TT had looked — and the next interval would re-read, re-parse
+      // and re-arbitrate this note, silently, every 60 s forever. Recording `seenAt` and the file's
+      // sha means an unfixable note takes the cheap exit on the following pass instead.
+      write({ state: existing ? existing.state : 'known', fileSha: ctx.sha ?? (existing && existing.fileSha) });
       if (verdict.rev != null) rewriter(date, verdict.rev);
       return;
     default:
@@ -346,12 +364,12 @@ export function applyVerdict(path, date, verdict, ctx) {
  * @param {number} userId @param {string} date @param {Entry[]} entries
  */
 function importEntries(userId, date, entries) {
-  store.transaction(() => {
-    const others = store.getEntries(userId).filter((entry) => entry.date !== date);
-    store.putEntries(userId, others.concat((entries || []).map((entry) => ({ ...entry, date }))));
+  db.transaction(() => {
+    const others = db.getEntries(userId).filter((entry) => entry.date !== date);
+    db.putEntries(userId, others.concat((entries || []).map((entry) => ({ ...entry, date }))));
     // DC-001, design decision 10. Without this the client's next whole-set PUT silently overwrites
     // what was just imported.
-    store.bumpEntriesVersion(userId);
+    db.bumpEntriesVersion(userId);
   });
 }
 
@@ -392,7 +410,7 @@ export async function syncVaultPath(path, date, config, io) {
     if (own && own.sha === sha) return 'echo';
   }
   const file = describeVaultFile(read.text, { heading: config.heading, date, projects: config.projects });
-  const index = store.getVaultIndex(path);
+  const index = db.getVaultIndex(path);
   const verdict = arbitrate({ file, index });
   applyVerdict(path, date, verdict, {
     userId: config.userId,
@@ -455,6 +473,7 @@ export function startVaultSync(opts) {
   // Task 1 measured that a SIGKILL between the write and the rename really does leave a temp
   // behind, and that it stays forever. Once at boot, in the one directory TT writes into.
   sweepVaultTemps(config.dailyDir);
+  pruneVaultIndex(config.dailyDir);
   const debounceMs = (opts && opts.debounceMs) || WATCH_DEBOUNCE_MS;
   try {
     watcher = watch(config.dailyDir, (_event, filename) => {
@@ -495,6 +514,27 @@ export function startVaultSync(opts) {
   // Do not hold the process open on our account: `tt serve` should exit when the server does.
   if (interval.unref) interval.unref();
   return true;
+}
+
+/**
+ * Drop index rows for paths outside the folder TT is now watching.
+ *
+ * `vaultPaths.daily` is a SETTING, so re-pointing it leaves rows describing files no scan will ever
+ * visit again. A quarantine detected in the abandoned folder would otherwise render on Settings →
+ * Vault forever: nothing can clear it, because nothing looks at that path any more. Runs from
+ * `startVaultSync`, which is both the boot and the re-point.
+ *
+ * PATH PREFIX, not date: two folders can hold the same day, which is the case `getVaultIndexByDate`
+ * exists for, and the row that survives must be the one under the CURRENT folder.
+ * @param {string} dailyDir
+ */
+function pruneVaultIndex(dailyDir) {
+  const prefix = dailyDir.endsWith('/') ? dailyDir : dailyDir + '/';
+  for (const row of db.listVaultIndex()) {
+    if (row.path.startsWith(prefix)) continue;
+    db.deleteVaultIndex(row.path);
+    console.log(`[time-turtle] vault index: dropped ${row.path} — outside the current daily folder`);
+  }
 }
 
 /** Tear both triggers down, and every pending debounce with them. */

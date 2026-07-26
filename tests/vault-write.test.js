@@ -49,11 +49,13 @@ describe('the vault writer (api)', () => {
   let dailyDir = '';
   let admin = null;
   let child = null;
+  let dataDir = '';
   const notePath = (date) => join(dailyDir, date + '.md');
   const parseNote = (date) => TT.parseVaultBlock(readFileSync(notePath(date), 'utf8'), { heading: HEADING, date });
 
   beforeAll(async () => {
-    const data = mkdtempSync(join(tmpdir(), 'tt-vw-data-'));
+    dataDir = mkdtempSync(join(tmpdir(), 'tt-vw-data-'));
+    const data = dataDir;
     vault = mkdtempSync(join(tmpdir(), 'tt-vw-vault-'));
     dailyDir = join(vault, 'Calendar', 'Daily');
     mkdirSync(dailyDir, { recursive: true });
@@ -212,6 +214,40 @@ describe('the vault writer (api)', () => {
     expect(res.status).toBe(200); // the save succeeded…
     await new Promise((r) => setTimeout(r, 150));
     expect(readFileSync(notePath(date), 'utf8')).toBe(damaged); // …and the note is untouched
+  });
+
+  it('vaultQuarantined is gated on the SHAPE, not merely empty by accident under team', async () => {
+    // Every other field in `stateFor` is stripped, user-scoped or admin-gated. This one carries
+    // absolute filesystem paths of the vault owner's daily notes, and under `team` it was empty
+    // only because nothing writes `vault_index` there — not because anything checked. A
+    // `personal → team` switch leaves those rows behind.
+    // Trip a real quarantine through the SCAN (the writer refuses an unread note without
+    // quarantining it, which is a different verdict) and re-point the vault to force a pass.
+    const q = TT.addDays(TODAY, 7);
+    writeFileSync(notePath(q), `# ${q}\n\n## ${HEADING}\n\nprose, not a table\n\n\`revision: 2 · abcd\`\n`);
+    const before = await admin('GET', '/api/state');
+    await admin('PUT', '/api/state', {
+      settings: { vaultPaths: { root: vault, daily: 'Calendar/Daily' } },
+      version: before.json.version,
+    });
+    const tripped = await until(async () => {
+      const now = await admin('GET', '/api/state');
+      return (now.json.vaultQuarantined || []).length > 0;
+    });
+    expect(tripped, 'no quarantine was recorded to test the gate with').toBe(true);
+    const state = await admin('GET', '/api/state');
+    expect(state.json.shape).toBe('personal');
+
+    // a SECOND server, same data dir, booted as `team` — the rows are still in the DB
+    const teamServer = await startServer({ TT_DATA_DIR: dataDir, TT_SHAPE: 'team', TT_SHAPE_LOCK: '1', TT_SEED_DEMO: '0' }); // prettier-ignore
+    try {
+      const teamAdmin = await adminOn(teamServer.port);
+      const teamState = await teamAdmin('GET', '/api/state');
+      expect(teamState.json.shape).toBe('team');
+      expect(teamState.json.vaultQuarantined, 'a team install handed out vault paths').toEqual([]);
+    } finally {
+      await stopServer(teamServer.child);
+    }
   });
 
   it('no temp files are left in the daily folder', () => {

@@ -55,10 +55,18 @@
 // 4. REFUSALS NEVER FAIL THE SAVE (SB-065's posture)
 // ============================================================================================
 //
-// The SQLite write has already committed by the time a byte is written here. A note-level refusal
-// — a quarantine, a permissions error, a full disk — is recorded on the index row and surfaced;
-// it is never promoted to a 500, because "you cannot save at all" is a strictly worse failure than
-// a note that has stopped syncing. Nothing in this module throws.
+// The SQLite write has COMMITTED by the time a byte is written here — `store.putEntries` queues
+// this through `afterCommit` precisely so that is true, because it is not true of a bare call from
+// inside the transaction. A note-level refusal is recorded on the index row and, when it is a
+// refusal about the note's CONTENT, surfaced on Settings → Vault; it is never promoted to a 500,
+// because "you cannot save at all" is a strictly worse failure than a note that has stopped
+// syncing. Nothing in this module throws.
+//
+// AN I/O FAILURE IS RECORDED BUT NOT SURFACED, and the distinction is deliberate: a permissions
+// error or a full disk is not a refusal about the block, and dressing it as a quarantine would send
+// a human to look at a note that is perfectly fine. It sets the row to `unknown` (so no later save
+// splices into a file TT has no current reading of) and logs. A surface for it is real work and is
+// not smuggled in here.
 import { join } from 'node:path';
 import TT from '../../shared/core.js';
 // db.js DIRECTLY — this module is INSIDE the storage seam, not a caller of it, and `store.js`
@@ -90,10 +98,6 @@ let checkpointHook = () => {};
  */
 export function setVaultCheckpointHook(fn) {
   checkpointHook = typeof fn === 'function' ? fn : () => {};
-}
-/** Test seam: forget which day was last checkpointed. */
-export function resetVaultCheckpointDay() {
-  lastCheckpointDay = null;
 }
 /** Called immediately before the first `writeVaultFile` of a calendar day. Never throws. */
 function checkpointIfFirstWriteOfDay() {
@@ -203,35 +207,57 @@ export function writeVaultEntries(userId, incoming, before) {
 }
 
 /**
+ * Record what TT now knows about a path without disturbing what it already knew. One helper, so a
+ * refusal cannot quietly forget the rev, the digest or the previous pair by omitting a field.
+ * @param {string} path @param {string} date @param {VaultIndexRow | null} row
+ * @param {Partial<VaultIndexRow>} over
+ */
+function keepRow(path, date, row, over) {
+  db.putVaultIndex(
+    /** @type {VaultIndexRow} */ ({
+      path,
+      date,
+      state: 'unknown',
+      rev: row ? row.rev : null,
+      payloadDigest: row ? row.payloadDigest : null,
+      fileSha: row ? row.fileSha : null,
+      verified: row ? row.verified : null,
+      quarantineReason: null,
+      seenAt: new Date().toISOString(),
+      writtenAt: row ? row.writtenAt : null,
+      ...over,
+    }),
+  );
+}
+
+/**
  * One date. Read the note, splice TT's block into it, and write only if that changed anything.
+ *
+ * `revisionOverride` is what makes this the ONLY write path in this module. The arbitration's
+ * `rev` is authoritative on the two verdicts that reach `rewriteVaultDate` — the file is known to
+ * be wrong there, so re-deriving the counter from it would put the two in disagreement — and every
+ * other caller derives it from the note. A second copy of this body is how the quarantine
+ * recording, the `unread` gate and the checkpoint hook drift apart one fix at a time.
  * @param {string} date @param {Entry[]} entries @param {string} path
  * @param {NonNullable<ReturnType<typeof vaultSyncConfig>>} config
  * @param {{ written: string[], skipped: string[], refused: { date: string, reason: string }[] }} report
+ * @param {number} [revisionOverride]
  */
-function writeOneDate(date, entries, path, config, report) {
+function writeOneDate(date, entries, path, config, report, revisionOverride) {
   const row = db.getVaultIndex(path);
   const eligibility = writeEligibility(path, row);
   if (eligibility === 'quarantined') {
     report.refused.push({ date, reason: row && row.quarantineReason ? row.quarantineReason : 'quarantined' });
     return;
   }
-  if (eligibility === 'unread') {
+  // A REWRITE IS EXEMPT FROM THE `unread` GATE, and only that gate. The arbitration has just read
+  // this file and found it provably behind (or just imported it); "TT has not confirmed reading
+  // this day" is the one thing that is definitely not true here, and refusing would leave a stale
+  // peer standing forever. The quarantine gate above still applies.
+  if (eligibility === 'unread' && revisionOverride == null) {
     // Recorded, not silently dropped: `unknown` is exactly what this is, and it is what the next
-    // scan and the settings surface both read.
-    db.putVaultIndex(
-      /** @type {VaultIndexRow} */ ({
-        path,
-        date,
-        state: 'unknown',
-        rev: row ? row.rev : null,
-        payloadDigest: row ? row.payloadDigest : null,
-        fileSha: row ? row.fileSha : null,
-        verified: row ? row.verified : null,
-        quarantineReason: null,
-        seenAt: new Date().toISOString(),
-        writtenAt: row ? row.writtenAt : null,
-      }),
-    );
+    // scan reads.
+    keepRow(path, date, row, { state: 'unknown' });
     report.refused.push({ date, reason: 'unread' });
     return;
   }
@@ -241,7 +267,17 @@ function writeOneDate(date, entries, path, config, report) {
   try {
     current = readNoteForWrite(path);
   } catch (err) {
-    report.refused.push({ date, reason: /** @type {Error} */ (err).message });
+    // A NOTE TT CANNOT READ IS NOT A NOTE TT MAY STILL CLAIM TO KNOW. Leaving the row `known`
+    // would let the next save splice into a file whose contents TT has no current reading of.
+    // Recorded as `unknown` — the same verdict the scan gives an unreadable file, for the same
+    // reason — and logged. NOT surfaced as a quarantine: a permissions error or a full disk is not
+    // a refusal about the note's CONTENT, and dressing it as one would tell a human to go and look
+    // at a block that is perfectly fine. Making an I/O failure visible in the UI is real work and
+    // is deliberately not smuggled in here.
+    keepRow(path, date, row, { state: 'unknown' });
+    const reason = /** @type {Error} */ (err).message;
+    report.refused.push({ date, reason });
+    console.error(`[time-turtle] could not read ${path} to write it: ${reason}`);
     return;
   }
   const opts = {
@@ -259,14 +295,24 @@ function writeOneDate(date, entries, path, config, report) {
   // Serializing at rev+1 first would make every save differ from the file by the counter alone, so
   // the diff would never fire and one keystroke really would rewrite every note the user has ever
   // logged. The counter moves only when something else moved.
+  //
+  // The comparison runs at the revision the write WOULD carry: the caller's override when there is
+  // one, otherwise the note's own counter. Using the note's counter under an override would make
+  // `import-and-rewrite` a no-op — the rows were just imported FROM this file, so at the file's own
+  // revision the serialized result is the file, byte for byte, and the counter would never move.
+  // The bump is the entire point of that verdict.
   if (current != null && located && !located.quarantine) {
-    const unchanged = TT.writeVaultBlock(current, entries, { ...opts, revision: located.revision });
+    const wouldBe = revisionOverride != null ? revisionOverride : located.revision;
+    const unchanged = TT.writeVaultBlock(current, entries, { ...opts, revision: wouldBe });
     if (!unchanged.quarantine && unchanged.md === current) {
       report.skipped.push(date);
       return;
     }
   }
-  const revision = (!located || located.quarantine ? (row && row.rev) || 0 : located.revision) + 1;
+  const revision =
+    revisionOverride != null
+      ? revisionOverride
+      : (!located || located.quarantine ? (row && row.rev) || 0 : located.revision) + 1;
 
   /** @type {string} */
   let out;
@@ -279,21 +325,11 @@ function writeOneDate(date, entries, path, config, report) {
     const written = TT.writeVaultBlock(current, entries, { ...opts, revision });
     if (written.quarantine) {
       // The note is NOT written and its row becomes `quarantined` with the reason. Left exactly as
-      // it is for a human — SB-103 rules what they can then do about it.
-      db.putVaultIndex(
-        /** @type {VaultIndexRow} */ ({
-          path,
-          date,
-          state: 'quarantined',
-          rev: row ? row.rev : null,
-          payloadDigest: row ? row.payloadDigest : null,
-          fileSha: row ? row.fileSha : null,
-          verified: row ? row.verified : null,
-          quarantineReason: written.reason,
-          seenAt: new Date().toISOString(),
-          writtenAt: row ? row.writtenAt : null,
-        }),
-      );
+      // it is for a human — SB-103 rules what they can then do about it. This applies on the
+      // REWRITE path too, which is the path the arbitration reached BECAUSE something was already
+      // wrong: a refusal there that left the row `known` would be invisible on the surface and
+      // re-arbitrated every interval forever.
+      keepRow(path, date, row, { state: 'quarantined', quarantineReason: written.reason });
       report.refused.push({ date, reason: String(written.reason) });
       return;
     }
@@ -354,66 +390,16 @@ export function rewriteVaultDate(userId, date, rev) {
   /** @type {{ written: string[], skipped: string[], refused: { date: string, reason: string }[] }} */
   const report = { written: [], skipped: [], refused: [] };
   try {
-    // `rev` comes from the arbitration and is the revision the FILE should end up at, so the
-    // bump `writeOneDate` applies has to be undone here — the arbitration has already decided.
-    writeOneDateAt(date, entries, path, config, report, rev);
+    // `rev` comes from the arbitration and is the revision the FILE should end up at, so it is
+    // passed as the override rather than re-derived: on this path the note is known to be wrong,
+    // and deriving the counter from it would put the writer and the arbitration in disagreement.
+    writeOneDate(date, entries, path, config, report, rev);
   } catch (err) {
     console.error(`[time-turtle] vault rewrite failed for ${date}: ${/** @type {Error} */ (err).message}`);
   }
-}
-
-/**
- * `writeOneDate` with the revision decided by the caller rather than derived from the file. Kept
- * as a thin wrapper rather than a second copy of the body: the arbitration's `rev` is authoritative
- * and re-deriving it from the note would put the two in disagreement on the one path where the
- * note is known to be wrong.
- * @param {string} date @param {Entry[]} entries @param {string} path
- * @param {NonNullable<ReturnType<typeof vaultSyncConfig>>} config
- * @param {{ written: string[], skipped: string[], refused: { date: string, reason: string }[] }} report
- * @param {number} rev
- */
-function writeOneDateAt(date, entries, path, config, report, rev) {
-  const row = db.getVaultIndex(path);
-  // The file is being CORRECTED, so the eligibility gate is the quarantine one only: `unread` is
-  // not a reason to leave a provably-stale peer standing, and the arbitration has already read it.
-  if (row && row.state === 'quarantined') {
-    report.refused.push({ date, reason: row.quarantineReason || 'quarantined' });
-    return;
-  }
-  const opts = { heading: config.heading, date, timeSeparator: config.timeSeparator, projects: config.projects };
-  const current = readNoteForWrite(path);
-  const out =
-    current == null
-      ? TT.serializeVaultBlock(entries, { ...opts, revision: rev }) + '\n'
-      : TT.writeVaultBlock(current, entries, { ...opts, revision: rev });
-  const md = typeof out === 'string' ? out : out.md;
-  if (typeof out !== 'string' && out.quarantine) {
-    report.refused.push({ date, reason: String(out.reason) });
-    return;
-  }
-  if (current != null && md === current) {
-    report.skipped.push(date);
-    return;
-  }
-  checkpointIfFirstWriteOfDay();
-  writeVaultFile(path, md);
-  const sha = fileSha(md);
-  const after = TT.locateVaultBlock(md, opts);
-  noteOwnWrite(path, sha, rev);
-  const now = new Date().toISOString();
-  db.putVaultIndex(
-    /** @type {VaultIndexRow} */ ({
-      path,
-      date,
-      state: 'known',
-      rev,
-      payloadDigest: after.quarantine ? null : after.digest,
-      fileSha: sha,
-      verified: true,
-      quarantineReason: null,
-      seenAt: now,
-      writtenAt: now,
-    }),
-  );
-  report.written.push(date);
+  // Said out loud, because this path runs from a scan and not from a save — nobody is watching a
+  // response for it, so silence here is a note that quietly stops being corrected.
+  for (const refusal of report.refused)
+    console.error(`[time-turtle] vault rewrite refused for ${refusal.date}: ${refusal.reason}`);
+  if (report.written.length) console.log(`[time-turtle] vault rewrite: ${date} → revision ${rev}`);
 }

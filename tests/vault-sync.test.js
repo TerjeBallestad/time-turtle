@@ -16,7 +16,7 @@
 // invalidates the client's version, TT's own write does not echo back, and an unreadable, absent
 // or timed-out read yields `unknown` and leaves every entry TT already holds exactly where it is.
 import { describe, it, expect, beforeAll, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import TT from '../shared/core.js';
@@ -29,6 +29,8 @@ let db;
 let arb;
 /** @type {typeof import('../server/src/vault-write.js')} */
 let writer;
+/** @type {typeof import('../server/src/store.js')} */
+let store;
 
 let vaultRoot = '';
 let dailyDir = '';
@@ -67,6 +69,8 @@ beforeAll(async () => {
   // Imported HERE, after TT_DATA_DIR is set: db.js binds its file at import time, and a static
   // import in a file that has not set the env would open (and migrate) the repo's own server/data.
   writer = await import('../server/src/vault-write.js');
+  // The real seam, so the post-commit ordering below is exercised through the code the API uses.
+  store = await import('../server/src/store.js');
   const user = db.createUser({ email: 'solo@timeturtle.local', name: 'Solo', role: 'admin', password: 'pw' });
   userId = user.id;
 });
@@ -335,6 +339,89 @@ describe('the vault sync engine', () => {
     expect(sync.startVaultSync({ debounceMs: 20, intervalMs: 3_600_000 })).toBe(true);
     sync.stopVaultSync();
     sync.stopVaultSync();
+  });
+
+  it('the fan-out runs AFTER the commit, not inside the transaction', async () => {
+    // The blocker the end-gate review found. `store.putEntries` is called from inside
+    // `store.transaction(...)` and the transaction CONTINUES afterwards — so a bare call would
+    // fsync daily notes (and, once SB-068 lands, take a git checkpoint over the whole vault) while
+    // nothing had committed.
+    const path = notePath();
+    let existedInsideTheTransaction = null;
+    db.transaction(() => {
+      store.putEntries(userId, [entry('e1', 540, 600, 'logged inside a transaction')]);
+      existedInsideTheTransaction = existsSync(path);
+    });
+    expect(existedInsideTheTransaction, 'the note was written before the COMMIT').toBe(false);
+    expect(existsSync(path), 'the note was never written after the COMMIT').toBe(true);
+    expect(TT.parseVaultBlock(readFileSync(path, 'utf8'), { heading: HEADING, date: DATE }).entries).toHaveLength(1);
+  });
+
+  it('a ROLLBACK drops the fan-out entirely — no note describes an entry the index does not hold', () => {
+    const path = notePath('2026-07-22');
+    expect(() =>
+      db.transaction(() => {
+        store.putEntries(userId, [{ ...entry('e1', 540, 600, 'never committed'), date: '2026-07-22' }]);
+        throw new Error('something later in the same transaction failed');
+      }),
+    ).toThrow('something later');
+    expect(existsSync(path), 'a rolled-back save still wrote a daily note').toBe(false);
+    expect(db.getEntries(userId).some((e) => e.date === '2026-07-22')).toBe(false);
+  });
+
+  it('the REAL rewriter corrects a provably stale peer, and the previous pair stays honest', async () => {
+    // Until the end-gate review the rewrite path had no test at all — every case stubbed the
+    // rewriter — so a second, divergent copy of the whole write path shipped unexercised.
+    sync.setVaultRewriter((date, rev) => writer.rewriteVaultDate(userId, date, rev));
+    // the index holds rev 4; the file on disk is the rev-3 payload TT itself wrote
+    const behind = note([entry('e1', 540, 600, 'yesterday’s copy')], 3);
+    writeFileSync(notePath(), behind);
+    const digest3 = arb.describeVaultFile(behind, { heading: HEADING, date: DATE }).payloadDigest;
+    db.putEntries(userId, [entry('e1', 540, 660, 'the current copy')]);
+    db.putVaultIndex({ path: notePath(), date: DATE, state: 'known', rev: 3, payloadDigest: digest3, fileSha: 'x' });
+    db.putVaultIndex({ path: notePath(), date: DATE, state: 'known', rev: 4, payloadDigest: 'bbbb', fileSha: 'y' });
+
+    expect((await sync.scanVault())['rewrite-from-index']).toBe(1);
+    const after = TT.parseVaultBlock(readFileSync(notePath(), 'utf8'), { heading: HEADING, date: DATE });
+    expect(after.quarantine).toBe(false);
+    expect(after.revision).toBe(4); // the arbitration's rev, not one derived from the stale file
+    expect(after.entries.map((e) => e.end)).toEqual([660]); // the INDEX's rows, not the file's
+    expect(db.getVaultIndex(notePath()).rev).toBe(4);
+  });
+
+  it('import-and-rewrite never records a (rev, digest) pair that no note carried', async () => {
+    // The subtle one. `verdict.rev` is fileRev+1 while the digest is the payload AT fileRev, so
+    // storing the two together fabricates a pair — and the rewriter then rolls that fabrication
+    // into prev_*, after which `prevRev === rev` and branch (a) can never match again. A genuinely
+    // stale peer would quarantine as `unprovable-staleness` instead of being caught up.
+    sync.setVaultRewriter((date, rev) => writer.rewriteVaultDate(userId, date, rev));
+    const edited = note([entry('e1', 540, 630, 'hand-edited without bumping')], 4);
+    writeFileSync(notePath(), edited);
+    const digest4 = arb.describeVaultFile(edited, { heading: HEADING, date: DATE }).payloadDigest;
+    db.putVaultIndex({ path: notePath(), date: DATE, state: 'known', rev: 4, payloadDigest: 'aaaa', fileSha: 'x' });
+
+    expect((await sync.scanVault())['import-and-rewrite']).toBe(1);
+    const row = db.getVaultIndex(notePath());
+    expect(row.rev).toBe(5); // rewritten
+    expect(row.prevRev).toBe(4);
+    expect(row.prevPayloadDigest).toBe(digest4); // the payload the file ACTUALLY carried at rev 4
+    expect(row.prevRev).not.toBe(row.rev); // …so branch (a) is still reachable for this path
+  });
+
+  it('re-pointing the daily folder drops rows for the folder it left behind', async () => {
+    // Otherwise a quarantine detected in the abandoned folder renders on Settings → Vault forever:
+    // no scan visits that path again, so nothing can ever clear it.
+    const damaged = note([entry('e1', 540, 600, 'first')], 4).replace('| 09:00→10:00 |', '| 09:15→10:00 |');
+    writeFileSync(notePath(), damaged);
+    await sync.scanVault();
+    const orphan = notePath();
+    expect(db.getVaultIndex(orphan).state).toBe('quarantined');
+
+    const moved = join(vaultRoot, 'Notes', 'Days');
+    mkdirSync(moved, { recursive: true });
+    db.putSettings({ vaultPaths: { root: vaultRoot, daily: 'Notes/Days' } });
+    expect(sync.startVaultSync({ debounceMs: 20, intervalMs: 3_600_000 })).toBe(true);
+    expect(db.getVaultIndex(orphan), 'the abandoned folder’s row survived the re-point').toBe(null);
   });
 
   it('does nothing at all when no vault root is configured', async () => {

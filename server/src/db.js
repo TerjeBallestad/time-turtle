@@ -114,6 +114,15 @@ CREATE TABLE IF NOT EXISTS vault_index (
 );
 `);
 
+// The post-commit queue's state, declared HERE — above every caller, not beside `transaction` at
+// the bottom of the file. `let`/`const` are hoisted but left uninitialised, so a reference from a
+// function CALLED before the declaration is evaluated throws a TDZ `ReferenceError`; and
+// `migrateToSdd002()` a few lines down runs `transaction()` during module init, which is exactly
+// that case. See `afterCommit` beside `transaction` for what the queue is for.
+let inTransaction = false;
+/** @type {(() => void)[]} */
+const afterCommitQueue = [];
+
 // ---- migrations ----
 // CREATE TABLE IF NOT EXISTS never touches a table that already exists, so every
 // column added after v1 needs a guarded ALTER for databases already on disk.
@@ -882,13 +891,62 @@ export function deleteUser(id) {
  */
 export function transaction(fn) {
   db.exec('BEGIN');
+  inTransaction = true;
   try {
     const r = fn();
     db.exec('COMMIT');
+    inTransaction = false;
+    // AFTER the COMMIT, never inside it. See `afterCommit` below.
+    flushAfterCommit();
     return r;
   } catch (err) {
     db.exec('ROLLBACK');
+    inTransaction = false;
+    // A rolled-back write never happened, so neither may its side effects. Dropping the queue is
+    // the whole reason it exists: the alternative is daily notes on disk describing entries the
+    // database no longer holds.
+    afterCommitQueue.length = 0;
     throw err;
+  }
+}
+
+// ---- side effects that must not run inside a transaction (SB-057) ----
+//
+// The vault fan-out writes FILES — an fsync of the note, an fsync of its directory, and (once
+// SB-068 lands) a `git add -A` over the whole vault. None of that may happen while a SQLite write
+// transaction is open, for two reasons and the first is the serious one:
+//
+//   • ROLLBACK. `store.putEntries` is called from inside `store.transaction(...)` in the API layer,
+//     and the transaction continues after it (`putCommits`, the version bumps). A throw anywhere
+//     after the fan-out would roll SQLite back while the daily notes — and TT's own git checkpoint
+//     — are already on disk and fsynced. The vault would then describe entries the index does not
+//     hold, which is the one direction DD-006's "SQLite is the derived index" cannot survive.
+//   • HOLD TIME. Two fsyncs per touched date, with a write transaction held open throughout.
+//
+// So the fan-out is QUEUED here and flushed after the COMMIT — the same position in the sequence
+// the markdown mirror already occupies (the routes call `store.mirror` after the transaction), and
+// the reason is identical. Called outside a transaction it simply runs, so a caller that is not in
+// one is not silently deferred forever.
+//
+// A queued effect that throws is logged and the rest still run: by then the save HAS committed, and
+// "you cannot save at all" is a strictly worse failure than a note that has stopped syncing
+// (SB-065's posture).
+/** @param {() => void} fn */
+export function afterCommit(fn) {
+  if (!inTransaction) {
+    fn();
+    return;
+  }
+  afterCommitQueue.push(fn);
+}
+function flushAfterCommit() {
+  const queued = afterCommitQueue.splice(0, afterCommitQueue.length);
+  for (const fn of queued) {
+    try {
+      fn();
+    } catch (err) {
+      console.error('[time-turtle] post-commit side effect failed:', /** @type {Error} */ (err).message);
+    }
   }
 }
 

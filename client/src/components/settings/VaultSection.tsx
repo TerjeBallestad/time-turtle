@@ -112,7 +112,7 @@ function QuarantinedNotes({ notes }: { notes: VaultQuarantinedNote[] }) {
           <div className={st.mirrorBlockPath}>{note.path}</div>
           <div className={st.mirrorBlockMeta}>
             {note.date}
-            {note.detectedAt ? ' · ' + TT.t('paused ') + whenLocal(note.detectedAt) : ''}
+            {note.detectedAt ? ' · ' + TT.t('paused') + ' ' + whenLocal(note.detectedAt) : ''}
           </div>
           <div className={st.mirrorBlockBody}>{TT.t(TT.vaultQuarantineText(note.reason))}</div>
         </div>

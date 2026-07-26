@@ -39,7 +39,7 @@
 
 import { activeCapabilities, activeBackend } from './backend.js';
 import { writeMirror, retireMirrors } from './markdown.js';
-import { getEntries as storedEntries, putEntries as putStoredEntries } from './db.js';
+import { getEntries as storedEntries, putEntries as putStoredEntries, afterCommit } from './db.js';
 import { writeVaultEntries } from './vault-write.js';
 
 export {
@@ -105,9 +105,17 @@ export {
 // PUT" is a real deletion, and it is only distinguishable from "TT has never seen Tuesday" while
 // the old set is still readable.
 //
-// The fan-out NEVER THROWS (see vault-write.js): the SQLite write above has already happened, and
-// a note that will not write is a note that has stopped syncing — never a failed save. Same
-// posture SB-065 chose for the mirror.
+// AND IT RUNS AFTER THE COMMIT, NOT INSIDE IT — `afterCommit`, not a bare call. This route is
+// called from inside `store.transaction(...)` and the transaction CONTINUES afterwards, so a bare
+// call would fsync daily notes (and, once SB-068 lands, take a git checkpoint over the whole vault)
+// while nothing had committed. A throw later in the same transaction would then roll SQLite back
+// and leave the vault describing entries the index no longer holds — the one direction DD-006's
+// "SQLite is the derived index" cannot survive. See `afterCommit` in db.js for the full argument;
+// outside a transaction it just runs.
+//
+// The fan-out never throws on its own account either (see vault-write.js): a note that will not
+// write is a note that has stopped syncing, never a failed save. Same posture SB-065 chose for the
+// mirror, which occupies exactly this position in the sequence for exactly this reason.
 /** @param {number} userId @param {import('../../shared/types.ts').Entry[]} entries */
 export function putEntries(userId, entries) {
   if (activeBackend() !== 'vault') {
@@ -116,7 +124,7 @@ export function putEntries(userId, entries) {
   }
   const before = storedEntries(userId);
   putStoredEntries(userId, entries);
-  writeVaultEntries(userId, entries, before);
+  afterCommit(() => writeVaultEntries(userId, entries, before));
 }
 
 // ---- the markdown mirror, as a CAPABILITY OF THE STORE (SB-056 / DD-011) ----

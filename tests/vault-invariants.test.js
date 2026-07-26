@@ -213,6 +213,29 @@ describe('invariant 2 — an unparseable block is quarantined, surfaced, and LEF
       expect(readFileSync(notePath(), 'utf8')).toBe(md);
     });
   }
+
+  it('a note that breaks BETWEEN the scan and the save is quarantined by the WRITER, not overwritten', () => {
+    // The one path that reaches the writer's own quarantine recording. The scan read this note
+    // fine, so its row is `known` and `writeEligibility` says `write` — and then a human edits it
+    // into something `writeVaultBlock` refuses. Without the recording, the row stays `known`, the
+    // Settings surface shows nothing, and the next save tries again forever.
+    const good = fullNote([entry('e1', 480, 540, 'an hour')], 4);
+    writeFileSync(notePath(), good);
+    return sync.scanVault().then(async () => {
+      expect(db.getVaultIndex(notePath()).state).toBe('known');
+      const damaged = good.replace(/\n\n`revision:/, '\nI wrote a sentence in here\n\n`revision:');
+      writeFileSync(notePath(), damaged);
+
+      const report = await saveThroughStore([entry('e1', 480, 600, 'an hour, longer')]);
+      expect(report.written).toEqual([]);
+      expect(report.refused.map((r) => r.reason)).toContain('unexpected-content-in-block');
+      expect(readFileSync(notePath(), 'utf8')).toBe(damaged); // left alone, byte for byte
+      const row = db.getVaultIndex(notePath());
+      expect(row.state, 'the writer refused but left the row saying `known`').toBe('quarantined');
+      expect(row.quarantineReason).toBe('unexpected-content-in-block');
+      expect(row.rev).toBe(4); // what TT knew is not forgotten
+    });
+  });
 });
 
 // ============================================================================================

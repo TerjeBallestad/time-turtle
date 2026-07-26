@@ -39,7 +39,7 @@ const NO: Record<string, string> = {
   // are not damage at all — an adopted note's missing digest (SB-091 rider 3), and a table editor
   // reflowing cell padding (SB-080) — and crying wolf about someone's hours is the worse error.
   'Notes paused': 'Notater satt på pause',
-  'paused ': 'satt på pause ',
+  paused: 'satt på pause',
   'Time Turtle cannot prove it wrote this block, so it has stopped writing to this note.':
     'Time Turtle kan ikke bevise at den skrev denne blokken, så den har sluttet å skrive til dette notatet.',
   'Time Turtle refused this note and did not say why in words this version knows.':
