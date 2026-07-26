@@ -17,7 +17,7 @@ import * as store from './store.js';
 import { mirrorTarget, mirrorPath, mirrorBlockFor, acknowledgeMirrorBlock, retireMirrors } from './markdown.js';
 // PLAN-013 / DD-018: the shape-switch preflight. Its own module because the boot banner below
 // needs the same numbers with no HTTP in the room — see shape-preflight.js's header.
-import { shapePreflight } from './shape-preflight.js';
+import { shapePreflight, strandingBannerLines } from './shape-preflight.js';
 // SB-057: the sync engine. Imported here and nowhere else in the API layer — the routes have no
 // business knowing the vault is being watched, and the only thing this file does with it is start
 // it once the server is answering.
@@ -221,37 +221,28 @@ db.seedIfEmpty();
     // operator's answer — but it owes the same sentences the modal owes, because an env-switched
     // install is precisely the one where nobody was in the room at the moment of stranding.
     //
-    // PLACEMENT IS THE WHOLE THING. After the stamp, so the preflight reads the cutover now in
-    // force; before `retireMirrors()` below, so the mirror files are still there to count and so
-    // SB-115's ordering rule — ENTRIES FIRST, FILES LAST — is true where the per-file retirement
-    // lines already print. The `app.listen` banner is deliberately untouched: DD-018's mock is
-    // abbreviated, and the composite `api on … · shape: … · storage: …` line is SB-073's.
+    // PLACEMENT IS THE WHOLE THING, and it is why this is HERE and not in the `app.listen`
+    // callback: after the stamp, so the preflight reads the cutover now in force; before
+    // `retireMirrors()` below, so the mirror files are still there to count and so SB-115's
+    // ordering rule — ENTRIES FIRST, FILES LAST — is true where the per-file retirement lines
+    // already print. The listen banner is deliberately untouched: DD-018's mock is abbreviated and
+    // the composite `api on … · shape: … · storage: …` line is SB-073's.
+    //
+    // The SENTENCES are composed in shape-preflight.js, next to the numbers they describe; the
+    // EMISSION is here, one `console.log` per line, because the order rule is a claim about
+    // separate statements. An empty list is the silence rule and prints nothing.
     //
     // `db.listUsers()[0]` is safe HERE and would not be higher up: `seedIfEmpty()` guarantees a
     // row and the single-user refusal has already run, so under `personal` there is exactly one.
     //
-    // TWO console.log CALLS, NOT ONE. The order rule is a claim about separate statements; an
-    // order asserted inside a single call cannot fail and so proves nothing.
-    //
-    // AND IT IS SILENT WHEN THERE IS NOTHING TO SAY. DD-018's "it always appears" is a rule about
-    // the MODAL, which is SB-116's; a boot log that announces zero losses on every start is a boot
-    // log people stop reading.
-    const stranding = shapePreflight(db.listUsers()[0].id, 'personal');
-    const count = /** @type {any} */ (stranding).entries.count;
-    const segments = /** @type {any} */ (stranding).commits.segments;
-    if (count > 0 || segments > 0) {
-      console.log(
-        count === 1
-          ? '[time-turtle]   1 entry dated before it stays in SQLite and never reaches the vault'
-          : `[time-turtle]   ${count} entries dated before it stay in SQLite and never reach the vault`,
-      );
-      const range =
-        count > 0
-          ? `(${/** @type {any} */ (stranding).entries.first} … ${/** @type {any} */ (stranding).entries.last})`
-          : '';
-      const frozen =
-        segments > 0 ? `${segments} commit segment${segments === 1 ? ' freezes' : 's freeze'} with them` : '';
-      console.log('[time-turtle]   ' + [range, frozen].filter(Boolean).join('; '));
+    // WRAPPED, for the same reason `retireMirrors` guards its `saveGuard` (server/src/markdown.js):
+    // this is a bare top-level call, so an unguarded throw would kill the server at import with a
+    // stack trace — and this whole block exists to print a log line. A boot that cannot say what it
+    // stranded still boots.
+    try {
+      for (const line of strandingBannerLines(db.listUsers()[0].id)) console.log('[time-turtle]   ' + line);
+    } catch (err) {
+      console.error(`[time-turtle] could not report what this boot stranded: ${/** @type {Error} */ (err).message}`);
     }
   }
 }

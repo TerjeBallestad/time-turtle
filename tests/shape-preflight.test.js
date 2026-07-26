@@ -105,6 +105,26 @@
 //   M10 — `entries` and `commits` added to the `to=team` payload. 1 of 10:
 //     FAIL  answers with vaultDays, mirrors and users — the way-back numbers, and only those
 //           AssertionError: expected { to: 'team', …(5) } to not have property "entries"
+//
+//   ---- the end-gate review round (maker != checker), green baseline 11 of 11 ----
+//
+//   The SPEC-axis reviewer found that no test made the LEDGER half of the candidate set reach the
+//   payload: replacing `mirrorCandidates()` with `listUsers().map(mirrorPath)` left all 10 green,
+//   because every dir here had its mirror under the CURRENT mdDir. M7 only proved the call
+//   happened, not that the right set arrived. The moved-mdDir test closes it.
+//
+//   R1 — `existingMirrors()` reduced to `db.listUsers().map(mirrorPath)`. 1 of 11:
+//     FAIL  names a mirror TT wrote under an mdDir that has since MOVED — the ledger, not the current dir
+//           AssertionError: expected [] to deeply equal [ Array(1) ]
+//
+//   M1 RE-RUN after the review refactor (`toPersonal` → exported `personalPreflight`, typedefs,
+//   zero-arg `existingMirrors`), to confirm the instruments still bite: 4 of 19 across both files,
+//   the same four as before.
+//
+//   Also fixed here: `expect(mirrors).toEqual([...mirrors].sort())` was self-referential AND ran
+//   only on one-element lists, so sortedness could not fail anywhere. It now runs on the two-user
+//   dir against `to=team`, which lists a path per user with no existence filter.
+
 import { describe, it, expect, afterAll } from 'vitest';
 import { mkdtempSync, mkdirSync, writeFileSync, readdirSync, readFileSync, statSync, existsSync } from 'node:fs';
 import { createHash } from 'node:crypto';
@@ -284,8 +304,33 @@ describe('GET /api/shape/preflight?to=personal — the payload DD-018 names', ()
 
     // The mirror the team install has actually been writing is on the list, absolute and real.
     expect(res.json.mirrors).toContain(join(md, 'timesheet-admin.md'));
-    expect(res.json.mirrors).toEqual([...res.json.mirrors].sort());
     await stopServer(server.child);
+  }, 60000);
+
+  it('names a mirror TT wrote under an mdDir that has since MOVED — the ledger, not the current dir', async () => {
+    // THE HALF THE CANDIDATE SET EXISTS FOR, and the one an implementation that just maps over
+    // `listUsers()` passes every other test without. `mirrorCandidates()` is the guard ledger's
+    // keys UNION the current users' paths precisely so it survives `mdDir` having moved since —
+    // the file TT really wrote is still on disk, still stamped, and still what a switch retires.
+    const { data, md } = dataDir('preflight-moved');
+    const movedTo = join(data, 'mirror-moved');
+
+    const first = await startServer({ TT_DATA_DIR: data, TT_MD_DIR: md, TT_SHAPE: 'team' });
+    const admin = await adminOn(first.port);
+    await addEntries(admin, [entry('past-1', PAST)]); // a save under `team` writes the mirror
+    await stopServer(first.child);
+    expect(existsSync(join(md, 'timesheet-admin.md'))).toBe(true);
+
+    // Same data dir, different TT_MD_DIR. Nothing has been saved into the new one, so the current
+    // user's path does NOT exist — the only way to name the real file is through the ledger.
+    const second = await startServer({ TT_DATA_DIR: data, TT_MD_DIR: movedTo, TT_SHAPE: 'team' });
+    const back = await adminOn(second.port);
+    const res = await back('GET', '/api/shape/preflight?to=personal');
+    await stopServer(second.child);
+
+    expect(res.status).toBe(200);
+    expect(res.json.mirrors).toEqual([join(md, 'timesheet-admin.md')]);
+    expect(existsSync(join(movedTo, 'timesheet-admin.md'))).toBe(false);
   }, 60000);
 
   it('counts what TT.vaultBound will actually exclude — not the whole timesheet', async () => {
@@ -654,6 +699,15 @@ describe('the gate and the validation', () => {
     // And an anonymous caller does not get in either.
     const nobody = session(server.port);
     expect((await nobody('GET', '/api/shape/preflight?to=personal')).status).toBe(401);
+
+    // SORTEDNESS, asserted where it can actually fail: this is the only dir in the file with two
+    // users, and `to=team` is the direction that lists a path per user without an existence filter.
+    // `expect(mirrors).toEqual([...mirrors].sort())` on a one-element list proves nothing.
+    const both = await admin('GET', '/api/shape/preflight?to=team');
+    expect(both.json.mirrors).toHaveLength(2);
+    expect(both.json.mirrors).toEqual([...both.json.mirrors].sort());
+    expect(both.json.mirrors[0] < both.json.mirrors[1]).toBe(true);
+    expect(both.json.users).toBe(2);
     await stopServer(server.child);
   }, 60000);
 

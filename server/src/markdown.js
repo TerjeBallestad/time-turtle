@@ -210,10 +210,7 @@ function withoutMd(path) {
 }
 
 /**
- * THE CANDIDATE SET, named once (PLAN-013 / SB-115). Every path a retirement sweep would act
- * on: the guard ledger's `files` keys ∪ its `blocked` keys ∪ `mirrorPath(user)` for every
- * current user. Exactly the set the block comment above argues for — NOT a `timesheet-*.md`
- * glob, which would rename a file a human made and TT never touched.
+ * THE CANDIDATE SET the block comment above argues for, named once (PLAN-013 / SB-115).
  *
  * EXTRACTED so the preflight and the sweep cannot drift: DD-018 has the preflight report which
  * mirror files a switch retires, and a second definition of "which files" is a rule that agrees
@@ -222,10 +219,13 @@ function withoutMd(path) {
  * Membership is NOT existence — a ledger key whose file is gone is still a candidate here (the
  * sweep needs it to clear the stale stamp). Callers that want "files a switch would actually
  * rename" filter by `existsSync` themselves; `retireMirrors` does it inline below.
- * @returns {Set<string>} absolute paths, unordered
+ *
+ * `guard` is a parameter so the sweep can pass the SAME snapshot whose keys it goes on to delete.
+ * Re-loading it here would be a second `readFileSync` + `JSON.parse` on a path that runs on every
+ * save via `store.mirror`, and would derive the set from a different read than the mutation.
+ * @param {GuardState} [guard] @returns {Set<string>} absolute paths, unordered
  */
-export function mirrorCandidates() {
-  const guard = loadGuard();
+export function mirrorCandidates(guard = loadGuard()) {
   const candidates = new Set([...Object.keys(guard.files), ...Object.keys(guard.blocked)]);
   for (const user of listUsers()) candidates.add(mirrorPath(user));
   return candidates;
@@ -239,7 +239,7 @@ export function mirrorCandidates() {
  */
 export function retireMirrors() {
   const guard = loadGuard();
-  const candidates = mirrorCandidates();
+  const candidates = mirrorCandidates(guard);
 
   const stamp = new Date().toISOString().slice(0, 10);
   /** @type {{ from: string, to: string }[]} */

@@ -51,6 +51,29 @@ function cutoverInForce() {
 }
 
 /**
+ * The `personal` answer, written out as a type rather than only in prose. `Record<string, unknown>`
+ * typechecks nothing at the one internal caller — the boot banner reads four fields off it — so a
+ * rename here used to stay green in `tsc` and print `undefined` at boot. Local to this module ON
+ * PURPOSE: `shared/types.ts` is the shared data model, the `team` half is a declared provisional
+ * shape SB-116 may reshape, and nothing outside the server consumes either yet.
+ * @typedef {{
+ *   to: 'personal',
+ *   entries: { count: number, first: string | null, last: string | null },
+ *   commits: { segments: number },
+ *   mirrors: string[],
+ *   users: number,
+ * }} PersonalPreflight
+ */
+/**
+ * @typedef {{
+ *   to: 'team',
+ *   vaultDays: { count: number, first: string | null, last: string | null },
+ *   mirrors: string[],
+ *   users: number,
+ * }} TeamPreflight
+ */
+
+/**
  * WHAT SWITCHING THIS INSTALL TO `to` WOULD COST. Read-only in the strongest sense.
  *
  * `to === 'personal'` — what gets STRANDED:
@@ -66,10 +89,10 @@ function cutoverInForce() {
  *
  * @param {number} userId the CALLER's id — entry and commit counts are theirs and nobody else's
  * @param {string} to the TARGET shape, one of `TT.SHAPES`
- * @returns {Record<string, unknown>}
+ * @returns {PersonalPreflight | TeamPreflight}
  */
 export function shapePreflight(userId, to) {
-  if (to === 'personal') return toPersonal(userId);
+  if (to === 'personal') return personalPreflight(userId);
   if (to === 'team') return toTeam();
   // Deliberately loud rather than an empty object, so a shape with no preflight cannot quietly
   // start answering "nothing would happen". The route validates against TT.SHAPES first, so
@@ -79,9 +102,13 @@ export function shapePreflight(userId, to) {
 
 /**
  * The `personal` direction. Everything the switch takes away.
- * @param {number} userId @returns {Record<string, unknown>}
+ *
+ * Exported so the boot banner can reach it WITHOUT going through the string-keyed dispatch — the
+ * banner knows perfectly well which direction it is reporting, and `shapePreflight(id, 'personal')`
+ * would hand it back a union it then has to cast apart.
+ * @param {number} userId @returns {PersonalPreflight}
  */
-function toPersonal(userId) {
+export function personalPreflight(userId) {
   const commits = store.getCommits(userId);
   // THE CONTEXT'S SHAPE IS THE TARGET, NEVER `activeShape()`. This is the single easiest thing
   // to get wrong here: the preflight is HYPOTHETICAL and is normally called from a `team`
@@ -111,7 +138,7 @@ function toPersonal(userId) {
     // `personal` — the ledger wins over the date — so there is no such thing as a segment that
     // only partly freezes, and nothing here to filter.
     commits: { segments: commits.length },
-    mirrors: existingMirrors(mirrorCandidates()),
+    mirrors: existingMirrors(),
     users: db.listUsers().length,
   };
 }
@@ -129,7 +156,7 @@ function toPersonal(userId) {
  * modal mock. SB-115's own signature is `?to=personal|team`, so leaving this a 400 would make the
  * ticket's signature a lie and force SB-116 to grow the endpoint from the client side. Nothing
  * renders it yet, so SB-116 may reshape it — everything in it must still be true today.
- * @returns {Record<string, unknown>}
+ * @returns {TeamPreflight}
  */
 function toTeam() {
   // `known` + `rev != null` is "TT HOLDS A BLOCK IN THIS NOTE" — the only state that licenses a
@@ -162,11 +189,15 @@ function toTeam() {
     // Under `personal` the switch retires them; under `team` it resumes writing them. The verb
     // belongs to the direction, the direction is already in `to`, and the client owns the verb.
     //
-    // NOT existence-filtered here, and that is the difference rather than an oversight: this is a
-    // claim about what the resumed mirror WILL write, and under `personal` those files have just
-    // been retired, so filtering by existence would answer "no files" to "which files will
-    // reappear". The `personal` direction filters because there the claim is about files a sweep
-    // will really rename.
+    // TWO DIFFERENCES FROM THE `personal` LIST, both deliberate, and naming only one of them would
+    // be a comment claiming less than the code does:
+    //   * COMPOSITION. `personal` uses `mirrorCandidates()` — the guard ledger's keys too, so it
+    //     includes files TT wrote under an `mdDir` that has since moved. The resumed mirror writes
+    //     to CURRENT users at their CURRENT paths and nowhere else, so the ledger half is not it.
+    //   * NO EXISTENCE FILTER. This is a claim about what the switch WILL write; under `personal`
+    //     those files have just been retired, so filtering by existence would answer "no files" to
+    //     "which files will reappear". `personal` filters because there the claim is about files a
+    //     sweep will really rename.
     mirrors: users.map(mirrorPath).sort(),
     users: users.length,
   };
@@ -181,8 +212,50 @@ function toTeam() {
  * guarantee actually being kept is that no note is opened, parsed or downloaded — SB-052
  * measured that `statSync` does not trigger an iCloud download (server/src/vault-fs.js), and a
  * dataless placeholder still stats as present, which is the safe direction to be wrong in.
- * @param {Set<string>} candidates @returns {string[]}
+ *
+ * ZERO-ARG: there is exactly one honest answer to "which set", and it is `mirrorCandidates()`.
+ * A parameter would invite a caller to supply a narrower one and quietly lose the ledger half —
+ * the files TT wrote under an `mdDir` that has since moved, which a glob could never find.
+ * @returns {string[]}
  */
-function existingMirrors(candidates) {
-  return [...candidates].filter((path) => existsSync(path)).sort();
+function existingMirrors() {
+  return [...mirrorCandidates()].filter((path) => existsSync(path)).sort();
+}
+
+// ---- the boot banner's sentences (PLAN-013 Task 3) ----
+
+/**
+ * WHAT A BOOT INTO `personal` SAYS IT JUST STRANDED — the sentences, composed here next to the
+ * numbers they describe, and EMITTED by server/src/index.js so the placement argument stays at the
+ * call site where it is load-bearing (after the cutover stamp, before the retirement sweep).
+ *
+ * ONE LINE PER ELEMENT, and the caller prints each with its own `console.log`. SB-115's ordering
+ * rule — entries first, files last — is a claim about separate statements; an order asserted
+ * inside a single call cannot fail and so proves nothing.
+ *
+ * EMPTY WHEN NOTHING WAS STRANDED, which is the whole silence rule. DD-018's "it always appears"
+ * governs the MODAL (SB-116's); a boot log that announces zero losses on every start is a boot log
+ * people stop reading.
+ *
+ * AND THE COUNT IS NOT "ENTRIES DATED BEFORE THE CUTOVER". It is the complement of `TT.vaultBound`,
+ * which is the date clause OR the DD-017 ledger clause — a committed segment freezes WHOLE, so a
+ * POST-cutover day inside one is stranded too, and `last` can be a date after the cutover. The
+ * cutover line printed just above already carries the date rule; repeating it here would be prose
+ * asserting something the number does not say, which is the exact thing DD-018 forbids.
+ *
+ * @param {number} userId @returns {string[]}
+ */
+export function strandingBannerLines(userId) {
+  const { entries, commits } = personalPreflight(userId);
+  if (entries.count === 0) return [];
+  const frozen =
+    commits.segments > 0
+      ? `; ${commits.segments} commit segment${commits.segments === 1 ? ' freezes' : 's freeze'} with them`
+      : '';
+  return [
+    entries.count === 1
+      ? '1 entry stays in SQLite and never reaches the vault'
+      : `${entries.count} entries stay in SQLite and never reach the vault`,
+    `(${entries.first} … ${entries.last})${frozen}`,
+  ];
 }
