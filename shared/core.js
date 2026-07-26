@@ -706,6 +706,17 @@ TT.locateVaultBlock = function (md, opts) {
   const heading = nfc(((opts && opts.heading) || VAULT_HEADING).trim());
   const lines = String(md == null ? '' : md).split('\n');
   const fenced = markFences(lines);
+  // The CRLF signal, computed ONCE for every anchor-shaped refusal below (SB-084). A `\r\n` note
+  // leaves a `\r` on every line, and JS `.`/`$` do not cross it, so an anchor match fails on a
+  // note that plainly HAS the anchor — for the heading, and equally for the revision line, whose
+  // `no-revision` reads as "it isn't there" about a line a human can see on screen. Refusing is
+  // the safe direction and stays the behaviour (TT does not rewrite line endings it did not
+  // author, SB-083); what changes here is only which reason is reported, so this can never write
+  // a byte. `endsWith('\r')` is deliberately the test rather than "contains a CR": a lone CR
+  // mid-line is not the CRLF signature and must not take the blame for a genuinely absent anchor.
+  // One signal, not one probe per branch — two probes that can disagree about what CRLF means is
+  // the bug class PLAN-009's review unified in the totals-row detection.
+  const crlf = lines.some((line) => line.endsWith('\r'));
 
   // 1. the top anchor — the heading TEXT compared exactly, never interpolated into a regex
   /** @type {number[]} */
@@ -713,17 +724,12 @@ TT.locateVaultBlock = function (md, opts) {
   for (let i = 0; i < lines.length; i++) {
     if (!fenced[i] && isHeadingAnchor(lines[i], heading)) anchors.push(i);
   }
-  if (!anchors.length) {
-    // Diagnose CRLF rather than blaming the heading. A `\r\n` note leaves a `\r` on every
-    // line, and JS `.`/`$` do not cross it, so every anchor match fails on a note that
-    // plainly HAS the heading. Refusing is the safe direction and stays the behaviour — TT
-    // does not rewrite line endings it did not author — but 'no-heading' would send a human
-    // looking in the wrong place forever. Whether TT should support CRLF notes at all is
-    // SB-083.
-    const crlf = lines.some((line) => line.endsWith('\r') && isHeadingAnchor(line.slice(0, -1), heading));
-    return vaultQuarantine(crlf ? 'crlf-line-endings' : 'no-heading');
-  }
-  // two blocks with one name: nothing can say which is the day's, so neither is writable
+  // diagnose CRLF rather than blaming the heading — 'no-heading' would send a human looking in
+  // the wrong place forever
+  if (!anchors.length) return vaultQuarantine(crlf ? 'crlf-line-endings' : 'no-heading');
+  // two blocks with one name: nothing can say which is the day's, so neither is writable. This
+  // one does NOT defer to `crlf` — it found MORE than it expected, which a `\r` cannot explain,
+  // so the specific reason is the useful one (same for 'multiple-revisions' below).
   if (anchors.length > 1) return vaultQuarantine('multiple-headings');
   const start = anchors[0];
 
@@ -747,11 +753,12 @@ TT.locateVaultBlock = function (md, opts) {
   if (!revLines.length) {
     // name the dangerous case precisely: the anchor exists, but only in someone else's section
     for (let i = stop; i < lines.length; i++) {
-      if (!fenced[i] && REVISION_RE.test(lines[i])) return vaultQuarantine('revision-past-next-heading');
+      if (!fenced[i] && REVISION_RE.test(lines[i]))
+        return vaultQuarantine(crlf ? 'crlf-line-endings' : 'revision-past-next-heading');
     }
-    return vaultQuarantine('no-revision');
+    return vaultQuarantine(crlf ? 'crlf-line-endings' : 'no-revision');
   }
-  if (revLines.length > 1) return vaultQuarantine('multiple-revisions');
+  if (revLines.length > 1) return vaultQuarantine('multiple-revisions'); // found MORE — not CRLF's doing
   const { line: revisionLine, revision, digest } = revLines[0];
 
   // 4. the table: header row, delimiter row, then contiguous data rows
@@ -763,7 +770,7 @@ TT.locateVaultBlock = function (md, opts) {
   }
   const separatorLine = headerLine + 1;
   if (headerLine < 0 || separatorLine >= revisionLine || !isDelimiterRow(lines[separatorLine])) {
-    return vaultQuarantine('no-table');
+    return vaultQuarantine(crlf ? 'crlf-line-endings' : 'no-table');
   }
   /** @type {number[]} */
   const rowLines = [];

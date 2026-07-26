@@ -1858,6 +1858,71 @@ describe('vault block — end-gate review regressions (SB-055)', () => {
     expect(TT.writeVaultBlock(crlf, []).md).toBe(crlf); // and nothing is written
   });
 
+  // A mixed-ending note — LF throughout with a stray `\r` on one line — is the live case, not a
+  // hypothetical: it is what a hand edit in the wrong editor leaves behind. Before SB-084 the CRLF
+  // probe lived inside the `no-heading` branch and only re-tested HEADING lines, so it fired only
+  // when the TOP anchor was the thing that broke. Every other anchor-shaped refusal reported its
+  // own reason and hid the cause — worst of all `no-revision`, which says "the anchor is missing"
+  // about a note whose anchor a human can read on screen. SB-083's whole case for refusing CRLF
+  // is "we refuse, but we say why"; this is the case where it did not.
+  // ## Verified red-green: 2026-07-26
+  describe('a stray \\r is diagnosed as CRLF whichever anchor it broke (SB-084)', () => {
+    const lf = note('| Time | Task |', '|---|---|', ['| 30m | Tidying |', '| **0.5h** | |']);
+    // a `\r` parked on the blank line after the heading: enough to make the note CRLF-tainted,
+    // but it breaks no anchor by itself, so each case below breaks exactly one thing on purpose
+    const taint = (md) => md.replace('\n\n', '\n\r\n');
+
+    it('the LF original is writable, and the taint alone changes no verdict but the reason', () => {
+      const loc = TT.locateVaultBlock(lf);
+      expect(loc.quarantine).toBe(false);
+      expect(loc.revision).toBe(1);
+    });
+
+    it('a `\\r` on the revision line reports CRLF, not `no-revision`', () => {
+      // the defect this ticket exists for: REVISION_RE is anchored with `$`, which does not
+      // cross `\r`, so the match fails while the anchor sits plainly in the file
+      const md = lf.replace(/^(`revision: .*`)$/m, '$1\r');
+      expect(md).not.toBe(lf); // the fixture bites
+      expect(TT.locateVaultBlock(md)).toEqual({ quarantine: true, reason: 'crlf-line-endings' });
+      expect(TT.writeVaultBlock(md, []).md).toBe(md); // still refused, still not a byte written
+    });
+
+    it('a `\\r` on the heading line reports CRLF', () => {
+      const md = lf.replace('## Time Log', '## Time Log\r');
+      expect(TT.locateVaultBlock(md)).toEqual({ quarantine: true, reason: 'crlf-line-endings' });
+    });
+
+    it('a missing delimiter row in a tainted note reports CRLF, not `no-table`', () => {
+      const md = taint(lf.replace('|---|---|\n', ''));
+      expect(md).not.toContain('|---|---|'); // the fixture bites
+      expect(TT.locateVaultBlock(md)).toEqual({ quarantine: true, reason: 'crlf-line-endings' });
+    });
+
+    it('a revision line past the next heading in a tainted note reports CRLF', () => {
+      const md = taint(lf.replace(/^(`revision: )/m, '## Someone else\n\n$1'));
+      expect(TT.locateVaultBlock(lf.replace(/^(`revision: )/m, '## Someone else\n\n$1'))).toEqual({
+        quarantine: true,
+        reason: 'revision-past-next-heading',
+      }); // untainted, the specific reason still stands
+      expect(TT.locateVaultBlock(md)).toEqual({ quarantine: true, reason: 'crlf-line-endings' });
+    });
+
+    it('a missing heading in a tainted note reports CRLF', () => {
+      const md = taint(lf.replace('## Time Log', '## Something Else'));
+      expect(TT.locateVaultBlock(md)).toEqual({ quarantine: true, reason: 'crlf-line-endings' });
+    });
+
+    // …and the refusals that found MORE than they expected keep their own reason: CRLF cannot
+    // explain a SECOND heading or a SECOND revision line, and the specific reason is the useful
+    // one. Deferring these to CRLF would trade a true diagnosis for a plausible-sounding one.
+    it('`multiple-headings` and `multiple-revisions` are not blamed on CRLF', () => {
+      const twoHeadings = taint(lf + '\n' + lf);
+      expect(TT.locateVaultBlock(twoHeadings)).toEqual({ quarantine: true, reason: 'multiple-headings' });
+      const twoRevisions = taint(lf.replace(/^(`revision: .*`)$/m, '$1\n$1'));
+      expect(TT.locateVaultBlock(twoRevisions)).toEqual({ quarantine: true, reason: 'multiple-revisions' });
+    });
+  });
+
   it('an NFD heading matches its NFC twin (macOS hands out NFD)', () => {
     // `Å` genuinely decomposes (A + U+030A); `ø` does not, so a fixture built on it would
     // hold even with normalisation removed — a gate that cannot fail (caught in review).
