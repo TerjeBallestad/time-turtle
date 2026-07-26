@@ -61,6 +61,56 @@ CREATE TABLE IF NOT EXISTS commits (
   user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
   data TEXT NOT NULL DEFAULT '[]'
 );
+-- SB-057: what TT last read from, and last wrote to, each daily note. One row per PATH.
+--
+-- WHAT THIS TABLE IS FOR, and — just as important — what it is NOT for.
+--
+-- It is NOT the corruption detector. DD-009 deliberately took that job away from an index and
+-- put it ON THE NOTE (the payload digest in the "revision: N · a3f1" anchor), and the deciding
+-- argument was exactly that an on-note digest needs no surviving state: any TT, on any machine,
+-- after any crash or index rebuild, verifies a block against itself. "The index must be durable"
+-- is an argument that was RETIRED. Do not reinstate it here. This table may be deleted, rebuilt
+-- or lost without any block becoming undetectably corrupt.
+--
+-- It IS required for two things that stand on their own merits:
+--   1. the "file rev < index rev" split (design decision 5). Telling "a peer that is simply
+--      behind" from "somebody restored this note from git" needs TT's record of what the note
+--      looked like at the PREVIOUS revision, and no note carries its own history.
+--   2. the own-write echo guard — file_sha is how the watcher recognises TT's own write and
+--      declines to re-import it.
+--
+-- CREATE TABLE IF NOT EXISTS, no migration, and an existing DB starts EMPTY. That is not a gap:
+-- an empty index reads as "nothing known yet", which is the correct cold-start state, and under
+-- the write scope rule (design decision 2) it licenses no writes at all until a scan has read
+-- something.
+--
+-- state is known | unknown | quarantined, and only known licenses a write. That is what
+-- makes invariant 1 ("unreadable or absent → unknown, never empty") mean something on the WRITE
+-- side rather than being a comment on the read side.
+--
+-- TWO HASHES, TWO JOBS (design decision 3), and they must never be collapsed into one:
+--   file_sha       — sha256 over the WHOLE FILE (node:crypto, server-side). Answers "did this
+--                      file change at all", which is the cheap skip that makes the interval scan
+--                      free on a quiet day. It moves when Terje edits "## Captures", so it is
+--                      useless as an arbitration input.
+--   payload_digest — TT.vaultPayloadDigest, the SAME 16-bit FNV the bottom anchor carries.
+--                      Answers "is this the payload TT recorded at that rev". It has to be the
+--                      anchor's hash or the rev-regression split compares against a number no
+--                      note ever contained.
+CREATE TABLE IF NOT EXISTS vault_index (
+  path TEXT PRIMARY KEY,
+  date TEXT NOT NULL,
+  state TEXT NOT NULL,
+  rev INTEGER,
+  payload_digest TEXT,
+  prev_rev INTEGER,
+  prev_payload_digest TEXT,
+  file_sha TEXT,
+  verified INTEGER,
+  quarantine_reason TEXT,
+  seen_at TEXT,
+  written_at TEXT
+);
 `);
 
 // ---- migrations ----
@@ -584,6 +634,124 @@ export function putCommits(userId, commits) {
   db.prepare(
     'INSERT INTO commits (user_id, data) VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET data = excluded.data',
   ).run(userId, JSON.stringify(Array.isArray(commits) ? commits : []));
+}
+
+// ---- vault index (SB-057) ----
+// See the DDL above for what this table is and is not. These are the only accessors; nothing
+// else may touch `vault_index`, because `putVaultIndex` owns a rule no caller can be trusted to
+// reproduce (the previous-pair roll-forward below).
+/** @typedef {import('../../shared/types.ts').VaultIndexRow} VaultIndexRow */
+
+/** The three legal `state` values. Only `known` licenses a write (design decision 2). */
+const VAULT_INDEX_STATES = ['known', 'unknown', 'quarantined'];
+
+/**
+ * The raw SQLite row as the model shape. `verified` is stored as 0/1/NULL and comes back as a
+ * boolean or null — null means "TT has not parsed this file", which is a third thing and not
+ * `false` ("parsed, digest-less, therefore unverified").
+ * @param {any} row @returns {VaultIndexRow | null}
+ */
+function vaultIndexRow(row) {
+  if (!row) return null;
+  return {
+    path: row.path,
+    date: row.date,
+    state: row.state,
+    rev: row.rev,
+    payloadDigest: row.payload_digest,
+    prevRev: row.prev_rev,
+    prevPayloadDigest: row.prev_payload_digest,
+    fileSha: row.file_sha,
+    verified: row.verified == null ? null : !!row.verified,
+    quarantineReason: row.quarantine_reason,
+    seenAt: row.seen_at,
+    writtenAt: row.written_at,
+  };
+}
+const VAULT_INDEX_SELECT =
+  'SELECT path, date, state, rev, payload_digest, prev_rev, prev_payload_digest, file_sha, verified, quarantine_reason, seen_at, written_at FROM vault_index';
+
+/** @param {string} path @returns {VaultIndexRow | null} */
+export function getVaultIndex(path) {
+  return vaultIndexRow(db.prepare(VAULT_INDEX_SELECT + ' WHERE path = ?').get(String(path)));
+}
+/**
+ * Every row TT holds for one calendar date. A LIST and not a single row: the daily folder is a
+ * setting, so re-pointing it leaves rows for two paths that mean the same day, and a caller that
+ * assumed one row would silently pick whichever SQLite handed back first.
+ * @param {string} date @returns {VaultIndexRow[]}
+ */
+export function getVaultIndexByDate(date) {
+  return /** @type {VaultIndexRow[]} */ (
+    db
+      .prepare(VAULT_INDEX_SELECT + ' WHERE date = ? ORDER BY path')
+      .all(String(date))
+      .map(vaultIndexRow)
+  );
+}
+/** @returns {VaultIndexRow[]} */
+export function listVaultIndex() {
+  return /** @type {VaultIndexRow[]} */ (
+    db
+      .prepare(VAULT_INDEX_SELECT + ' ORDER BY path')
+      .all()
+      .map(vaultIndexRow)
+  );
+}
+/**
+ * Record what TT now knows about a path. THE ONE PLACE `prevRev`/`prevPayloadDigest` are set —
+ * they are rolled forward from the row's CURRENT pair and are deliberately not readable off the
+ * argument. A caller that could set them would eventually set them to something that never was
+ * on disk, and the rev-regression split (design decision 5) would then vouch for a payload TT
+ * never wrote, which is the silent-undo SB-061 filed.
+ *
+ * The roll happens only when the incoming `(rev, payloadDigest)` DIFFERS from the stored pair.
+ * An idempotent re-put — the interval scan touching `seenAt` on a file that has not moved — must
+ * not shift `(rev, digest)` into `prev_*`, because that would overwrite the genuine previous
+ * revision with the current one and turn a legitimate stale peer into a quarantine. "Exactly one
+ * previous pair" means one previous DISTINCT pair.
+ *
+ * An unrecognised `state` degrades to `unknown` rather than throwing or being stored verbatim.
+ * `unknown` is the safe row: it licenses no write, so a junk value costs a re-read and never a
+ * byte. Same discipline `putSettings` applies to `shape`.
+ * @param {VaultIndexRow} row
+ */
+export function putVaultIndex(row) {
+  const path = String(row.path);
+  const current = getVaultIndex(path);
+  const rev = row.rev == null ? null : +row.rev;
+  const payloadDigest = row.payloadDigest == null ? null : String(row.payloadDigest);
+  const changed = !current || current.rev !== rev || current.payloadDigest !== payloadDigest;
+  const prevRev = current ? (changed ? current.rev : current.prevRev) : null;
+  const prevDigest = current ? (changed ? current.payloadDigest : current.prevPayloadDigest) : null;
+  const state = VAULT_INDEX_STATES.includes(String(row.state)) ? String(row.state) : 'unknown';
+  db.prepare(
+    `INSERT INTO vault_index (path, date, state, rev, payload_digest, prev_rev, prev_payload_digest, file_sha, verified, quarantine_reason, seen_at, written_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(path) DO UPDATE SET
+       date = excluded.date, state = excluded.state, rev = excluded.rev,
+       payload_digest = excluded.payload_digest, prev_rev = excluded.prev_rev,
+       prev_payload_digest = excluded.prev_payload_digest, file_sha = excluded.file_sha,
+       verified = excluded.verified, quarantine_reason = excluded.quarantine_reason,
+       seen_at = excluded.seen_at, written_at = excluded.written_at`,
+  ).run(
+    path,
+    String(row.date ?? ''),
+    state,
+    rev,
+    payloadDigest,
+    prevRev,
+    prevDigest,
+    row.fileSha == null ? null : String(row.fileSha),
+    row.verified == null ? null : row.verified ? 1 : 0,
+    row.quarantineReason == null ? null : String(row.quarantineReason),
+    row.seenAt == null ? null : String(row.seenAt),
+    row.writtenAt == null ? null : String(row.writtenAt),
+  );
+}
+/** @param {string} path */
+export function deleteVaultIndex(path) {
+  db.prepare('DELETE FROM vault_index WHERE path = ?').run(String(path));
 }
 
 // ---- versions (DC-001: optimistic concurrency) ----

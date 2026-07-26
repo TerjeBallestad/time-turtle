@@ -64,6 +64,15 @@ export {
   // the per-user commit ledger (SDD-002 ruling 4)
   getCommits,
   putCommits,
+  // SB-057: the vault index — what TT last read from, and last wrote to, each daily note. On the
+  // seam because it IS storage state: under `personal` it is the bookkeeping that keeps DD-006's
+  // "SQLite is the derived index" honest, and this file's header names SB-057 as the ticket that
+  // fills the hole. See the `vault_index` DDL in db.js for what it is and is not.
+  getVaultIndex,
+  getVaultIndexByDate,
+  listVaultIndex,
+  putVaultIndex,
+  deleteVaultIndex,
   // DC-001 optimistic-concurrency counters
   getVersions,
   bumpCatalogVersion,

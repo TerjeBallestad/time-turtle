@@ -658,6 +658,48 @@ export interface VaultCatalogWriteResult {
   section: VaultCatalogSectionName | null;
 }
 
+// ---- the vault index (SB-057) ----
+/**
+ * What TT last read from, and last wrote to, one daily note. One row per PATH, held in SQLite —
+ * see the `vault_index` DDL in server/src/db.js for the full argument, including what this table
+ * is deliberately NOT (a corruption detector: DD-009 put that on the note itself).
+ *
+ * `known` is the only state that licenses a write (design decision 2). `unknown` covers a file
+ * TT could not read, a read that timed out, and a day left lazy because it is iCloud-dataless —
+ * all of which mean "TT has not confirmed reading this day", which is exactly what makes writing
+ * to it forbidden.
+ */
+export type VaultIndexState = 'known' | 'unknown' | 'quarantined';
+
+export interface VaultIndexRow {
+  /** absolute path of the daily note */
+  path: string;
+  /** the note's calendar date, `YYYY-MM-DD` */
+  date: string;
+  state: VaultIndexState;
+  /** the block's revision counter as TT last saw it, or null when TT has never parsed it */
+  rev: number | null;
+  /** `TT.vaultPayloadDigest` over that revision's payload — the anchor's own hash, never a second one */
+  payloadDigest: string | null;
+  /**
+   * The revision BEFORE `rev`, and its payload digest. Set only by `putVaultIndex`, rolled
+   * forward from the current pair, and never readable off a caller's argument. This pair is the
+   * whole reason the table exists: it is what tells "a peer that is one revision behind" from
+   * "somebody restored this note from git" (design decision 5).
+   */
+  prevRev: number | null;
+  prevPayloadDigest: string | null;
+  /** sha256 over the WHOLE FILE — "did this file change at all", never the arbitration input */
+  fileSha: string | null;
+  /** the block's DD-009 digest was present and matched; null when TT has not parsed the file */
+  verified: boolean | null;
+  quarantineReason: VaultQuarantineReason | null;
+  /** when TT last looked at this path */
+  seenAt: string | null;
+  /** when TT last WROTE this path — the echo guard's other half */
+  writtenAt: string | null;
+}
+
 // ---- parsed time cell (discriminated union) ----
 export type ParsedTime =
   | { kind: 'range'; start: number; end: number }
