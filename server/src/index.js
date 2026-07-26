@@ -15,6 +15,10 @@ import * as store from './store.js';
 // SB-056: `writeMirror` is NOT imported here any more — every mirror write goes through
 // `store.mirror`, which is off under `vault` (DD-011). See store.js.
 import { mirrorTarget, mirrorPath, mirrorBlockFor, acknowledgeMirrorBlock, retireMirrors } from './markdown.js';
+// SB-057: the sync engine. Imported here and nowhere else in the API layer — the routes have no
+// business knowing the vault is being watched, and the only thing this file does with it is start
+// it once the server is answering.
+import { startVaultSync, scanVault, vaultSyncConfig, forgetOwnWrites } from './vault-sync.js';
 import { teamReport } from './reports.js';
 import TT from '../../shared/core.js';
 
@@ -746,6 +750,22 @@ app.put('/api/state', requireUser, (req, res) => {
     if (err instanceof ReferencedDeleteError) return res.status(409).json({ error: err.message, conflict: true });
     return res.status(400).json({ error: 'save failed: ' + /** @type {Error} */ (err).message });
   }
+  // SB-057: the vault the engine watches is a SETTING, so the engine has to be re-pointed when it
+  // moves. Without this, configuring the vault folder for the first time does nothing until the
+  // next restart — a personal install that looks wired up and syncs nothing, which is the exact
+  // "perfect plumbing, no way to reach it" failure SB-063 already cost this repo once.
+  //
+  // `startVaultSync` stops first and is idempotent, so re-pointing at nothing correctly STOPS
+  // watching rather than leaving a watcher on the old folder. The scan that follows is
+  // fire-and-forget for the same reason the boot one is: a cold vault takes minutes and a save
+  // must not wait for it.
+  if (body.settings && (body.settings.vaultPaths !== undefined || body.settings.shape !== undefined)) {
+    forgetOwnWrites(); // echo records are keyed by path, and the paths may have just moved
+    if (startVaultSync())
+      void scanVault().catch((err) =>
+        console.error('[time-turtle] vault re-scan failed:', /** @type {Error} */ (err).message),
+      );
+  }
   /** @type {string | null} */
   let mirror = null;
   /** @type {string | null} */
@@ -1221,8 +1241,28 @@ app.listen(PORT, () => {
   // present tense. The cost is real and is said out loud here rather than discovered.
   if (shape.shape === 'personal')
     console.log(
-      '[time-turtle] personal shape: the markdown mirror is off (DD-011), committing is off until phase 3 (DD-008), markdown paste-back is off, and nothing yet syncs the SQLite index from vault files (SB-057)',
+      '[time-turtle] personal shape: the markdown mirror is off (DD-011), committing is off until phase 3 (DD-008), and markdown paste-back is off',
     );
+  // SB-057: the sync engine starts AFTER the server is answering, deliberately. A cold boot scan
+  // over evicted days is a serial run of ~1 s blocking downloads (SB-052), and `tt serve` spawns
+  // detached — so a scan that ran before `listen` would look exactly like a hang, on a process
+  // nobody can see. The watcher and the interval are started first so a note landing during the
+  // scan is not missed; the scan itself is fire-and-forget.
+  const started = startVaultSync();
+  if (started) {
+    const config = vaultSyncConfig();
+    console.log(`[time-turtle] vault sync → ${config ? config.dailyDir : '?'}  (watch + interval)`);
+    void scanVault()
+      .then((counts) => {
+        const summary = Object.entries(counts)
+          .map(([verdict, n]) => `${n} ${verdict}`)
+          .join(', ');
+        console.log(`[time-turtle] vault boot scan: ${summary || 'no daily notes yet'}`);
+      })
+      .catch((err) => console.error('[time-turtle] vault boot scan failed:', /** @type {Error} */ (err).message));
+  } else if (shape.shape === 'personal') {
+    console.log('[time-turtle] vault sync is idle: no vault folder is configured (Settings → Vault)');
+  }
   console.log(
     `[time-turtle] markdown mirror → ${target.dir}  (${MIRROR_SOURCE[target.source]})${shape.shape === 'personal' ? '  — not written in the personal shape' : ''}`,
   );
