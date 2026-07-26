@@ -210,6 +210,28 @@ function withoutMd(path) {
 }
 
 /**
+ * THE CANDIDATE SET, named once (PLAN-013 / SB-115). Every path a retirement sweep would act
+ * on: the guard ledger's `files` keys ∪ its `blocked` keys ∪ `mirrorPath(user)` for every
+ * current user. Exactly the set the block comment above argues for — NOT a `timesheet-*.md`
+ * glob, which would rename a file a human made and TT never touched.
+ *
+ * EXTRACTED so the preflight and the sweep cannot drift: DD-018 has the preflight report which
+ * mirror files a switch retires, and a second definition of "which files" is a rule that agrees
+ * today and diverges on the first ruling. `retireMirrors` below consumes this and nothing else.
+ *
+ * Membership is NOT existence — a ledger key whose file is gone is still a candidate here (the
+ * sweep needs it to clear the stale stamp). Callers that want "files a switch would actually
+ * rename" filter by `existsSync` themselves; `retireMirrors` does it inline below.
+ * @returns {Set<string>} absolute paths, unordered
+ */
+export function mirrorCandidates() {
+  const guard = loadGuard();
+  const candidates = new Set([...Object.keys(guard.files), ...Object.keys(guard.blocked)]);
+  for (const user of listUsers()) candidates.add(mirrorPath(user));
+  return candidates;
+}
+
+/**
  * Retire every mirror file TT wrote. Idempotent: a retired file is neither stamped nor any
  * user's mirror path, so it is never a candidate again and a second run renames nothing.
  * Never throws — a per-file failure is logged and that file keeps its stamp and its block.
@@ -217,8 +239,7 @@ function withoutMd(path) {
  */
 export function retireMirrors() {
   const guard = loadGuard();
-  const candidates = new Set([...Object.keys(guard.files), ...Object.keys(guard.blocked)]);
-  for (const user of listUsers()) candidates.add(mirrorPath(user));
+  const candidates = mirrorCandidates();
 
   const stamp = new Date().toISOString().slice(0, 10);
   /** @type {{ from: string, to: string }[]} */

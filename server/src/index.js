@@ -15,6 +15,9 @@ import * as store from './store.js';
 // SB-056: `writeMirror` is NOT imported here any more — every mirror write goes through
 // `store.mirror`, which is off under `vault` (DD-011). See store.js.
 import { mirrorTarget, mirrorPath, mirrorBlockFor, acknowledgeMirrorBlock, retireMirrors } from './markdown.js';
+// PLAN-013 / DD-018: the shape-switch preflight. Its own module because the boot banner below
+// needs the same numbers with no HTTP in the room — see shape-preflight.js's header.
+import { shapePreflight } from './shape-preflight.js';
 // SB-057: the sync engine. Imported here and nowhere else in the API layer — the routes have no
 // business knowing the vault is being watched, and the only thing this file does with it is start
 // it once the server is answering.
@@ -1117,6 +1120,27 @@ app.get('/api/mirror/blocks', requireUser, requireAdmin, (req, res) => {
     if (block) mirrorBlocks.push({ ...block, userId: user.id, userName: user.name });
   }
   res.json({ mirrorBlocks });
+});
+
+// ---- PLAN-013 / SB-115 / DD-018: the shape-switch preflight ----
+//
+// "What would this switch cost", answered by the server before the gesture. DD-018's ruling is
+// that the numbers are COMPUTED, never asserted in prose — so SB-116's modal reads its 214 off
+// this, and the boot banner reads the same numbers out of the same module with no HTTP in the
+// room. A thin adapter on purpose: everything true about the answer lives in shape-preflight.js.
+//
+// SAME GATE AS `/api/mirror/blocks` ABOVE, and for the same reason: the `mirrors` list is other
+// users' file paths. `requireUser, requireAdmin`. The entry and commit counts are the CALLER's
+// own (`req.user.id`) — no other user's entry content leaves this route.
+//
+// `to` EQUAL TO THE CURRENT SHAPE IS ANSWERED NORMALLY, not refused. This is a read; what to do
+// about a no-op switch is the caller's business, and a 409 here would make the modal special-case
+// a state it can already see.
+app.get('/api/shape/preflight', requireUser, requireAdmin, (req, res) => {
+  const to = req.query.to;
+  if (typeof to !== 'string' || !TT.SHAPES.includes(/** @type {any} */ (to)))
+    return res.status(400).json({ error: 'to must be one of ' + TT.SHAPES.join(', ') });
+  res.json(shapePreflight(req.user.id, to));
 });
 
 // ---- team reports (admin) ----
