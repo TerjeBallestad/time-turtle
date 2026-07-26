@@ -492,7 +492,73 @@ TT.decodeTaskCell = function (cell) {
 // between the table and the revision line only blank lines are allowed. Anything else is a
 // hand edit TT cannot account for, and it quarantines instead of splicing over it.
 const VAULT_HEADING = 'Time Log';
-const REVISION_RE = /^`revision: (\d+)`$/;
+// THE PAYLOAD DIGEST (DD-009, ruled by Terje in SB-078). The bottom anchor carries a short
+// digest of the table payload — `` `revision: 8 · a3f1` `` — because `revision` alone is
+// structurally incapable of detecting the corruption SB-051 measured on the real vault:
+// Obsidian silently diff-merges an external write into a dirty open buffer, keeping TT's
+// anchor line and the buffer's rows. The counter is the field that survives intact, so only a
+// value derived FROM THE PAYLOAD can notice. On-note rather than in TT's index (DD-009's
+// deciding argument): an on-note digest needs no surviving state, so any TT, on any machine,
+// after any crash or index rebuild, verifies a block against itself.
+//
+// ONE matcher and ONE emitter, as before — this regex and `vaultRevisionLine`. It accepts BOTH
+// shapes: the digest group is optional because DD-009 consequence 2 requires a digest-less line
+// to PARSE and be reported UNVERIFIED, never quarantined. Getting that backwards makes every
+// pre-cutover and hand-made block unreadable. Quarantine fires only on a digest that is present
+// and WRONG.
+//
+// Strict lowercase hex, exactly 4, separator ` · ` (U+00B7). One canonical spelling, the way
+// DD-010 keys the Task cell on the exact string `<br>`: TT is the only writer of this token, so
+// a variant spelling is a hand edit, and a refusal is the honest answer rather than leniency
+// that would let a near-miss read as verified. Near-misses (`· `, non-hex, no separator) fail
+// the whole match, which is the safe direction — the line stops being an anchor at all.
+const REVISION_RE = /^`revision: (\d+)(?: · ([0-9a-f]{4}))?`$/;
+/**
+ * The digest over a block's table payload. FNV-1a/32 XOR-folded to 16 bits, 4 lowercase hex.
+ *
+ * NOT `node:crypto` (DD-009 consequence 3): this file is imported by the browser client
+ * (`client/src/i18n.ts:3`) and has zero imports today — a Node import here breaks the client
+ * build. A cryptographic hash is not what this needs anyway; the adversary is a text-editor
+ * merge, not a forger. 16 bits leaves a ~1/65536 chance a merge slips through, which is the
+ * cost DD-009 accepted for a 4-char token in the line Terje reads daily.
+ *
+ * Each UTF-16 code unit is folded as two bytes rather than masked to one. The payload really
+ * does carry non-ASCII — `→`, `✓`, wikilinks, Norwegian labels — and `charCodeAt(i) & 0xff`
+ * would collapse `→` (U+2192) and U+0092 to the same input. No `TextEncoder`, to keep this
+ * function free of even ambient globals.
+ *
+ * DO NOT REUSE THIS FOR DD-008's ENTRY KEY. That digest is over PARSED VALUES of one row, so
+ * escaping and the `→`/`->` separator setting drop out of it (DD-008 rule 1); this one is over
+ * the RAW LINE BYTES of the whole block, precisely so that any byte-level change — including
+ * one that parses back to the same values — is caught. Different question, different input.
+ * DD-008 rule 10 leaves the entry-key hash to phase 3 to choose; this is not it.
+ * @param {string} payload @returns {string}
+ */
+function vaultDigest(payload) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < payload.length; i++) {
+    const c = payload.charCodeAt(i);
+    h = Math.imul(h ^ (c & 0xff), 0x01000193);
+    h = Math.imul(h ^ (c >>> 8), 0x01000193);
+  }
+  return (((h >>> 16) ^ h) & 0xffff).toString(16).padStart(4, '0');
+}
+// The payload the digest covers, per DD-009 consequence 1: header row + delimiter row + data
+// rows (the totals row is the last of them). NOT the heading, NOT the blank lines, NOT the
+// revision line itself — a digest that covered its own line could never be written.
+//
+// Takes the payload LINES, not a region and offsets: the writer knows them as the tail of the
+// array it is building and the reader knows them as three named offsets into the note, and
+// neither should have to fake the other's shape. What they share — the set of lines and the
+// separator between them — is exactly what this function owns, so emit and verify cannot drift
+// into two definitions that merely agree today.
+/** @param {string[]} payloadLines @returns {string} */
+const vaultPayloadDigest = (payloadLines) => vaultDigest(payloadLines.join('\n'));
+// Exposed because the digest is part of the BLOCK FORMAT CONTRACT, not an implementation detail
+// of one function: SB-057's index records a payload hash per path for the `file rev < index rev`
+// split, and it must be the same hash the anchor carries rather than a second one that can drift.
+// Takes payload lines (see `vaultPayloadDigest` above) — not a note, not a region.
+TT.vaultPayloadDigest = vaultPayloadDigest;
 /**
  * Unicode-normalise for comparison. macOS hands out NFD strings (a filename-derived setting,
  * a paste), and an NFD `Tidsløggen` is not `===` its NFC twin — the block would quarantine as
@@ -638,11 +704,11 @@ TT.locateVaultBlock = function (md, opts) {
   }
 
   // 3. the bottom anchor, which must sit BEFORE the hard stop
-  /** @type {{ line: number, revision: number }[]} */
+  /** @type {{ line: number, revision: number, digest: string | null }[]} */
   const revLines = [];
   for (let i = start + 1; i < stop; i++) {
     const m = fenced[i] ? null : REVISION_RE.exec(lines[i]);
-    if (m) revLines.push({ line: i, revision: +m[1] });
+    if (m) revLines.push({ line: i, revision: +m[1], digest: m[2] || null });
   }
   if (!revLines.length) {
     // name the dangerous case precisely: the anchor exists, but only in someone else's section
@@ -652,7 +718,7 @@ TT.locateVaultBlock = function (md, opts) {
     return vaultQuarantine('no-revision');
   }
   if (revLines.length > 1) return vaultQuarantine('multiple-revisions');
-  const { line: revisionLine, revision } = revLines[0];
+  const { line: revisionLine, revision, digest } = revLines[0];
 
   // 4. the table: header row, delimiter row, then contiguous data rows
   let headerLine = -1;
@@ -673,6 +739,20 @@ TT.locateVaultBlock = function (md, opts) {
     if (lines[j].trim() !== '') return vaultQuarantine('unexpected-content-in-block');
   }
 
+  // 5. the payload digest (DD-009). Last, because it needs the table offsets settled above.
+  //
+  // Three cases, and only one of them refuses:
+  //   • present and MATCHES  → verified. The block is byte-for-byte what its writer wrote.
+  //   • present and DIFFERS  → quarantine. This is the SB-051 chimera: a structurally valid,
+  //     semantically wrong block. Refusing here rather than in the parser means `writeVaultBlock`
+  //     is gated too (it re-locates), so DD-009's "does not import AND does not write until it
+  //     is resolved" holds without a second check anywhere.
+  //   • ABSENT               → verified: false. Parses, unverified, NEVER quarantined
+  //     (DD-009 consequence 2) — the back-compat and hand-made-block path.
+  const verified = digest != null;
+  const payloadLines = [lines[headerLine], lines[separatorLine]].concat(rowLines.map((ln) => lines[ln]));
+  if (verified && digest !== vaultPayloadDigest(payloadLines)) return vaultQuarantine('digest-mismatch');
+
   return {
     quarantine: false,
     heading,
@@ -689,6 +769,8 @@ TT.locateVaultBlock = function (md, opts) {
         : -1,
     revisionLine,
     revision,
+    digest,
+    verified,
   };
 };
 
@@ -807,7 +889,10 @@ TT.parseVaultBlock = function (md, opts) {
     entries.push(entry);
   }
 
-  return { quarantine: false, heading: loc.heading, revision: loc.revision, headers, entries };
+  // `verified` rides along from the locator (DD-009): SB-057's arbitration matrix row 2 splits on
+  // it — `file rev == index rev, hash differs` is a genuine bumpless hand-edit only when the block
+  // verified, and a digest MISMATCH never reaches here at all (the locator quarantines it).
+  return { quarantine: false, heading: loc.heading, revision: loc.revision, headers, entries, verified: loc.verified };
 };
 
 // ---- vault block serialize + splice (SB-055) ----
@@ -835,14 +920,17 @@ TT.parseVaultBlock = function (md, opts) {
  * @param {string[]} cells @returns {string}
  */
 const vaultRow = (cells) => '|' + cells.map((c) => (c === '' ? ' ' : ' ' + c + ' ')).join('|') + '|';
-// THE REVISION LINE HAS EXACTLY ONE EMITTER — this one. OD-3 (SB-078) is unresolved: SB-051
-// measured that Obsidian diff-merges an external write into a dirty open buffer taking TT's
-// marker line and the buffer's rows, so the revision counter is structurally incapable of
-// detecting that corruption, and the `sum=<short-hash>` SB-051 required lost its home when
-// SB-045 deleted every `%%…%%` marker. If SB-078 comes back "yes", the digest lands HERE and
-// nowhere else. Do not inline this string anywhere.
-/** @param {number} revision @returns {string} */
-const vaultRevisionLine = (revision) => '`revision: ' + revision + '`';
+// THE REVISION LINE HAS EXACTLY ONE EMITTER — this one. SB-078 came back YES, so the digest
+// lands HERE and nowhere else (DD-009); see the ruling next to `REVISION_RE`, which is the sole
+// matcher. Do not inline this string anywhere.
+//
+// TT ALWAYS writes a digest. The digest-less shape is a read-side concession to blocks TT did
+// not write (DD-009 consequence 2), never an emitter option — which is what makes detection work
+// at all: the merge preserves TT's anchor line, so a TT-written block keeps its digest and
+// mismatches. An emitter that could omit it would hand the chimera a way to look unverified
+// instead of wrong.
+/** @param {number} revision @param {string} digest @returns {string} */
+const vaultRevisionLine = (revision, digest) => '`revision: ' + revision + ' · ' + digest + '`';
 // SB-077 (Terje, ruled 2026-07-25): a RUNNING entry contributes 0 to the note's totals,
 // regardless of date. The daily note is a record of FINISHED work, not a live display — the
 // row is written once with its open range (`15:30→`) and left alone until an end time lands.
@@ -920,7 +1008,11 @@ TT.serializeVaultBlock = function (entries, opts) {
   const billAt = keys.indexOf('bill') >= 0 ? keys.indexOf('bill') : headers.length - 1;
   totals[timeAt] = '**' + TT.fmtHours(min) + 'h**';
   if (billAt !== timeAt) totals[billAt] = '**' + TT.fmtHours(bill) + 'h billable**';
-  lines.push(vaultRow(totals), '', vaultRevisionLine(revision));
+  lines.push(vaultRow(totals));
+  // `lines` is `['## heading', '', header, delimiter, ...rows]` at this point, so everything from
+  // index 2 to the end IS the payload — taken before the blank line and the revision line are
+  // appended, which is what keeps them out of it without any filtering.
+  lines.push('', vaultRevisionLine(revision, vaultPayloadDigest(lines.slice(2))));
   return lines.join('\n');
 };
 /**

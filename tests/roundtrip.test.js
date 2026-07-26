@@ -605,6 +605,27 @@ describe('unescaped-split primitives are public and shared (SB-071)', () => {
   });
 });
 
+/**
+ * Give a hand-built fixture the digest TT would have written (DD-009), so it stands in for a note
+ * TT wrote rather than one it would refuse. Input must be digest-LESS (or already correct), since
+ * that is what still locates. Mutating a signed note afterwards is how the chimera is built.
+ *
+ * Deliberately NOT used by the goldens that assert the digest's VALUE or that corruption is
+ * caught — those bake literals and mutate. This only canonicalises fixtures whose claim is
+ * something else, so that claim is not blocked by a digest the fixture never set out to test.
+ * @param {string} md @returns {string}
+ */
+const sign = (md) => {
+  // strip any existing digest first: a fixture derived from a signed note by rewriting its rows
+  // no longer verifies, so it would not even locate, and signing it is the whole point
+  const lines = md.replace(/^`revision: (\d+)(?: · [0-9a-f]{4})?`$/m, '`revision: $1`').split('\n');
+  const loc = TT.locateVaultBlock(lines.join('\n'));
+  if (loc.quarantine) throw new Error('sign(): fixture does not locate — ' + loc.reason);
+  const payload = [lines[loc.headerLine], lines[loc.separatorLine]].concat(loc.rowLines.map((n) => lines[n]));
+  lines[loc.revisionLine] = '`revision: ' + loc.revision + ' · ' + TT.vaultPayloadDigest(payload) + '`';
+  return lines.join('\n');
+};
+
 // ---- SB-045 / PLAN-008 task 2: the vault `Task` cell codec ----
 // SB-045 froze the vault's Task column as `label<br>- note` in ONE cell. That makes
 // `<br>` a structural delimiter and `- ` a presentation prefix — both are things a user
@@ -852,6 +873,19 @@ describe('vault block locator (SB-055)', () => {
     '  `revision: 8`', // indented (this is the code-fence shape)
     '`revision: 8` and more text', // not the whole line
     '``revision: 8``', // a double-backtick span
+    // ---- and the digest half of the anchor (DD-009) ----
+    // Each of these is a MALFORMED digest, not an absent one. Absent is legal and unverified;
+    // malformed fails the whole match, so the line stops being an anchor at all. That is the
+    // safe direction — the alternative is a near-miss silently reading as "no digest here",
+    // which is the one shape that would let a damaged block report itself merely unverified.
+    '`revision: 8 · `', // present separator, empty digest
+    '`revision: 8 · a3f`', // three hex characters
+    '`revision: 8 · a3f11`', // five
+    '`revision: 8 · zzzz`', // not hex
+    '`revision: 8 · A3F1`', // uppercase — TT writes one canonical spelling
+    '`revision: 8 a3f1`', // no separator
+    '`revision: 8 - a3f1`', // a hyphen, not U+00B7
+    '`revision: 8·a3f1`', // separator without its spaces
   ];
   for (const anchor of NEAR_MISSES) {
     it(`does NOT accept ${JSON.stringify(anchor)} as the bottom anchor`, () => {
@@ -859,6 +893,11 @@ describe('vault block locator (SB-055)', () => {
       const loc = TT.locateVaultBlock(md);
       expect(loc.quarantine).toBe(true);
       expect(loc.revision).toBeUndefined();
+      // 'no-revision' specifically, not merely SOME refusal: the claim is that the line was
+      // never an anchor at all. A looser matcher that accepted it and then failed it on the
+      // digest would also quarantine, and asserting only `quarantine === true` cannot tell the
+      // two apart — which is the whole difference between a near-miss and a damaged block.
+      expect(loc.reason).toBe('no-revision');
     });
   }
 
@@ -1127,7 +1166,11 @@ describe('vault block serialize + splice (SB-055)', () => {
         '| 30m | #rest | [[Home]] | | |',
         '| **2.5h** | | | | **1.75h billable** |',
         '',
-        '`revision: 8`',
+        // The digest is BAKED IN, not computed by the test (DD-009). Computing it here with the
+        // same helper the emitter uses would assert only that the function is deterministic —
+        // this literal is what pins the hash itself, so changing FNV or the fold breaks loudly
+        // instead of silently re-keying every block in the vault.
+        '`revision: 8 · 115d`',
       ].join('\n'),
     );
   });
@@ -1141,7 +1184,7 @@ describe('vault block serialize + splice (SB-055)', () => {
         '|---|---|---|---|---|',
         '| **0h** | | | | **0h billable** |',
         '',
-        '`revision: 1`',
+        '`revision: 1 · 6ff8`',
       ].join('\n'),
     );
   });
@@ -1173,9 +1216,7 @@ describe('vault block serialize + splice (SB-055)', () => {
 
   it('the heading and the header set come from the block, not from a constant', () => {
     expect(TT.serializeVaultBlock([], { heading: 'Timeloggen', headers: ['Time', 'Task'], revision: 2 })).toBe(
-      ['## Timeloggen', '', '| Time | Task |', '|---|---|', '| **0h** | **0h billable** |', '', '`revision: 2`'].join(
-        '\n',
-      ),
+      ['## Timeloggen', '', '| Time | Task |', '|---|---|', '| **0h** | **0h billable** |', '', '`revision: 2 · ce7f`'].join('\n'), // prettier-ignore
     );
   });
 
@@ -1204,7 +1245,7 @@ describe('vault block serialize + splice (SB-055)', () => {
     '| 09:00→09:15 | #admin | [[Planning]] | Daily planning ritual | |',
     '| **0.25h** | | | | **0h billable** |',
     '',
-    '`revision: 4`',
+    '`revision: 4 · 958a`',
     '',
     '## Captures',
     '',
@@ -1239,13 +1280,17 @@ describe('vault block serialize + splice (SB-055)', () => {
   });
 
   it('re-emits the block’s OWN header set — a pre-Mode block does not gain a Mode column', () => {
-    const preMode = HOST.replace('| Time | Mode | Project | Task | Bill |', '| Time | Project | Task | Bill |')
-      .replace('|---|---|---|---|---|', '|---|---|---|---|')
-      .replace(
-        '| 09:00→09:15 | #admin | [[Planning]] | Daily planning ritual | |',
-        '| 09:00→09:15 | [[Planning]] | Daily planning ritual | |',
-      ) // prettier-ignore
-      .replace('| **0.25h** | | | | **0h billable** |', '| **0.25h** | | | **0h billable** |');
+    // re-signed because this fixture rewrites HOST's payload — left with HOST's digest it would
+    // be a chimera and quarantine before the header-set claim is ever reached
+    const preMode = sign(
+      HOST.replace('| Time | Mode | Project | Task | Bill |', '| Time | Project | Task | Bill |')
+        .replace('|---|---|---|---|---|', '|---|---|---|---|')
+        .replace(
+          '| 09:00→09:15 | #admin | [[Planning]] | Daily planning ritual | |',
+          '| 09:00→09:15 | [[Planning]] | Daily planning ritual | |',
+        ) // prettier-ignore
+        .replace('| **0.25h** | | | | **0h billable** |', '| **0.25h** | | | **0h billable** |'),
+    );
     const res = TT.writeVaultBlock(preMode, [E({ durMin: 30, project: '[[Home]]', label: 'Tidying' })]);
     expect(res.quarantine).toBe(false);
     expect(res.md).toContain('| Time | Project | Task | Bill |');
@@ -1254,15 +1299,18 @@ describe('vault block serialize + splice (SB-055)', () => {
   });
 
   it('keeps the located revision unless told otherwise (bumping is SB-057’s call)', () => {
-    expect(TT.writeVaultBlock(HOST, DAY).md).toContain('`revision: 4`');
-    expect(TT.writeVaultBlock(HOST, DAY, { revision: 5 }).md).toContain('`revision: 5`');
+    // matched up to the separator: the COUNTER is this test's claim, and the digest that follows
+    // it belongs to DAY's rows rather than to HOST's, so pinning it here would assert the wrong
+    // thing twice over
+    expect(TT.writeVaultBlock(HOST, DAY).md).toContain('`revision: 4 · ');
+    expect(TT.writeVaultBlock(HOST, DAY, { revision: 5 }).md).toContain('`revision: 5 · ');
   });
 
   it('it is impossible to write from a quarantined block — the input comes back byte-identical', () => {
     const QUARANTINED = [
       ['no heading', HOST.replace('## Time Log', '## Tidsloggen')],
-      ['no revision line', HOST.replace('`revision: 4`\n', '')],
-      ['revision past the next heading', HOST.replace('`revision: 4`\n', '').replace('It went fine.', '`revision: 4`')],
+      ['no revision line', HOST.replace('`revision: 4 · 958a`\n', '')],
+      ['revision past the next heading', HOST.replace('`revision: 4 · 958a`\n', '').replace('It went fine.', '`revision: 4 · 958a`')], // prettier-ignore
       ['unknown header', HOST.replace('| Time | Mode |', '| Time | Mood |')],
       ['a broken Time cell', HOST.replace('09:00→09:15', 'sometime this morning')],
       ['a Bill cell that is neither a check nor blank', HOST.replace('| Daily planning ritual | |', '| Daily planning ritual | yes |')], // prettier-ignore
@@ -1350,7 +1398,7 @@ describe('vault block round-trip (SB-055)', () => {
       '| 45m | #admin | INT-ADM | Invoicing<br>- weekly invoicing [nb] | |',
       '| **8.25h** | | | | **6.5h billable** |',
       '',
-      '`revision: 8`',
+      '`revision: 8 · 9b38`',
       '',
       '## Captures',
       '',
@@ -1372,7 +1420,7 @@ describe('vault block round-trip (SB-055)', () => {
       '| 08:30→12:00 | FJH-NETT | Checkout flow<br>- wireframes | ✓ |',
       '| **3.5h** | | | **3.5h billable** |',
       '',
-      '`revision: 2`',
+      '`revision: 2 · 9854`',
       '',
       '## Captures',
       '',
@@ -1391,7 +1439,7 @@ describe('vault block round-trip (SB-055)', () => {
       '| ✓ | Checkout flow | 08:30→12:00 |',
       '| **3.5h billable** | | **3.5h** |',
       '',
-      '`revision: 1`',
+      '`revision: 1 · 3fdf`',
       '',
     ].join('\n');
 
@@ -1407,7 +1455,7 @@ describe('vault block round-trip (SB-055)', () => {
       '| **urgent** fixes | 1h | |',
       '| | **4.5h** | **3.5h billable** |',
       '',
-      '`revision: 1`',
+      '`revision: 1 · 007b`',
       '',
     ].join('\n');
 
@@ -1420,7 +1468,7 @@ describe('vault block round-trip (SB-055)', () => {
       '|---|---|---|---|---|',
       '| **0h** | | | | **0h billable** |',
       '',
-      '`revision: 1`',
+      '`revision: 1 · 6ff8`',
       '',
       '## Reflection',
       '',
@@ -1588,6 +1636,11 @@ describe('vault block round-trip (SB-055)', () => {
       ['row-cell-count', OK.replace('| 30m | #rest | [[Home]] | Tidying | |', '| 30m | #rest | [[Home]] |')],
       ['unparseable-time', OK.replace('| 30m |', '| after lunch |')],
       ['bad-bill-cell', OK.replace('| Tidying | |', '| Tidying | yes |')],
+      // THE SB-051 CHIMERA (DD-009). A block TT signed, whose rows were then rewritten under it —
+      // exactly what Obsidian's diff-merge produces: TT's anchor line kept, the buffer's rows
+      // kept. Every other check on this list passes; the block is structurally perfect. Only the
+      // digest notices, and this is the row that proves a wrong one refuses the write.
+      ['digest-mismatch', sign(OK).replace('| Tidying |', '| USER-TYPED-IN-BLOCK |')],
     ];
 
     for (const [reason, md] of REFUSALS) {
@@ -1610,7 +1663,7 @@ describe('vault block round-trip (SB-055)', () => {
       const union = /export type VaultQuarantineReason =([\s\S]*?);/.exec(types);
       expect(union, 'VaultQuarantineReason union not found in shared/types.ts').toBeTruthy();
       const reasons = [...union[1].matchAll(/'([a-z-]+)'/g)].map((m) => m[1]);
-      expect(reasons.length).toBe(14);
+      expect(reasons.length).toBe(15);
       const core = readFileSync(new URL('../shared/core.js', import.meta.url), 'utf8');
       // covered by their own tests in the end-gate review-regression section below
       const elsewhere = new Set(['crlf-line-endings', 'write-would-corrupt']);
@@ -1674,7 +1727,14 @@ describe('vault block round-trip (SB-055)', () => {
 // NEVER do, not about what a task delivers.
 // ## Verified red-green: 2026-07-25
 describe('vault block — end-gate review regressions (SB-055)', () => {
-  const note = (header, delim, rows) => ['## Time Log', '', header, delim, ...rows, '', '`revision: 1`', ''].join('\n');
+  // The revision line carries the block's real digest (DD-009), because these fixtures stand in
+  // for notes TT wrote and the round-trip claims below are `write(md) === md`. Computed rather
+  // than baked: the helper is parameterised over header/delim/rows, so there is no one literal
+  // to bake. What that CANNOT prove is that the digest is right — the baked literals in the
+  // serializer goldens pin the hash's value, and the chimera golden pins that a wrong one is
+  // caught. This call only builds a canonical fixture.
+  const note = (header, delim, rows) =>
+    ['## Time Log', '', header, delim, ...rows, '', '`revision: 1 · ' + TT.vaultPayloadDigest([header, delim, ...rows]) + '`', ''].join('\n'); // prettier-ignore
 
   // ---- an entry is never silently dropped as "the totals row" ----
   // The original detection rule was "last row AND first cell is bold", justified by "an
@@ -1844,5 +1904,108 @@ describe('vault block — end-gate review regressions (SB-055)', () => {
       expect(parsed.quarantine, column).toBe(false);
       expect(TT.writeVaultBlock(md, parsed.entries).md, column).toBe(md);
     }
+  });
+});
+
+// ---- the payload digest (SB-080 / DD-009) ----
+// The block's bottom anchor carries a digest of its table payload, so the corruption SB-051
+// measured on the real vault becomes DETECTED rather than silently imported: Obsidian
+// diff-merges an external write into a dirty open buffer, keeping TT's anchor line and the
+// buffer's rows. `revision` is the field that survives that intact, which is exactly why it
+// cannot be the detector.
+//
+// What would be FAKE EVIDENCE here, and is deliberately not the shape of these tests: computing
+// the digest with the same helper on both sides and asserting the two agree. That proves the
+// function is deterministic — nothing more. The claim is that a WRONG digest is caught, so the
+// load-bearing golden is the mutation one, and the serializer goldens above bake the digest as a
+// literal so the hash's own value is pinned rather than derived.
+// ## Verified red-green: 2026-07-26
+describe('vault block payload digest (SB-080 / DD-009)', () => {
+  const host = (block) => ['# 2026-01-05', '', '## Intentions', '', '- ship it', '', ...block.split('\n'), '', '## Captures', '', '- a stray thought', ''].join('\n'); // prettier-ignore
+  const E = (o) => ({ id: 'runtime-id', date: '2026-01-05', start: null, end: null, durMin: null, project: null, label: '', note: '', billable: false, ...o }); // prettier-ignore
+  const DAY = [
+    E({ start: 540, end: 930, project: '[[Planning]]', label: 'Daily planning ritual', billable: true }),
+    E({ durMin: 30, project: '[[Home]]', label: 'Tidying' }),
+  ];
+  const WRITTEN = host(TT.serializeVaultBlock(DAY, { revision: 3 }));
+
+  it('TT always writes a digest — the digest-less shape is a read concession, never an emitter option', () => {
+    expect(TT.serializeVaultBlock(DAY, { revision: 3 })).toMatch(/\n`revision: 3 · [0-9a-f]{4}`$/);
+    expect(TT.serializeVaultBlock([], { revision: 1 })).toMatch(/\n`revision: 1 · [0-9a-f]{4}`$/); // zero-entry day too
+  });
+
+  it('a block TT wrote verifies against itself', () => {
+    const loc = TT.locateVaultBlock(WRITTEN);
+    expect(loc.quarantine).toBe(false);
+    expect(loc.verified).toBe(true);
+    expect(loc.digest).toMatch(/^[0-9a-f]{4}$/);
+    expect(TT.parseVaultBlock(WRITTEN).verified).toBe(true);
+  });
+
+  // THE ONE THAT COUNTS. Without this, nothing proves the decision was implemented rather than
+  // merely emitted.
+  it('the SB-051 chimera — TT’s anchor line over someone else’s rows — quarantines', () => {
+    const chimera = WRITTEN.replace('Daily planning ritual', 'USER-TYPED-IN-BLOCKROW');
+    // it is still a structurally perfect block: same anchors, same schema, same shape
+    expect(chimera).toContain('`revision: 3 · ');
+    expect(TT.locateVaultBlock(chimera)).toEqual({ quarantine: true, reason: 'digest-mismatch' });
+    expect(TT.parseVaultBlock(chimera)).toEqual({ quarantine: true, reason: 'digest-mismatch' });
+    // and not one byte is written back over it
+    expect(TT.writeVaultBlock(chimera, DAY).md).toBe(chimera);
+  });
+
+  it('a digest-less block parses and reports UNVERIFIED — it is never quarantined', () => {
+    // the back-compat and hand-made-block path (DD-009 consequence 2). Getting this backwards
+    // makes every pre-cutover note unreadable, which is why it is asserted on both verbs.
+    const legacy = WRITTEN.replace(/`revision: 3 · [0-9a-f]{4}`/, '`revision: 3`');
+    const loc = TT.locateVaultBlock(legacy);
+    expect(loc.quarantine).toBe(false);
+    expect(loc.verified).toBe(false);
+    expect(loc.digest).toBe(null);
+    const parsed = TT.parseVaultBlock(legacy);
+    expect(parsed.quarantine).toBe(false);
+    expect(parsed.verified).toBe(false);
+    expect(parsed.entries).toHaveLength(2); // and it really did parse, not merely not-refuse
+  });
+
+  it('covers exactly DD-009 rule 1: the table rows, and nothing around them', () => {
+    const digestOf = (md, opts) => TT.locateVaultBlock(md, opts).digest;
+    const base = digestOf(WRITTEN);
+    // OUTSIDE the payload — the digest must not move, or every unrelated edit to Terje's own
+    // sections would quarantine his hours
+    expect(digestOf(WRITTEN.replace('- a stray thought', '- a different thought'))).toBe(base);
+    expect(digestOf(WRITTEN.replace('- ship it', '- ship it today'))).toBe(base);
+    expect(digestOf(WRITTEN.replace('## Time Log', '## Timeloggen'), { heading: 'Timeloggen' })).toBe(base);
+    // INSIDE it — each of the four row kinds rule 1 names must move the digest. Compared against
+    // a re-signed copy, since a mutated block no longer locates at all.
+    const moved = (md, what) => {
+      expect(md, `${what}: the mutation matched nothing — this case proves nothing`).not.toBe(WRITTEN);
+      expect(digestOf(sign(md)), what).not.toBe(base);
+    };
+    moved(WRITTEN.replace('| Time | Mode | Project | Task | Bill |', '| Time | Mode | Project | Task |'), 'header row');
+    moved(WRITTEN.replace('|---|---|---|---|---|', '|:---|---|---|---|---|'), 'delimiter row');
+    moved(WRITTEN.replace('Daily planning ritual', 'Daily planning'), 'a data row');
+    moved(WRITTEN.replace('**6.5h billable**', '**9.9h billable**'), 'the totals row');
+  });
+
+  it('the digest is stable across serialize→serialize with a timer running (SB-077)', () => {
+    // SB-077 — a running entry contributes 0 to the totals — is what makes a payload digest
+    // affordable at all: a clock-dependent payload would re-digest every minute and detect
+    // nothing. This test is what catches that ruling regressing.
+    const today = TT.todayStr();
+    const running = [E({ date: today, start: 540, billable: true }), E({ date: today, durMin: 60, billable: true })];
+    const once = TT.serializeVaultBlock(running, { revision: 2 });
+    const twice = TT.serializeVaultBlock(running, { revision: 2 });
+    expect(once).toBe(twice);
+    expect(TT.locateVaultBlock(host(once)).verified).toBe(true);
+  });
+
+  it('a block round-trips through the writer and still verifies', () => {
+    // the write path re-parses its own output before returning it, so this also pins that emit
+    // and verify agree on what the payload is — two definitions that merely happened to agree
+    // would surface here as a `write-would-corrupt` refusal
+    const res = TT.writeVaultBlock(WRITTEN, DAY);
+    expect(res.quarantine).toBe(false);
+    expect(TT.locateVaultBlock(res.md).verified).toBe(true);
   });
 });

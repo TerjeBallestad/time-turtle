@@ -215,6 +215,14 @@ export type VaultQuarantineReason =
   | 'multiple-revisions'
   | 'no-table'
   | 'unexpected-content-in-block'
+  /**
+   * The bottom anchor's payload digest is present and does NOT match the table it labels —
+   * DD-009. This is the one reason that means "the block is structurally fine and semantically
+   * wrong": Obsidian's diff-merge (SB-051) keeps TT's anchor line and the buffer's rows, so
+   * every other check passes. Never fires on a digest-less block, which is unverified, not
+   * wrong.
+   */
+  | 'digest-mismatch'
   // --- parser: the schema or a row cannot be read ---
   | 'unknown-header'
   | 'duplicate-header'
@@ -251,6 +259,18 @@ export interface VaultBlockRegion {
   totalsLine: number;
   revisionLine: number;
   revision: number;
+  /**
+   * The payload digest as found in the bottom anchor, or `null` on a digest-less line (DD-009).
+   * A region is only ever returned when this is `null` or MATCHES — a present-and-wrong digest
+   * quarantines as 'digest-mismatch'.
+   */
+  digest: string | null;
+  /**
+   * Did the block verify against its own payload? `false` means UNVERIFIED, not corrupt — a
+   * pre-cutover or hand-made block carrying no digest (DD-009 consequence 2). SB-057's
+   * arbitration matrix row 2 splits on this.
+   */
+  verified: boolean;
 }
 
 export type VaultBlockLocation = VaultBlockRegion | VaultQuarantine;
@@ -267,6 +287,8 @@ export interface VaultBlockParse {
   revision: number;
   headers: string[];
   entries: VaultEntry[];
+  /** Propagated from the locator — see `VaultBlockRegion.verified` (DD-009). */
+  verified: boolean;
 }
 
 export type VaultBlockParseResult = VaultBlockParse | VaultQuarantine;
@@ -466,6 +488,11 @@ export interface TTModule {
    * or return a quarantine verdict. Never throws, and never returns a region it is
    * unsure of: this is what stops a write from running into the rest of the note.
    */
+  /**
+   * The payload digest a vault block's bottom anchor carries (DD-009). Input is the payload
+   * LINES — header row, delimiter row, data rows — not a note and not a region. 4 lowercase hex.
+   */
+  vaultPayloadDigest(payloadLines: string[]): string;
   locateVaultBlock(md: string, opts?: { heading?: string }): VaultBlockLocation;
   /**
    * SB-055: parse the located block into entries. The header row is the schema; any
