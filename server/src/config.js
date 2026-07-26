@@ -64,8 +64,67 @@ export const HOST = process.env.TT_HOST || '';
  * @param {string} host @returns {boolean}
  */
 export function isLoopbackHost(host) {
-  const h = String(host).trim().replace(/^\[|\]$/g, '').toLowerCase();
+  const h = String(host)
+    .trim()
+    .replace(/^\[|\]$/g, '')
+    .toLowerCase();
   return h === 'localhost' || h === '::1' || h === '::ffff:127.0.0.1' || /^127\./.test(h);
+}
+
+// ---- SB-136: the Host header the implicit local session will answer to ----
+//
+// A strict dotted quad inside 127.0.0.0/8 (RFC 1122). Every octet is bounded, and the anchors
+// are the point: a DOMAIN NAME must not be able to satisfy it.
+const OCTET = '(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)';
+const IPV4_LOOPBACK = new RegExp(`^127\\.${OCTET}\\.${OCTET}\\.${OCTET}$`);
+/**
+ * Whether a request's `Host` header names this machine's own loopback. The guard on the
+ * implicit local session — see `requireUser` in index.js, which is its only caller.
+ *
+ * WHY IT EXISTS. Under `personal` there is no cookie to be missing (SB-098), so the loopback
+ * bind above is the only thing between the API and a caller. Loopback stops another machine on
+ * the wifi. It does NOT stop a web page the user merely visited, because DNS REBINDING DEFEATS
+ * LOOPBACK: an attacker domain that re-resolves to 127.0.0.1 is same-origin as far as the
+ * browser is concerned, so there is no preflight to fail and no opaque response to hide behind,
+ * and the whole API becomes readable AND writable by that page. The one thing such a page
+ * cannot forge is the `Host` header — the browser sends the attacker's own domain — so refusing
+ * a `Host` that is not loopback is the standard mitigation, and it costs nothing.
+ *
+ * WHAT IT STILL DOES NOT COVER, deliberately: another PROGRAM on the same machine can send any
+ * Host it likes, and DD-015 depth 2 already accepts that — a local process that wants your
+ * hours can read `timeturtle.db` directly.
+ *
+ * IT IS NOT `isLoopbackHost` ABOVE, AND MUST NOT BE FOLDED INTO IT. That one reads an
+ * OPERATOR-SUPPLIED `TT_HOST` and can afford a loose `/^127\./`; this one reads an
+ * ATTACKER-SUPPLIED header, where `127.0.0.1.evil.example` — a name anybody can register and
+ * point at 127.0.0.1 — sails through that prefix test. Everything accepted below is either an
+ * exact literal or a strict dotted quad that no hostname can be.
+ *
+ * THE PORT IS THE EASY THING TO GET WRONG. A Host header is `host` or `host:port`, and an IPv6
+ * literal is bracketed (RFC 3986) — so `[::1]:3001` has three colons and splitting on the last
+ * one is nonsense on `[::1]` alone. Brackets are matched first, and an UNBRACKETED value with a
+ * non-numeric tail after its colon is refused rather than guessed at.
+ *
+ * A MISSING OR EMPTY HOST REFUSES. Every browser and every real client sends one; absence is
+ * either a hand-rolled caller or an attempt to slip past exactly this check.
+ * @param {unknown} raw the raw `Host` header @returns {boolean}
+ */
+export function isLoopbackHostHeader(raw) {
+  const value = String(raw ?? '').trim();
+  if (!value) return false;
+  let name;
+  if (value.startsWith('[')) {
+    const close = value.indexOf(']');
+    if (close === -1) return false;
+    const after = value.slice(close + 1);
+    if (after !== '' && !/^:\d+$/.test(after)) return false;
+    name = value.slice(1, close).toLowerCase();
+  } else {
+    const colon = value.indexOf(':');
+    if (colon !== -1 && !/^\d+$/.test(value.slice(colon + 1))) return false;
+    name = (colon === -1 ? value : value.slice(0, colon)).toLowerCase();
+  }
+  return name === 'localhost' || name === '::1' || name === '::ffff:127.0.0.1' || IPV4_LOOPBACK.test(name);
 }
 export const ADMIN_EMAIL = process.env.TT_ADMIN_EMAIL || 'admin@timeturtle.local';
 export const ADMIN_PASSWORD = process.env.TT_ADMIN_PASSWORD || 'turtle';

@@ -3,7 +3,7 @@ import express from 'express';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
-import { PORT, HOST, MD_DIR_LOCKED, isLoopbackHost } from './config.js';
+import { PORT, HOST, MD_DIR_LOCKED, isLoopbackHost, isLoopbackHostHeader } from './config.js';
 import { shapeTarget, activeShape, shapeLocked } from './backend.js';
 import { verifyPassword, makeToken, readSessionCookie, sessionCookie, clearCookie } from './auth.js';
 // SB-056: the split is at the import site on purpose. `db` is IDENTITY ONLY here — users,
@@ -245,6 +245,12 @@ app.use(express.json({ limit: '4mb' }));
  *      deliberately no header, no query parameter and no body field consulted below.
  *   2. IT IS LOOPBACK-ONLY. The boot block above refuses to start `personal` on a
  *      non-loopback bind, so "no login" cannot silently mean "no login for the whole office".
+ *   3. SB-136: IT IS ADDRESSED-TO-LOOPBACK-ONLY. Property 2 covers the wifi; it does not cover
+ *      a web page the user merely visited, because DNS REBINDING DEFEATS LOOPBACK — an
+ *      attacker domain re-resolving to 127.0.0.1 is same-origin to the browser, so there is no
+ *      preflight to fail and no opaque response to hide behind, and with no cookie to be
+ *      missing the whole API is readable AND writable by that page. The `Host` header is the
+ *      one thing the page cannot forge, so a Host that is not loopback is refused below.
  *
  * The COUNT CHECK is belt and braces rather than the guarantee: three separate guards already
  * make >1 user under `personal` unreachable (the boot refusal, the `POST /api/users` refusal
@@ -263,6 +269,17 @@ function requireUser(req, res, next) {
   // issued before a password change, so its session is no longer trusted.
   if (!sess || !user || sess.tokenVersion !== db.getTokenVersion(user.id)) {
     if (!TT.shapeCapabilities(activeShape()).identity) {
+      // SB-136, property 3. It sits INSIDE the no-identity branch and nowhere else: under
+      // `team` this block is never entered, so the demo instance's cookie challenge is
+      // untouched — and even here a REAL COOKIE STILL WINS, because a request carrying one
+      // never reaches this branch at all. 403, not 401: nothing about the caller's credentials
+      // would make this request acceptable.
+      //
+      // The refusal says nothing back about the Host it was sent — reflecting an
+      // attacker-chosen string into a response body is a habit worth not having.
+      if (!isLoopbackHostHeader(req.headers.host)) {
+        return res.status(403).json({ error: 'this request was not addressed to localhost' });
+      }
       const only = db.listUsers();
       // `findUserById`, not the list row, so `req.user` is byte-identical to what the cookie
       // path produces — one session object, one shape, whichever way it was resolved.
