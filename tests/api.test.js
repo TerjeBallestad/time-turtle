@@ -2052,6 +2052,155 @@ describe('SB-072 edge whitespace is trimmed at the write edge', () => {
   });
 });
 
+// SB-075: SB-072 above made the guarantee — the DB never holds a value the mirror cannot
+// round-trip — true for `entry.note` and `client.name` only. `project.name`, `task.label` and
+// `entry.label` were trimmed in the CLIENT alone (ProjectsSection, TaskModal), so a direct PUT
+// still stored edge whitespace that `splitCells` silently ate on the way back out. Same bug,
+// same ruling, same layer: three more `.trim()`s in server/src/db.js.
+//
+// Same shape as SB-072's block, deliberately: raw PUTs over real HTTP with no client code in
+// the loop, then every assertion reads what the server STORED — a fresh GET, or the mirror
+// bytes the server itself wrote to disk — never the payload that was sent. The `'a  b'`
+// interior control is load-bearing: it is what a careless trim/collapse breaks, the format
+// genuinely carries it, and it must stay green straight through the break below.
+//
+// ## Verified red-green: 2026-07-26
+// break — drop `.trim()` from String(project.name) in putProjects, String(task.label) in
+//   putTasks and String(entry.label ?? '') in putEntries (server/src/db.js) → 'stores
+//   project.name trimmed', 'stores task.label trimmed', 'stores entry.label trimmed', the
+//   round-trip test and the mirror-on-disk test all fail (5 of 6 in this block; the
+//   interior-whitespace control stays green, as it must).
+describe('SB-075 edge whitespace is trimmed at the write edge for project/task/entry labels', () => {
+  const admin = session();
+  const emp = session();
+  const DATE = '2026-09-15';
+  // id → [what is PUT, what must be STORED]. The last two are the control: interior
+  // whitespace IS representable in the mirror and must survive untouched.
+  const LABELS = {
+    'sb75-lead': [' leading', 'leading'],
+    'sb75-trail': ['trailing space ', 'trailing space'],
+    'sb75-both': ['  padded  ', 'padded'],
+    'sb75-tabnl': ['\t\n mixed \n\t', 'mixed'],
+    'sb75-interior': ['a  b', 'a  b'],
+    'sb75-interior-edge': [' a  b ', 'a  b'],
+  };
+  const PROJ_PAD = 'SB75-PAD';
+  const PROJ_INTERIOR = 'SB75-INT';
+  const TASK_PAD = 'sb75-task-pad';
+  const TASK_INTERIOR = 'sb75-task-int';
+  const entry = (id, label) => ({
+    id,
+    date: DATE,
+    start: 540,
+    end: 660,
+    durMin: null,
+    project: null,
+    label,
+    note: 'sb75 note',
+    billable: false,
+  });
+  const stored = async () => (await emp('GET', '/api/state')).json;
+
+  beforeAll(async () => {
+    await admin('POST', '/api/auth/login', { email: 'admin@timeturtle.local', password: 'testpw' });
+    await admin('POST', '/api/users', {
+      email: 'sb75@timeturtle.local',
+      name: 'Seven Five',
+      role: 'employee',
+      password: 'sb75pw',
+    });
+    await emp('POST', '/api/auth/login', { email: 'sb75@timeturtle.local', password: 'sb75pw' });
+    // Projects are admin-only and collection-replace, so the stored ones are carried
+    // forward (ruling 7) and the two padded ones appended.
+    const st = await admin('GET', '/api/state');
+    const put = await admin('PUT', '/api/state', {
+      projects: [
+        ...st.json.projects,
+        { code: PROJ_PAD, name: '  Padded Project  ', clientId: null, rate: null, billable: true },
+        { code: PROJ_INTERIOR, name: 'Two  Spaces', clientId: null, rate: null, billable: true },
+      ],
+    });
+    expect(put.status).toBe(200);
+    // Tasks and entries are the caller's own collections. This PUT runs LAST so the mirror
+    // the server writes for this user carries the new catalog as well as their own rows.
+    const own = await emp('PUT', '/api/state', {
+      tasks: [
+        { id: TASK_PAD, label: '  Padded Task  ', project: null },
+        { id: TASK_INTERIOR, label: 'Two  Spaces', project: null },
+      ],
+      entries: Object.entries(LABELS).map(([id, [sent]]) => entry(id, sent)),
+    });
+    expect(own.status).toBe(200);
+  });
+
+  it('stores project.name trimmed — the GET reflects the DB, not the payload', async () => {
+    const byCode = Object.fromEntries((await stored()).projects.map((p) => [p.code, p.name]));
+    expect(byCode[PROJ_PAD]).toBe('Padded Project');
+    expect(byCode[PROJ_INTERIOR]).toBe('Two  Spaces');
+  });
+
+  it('stores task.label trimmed — the GET reflects the DB, not the payload', async () => {
+    const byId = Object.fromEntries((await stored()).tasks.map((t) => [t.id, t.label]));
+    expect(byId[TASK_PAD]).toBe('Padded Task');
+    expect(byId[TASK_INTERIOR]).toBe('Two  Spaces');
+  });
+
+  it('stores entry.label trimmed — the GET reflects the DB, not the payload', async () => {
+    const byId = Object.fromEntries((await stored()).entries.map((e) => [e.id, e.label]));
+    for (const [id, [sent, want]] of Object.entries(LABELS)) {
+      expect(`${id} ${JSON.stringify(sent)} → ${JSON.stringify(byId[id])}`).toBe(
+        `${id} ${JSON.stringify(sent)} → ${JSON.stringify(want)}`,
+      );
+    }
+  });
+
+  it('interior whitespace is not collapsed or trimmed in any of the three (the control)', async () => {
+    const state = await stored();
+    const projectByCode = Object.fromEntries(state.projects.map((p) => [p.code, p.name]));
+    const taskById = Object.fromEntries(state.tasks.map((t) => [t.id, t.label]));
+    const entryById = Object.fromEntries(state.entries.map((e) => [e.id, e.label]));
+    expect(projectByCode[PROJ_INTERIOR]).toBe('Two  Spaces');
+    expect(projectByCode[PROJ_INTERIOR]).not.toBe('Two Spaces');
+    expect(taskById[TASK_INTERIOR]).toBe('Two  Spaces');
+    expect(taskById[TASK_INTERIOR]).not.toBe('Two Spaces');
+    expect(entryById['sb75-interior']).toBe('a  b');
+    expect(entryById['sb75-interior']).not.toBe('a b');
+  });
+
+  // An entry id is NOT carried in a day row, so a parsed entry gets a fresh id — the labels
+  // are compared in file order, which serializeMd preserves, rather than by id.
+  const labelsOn = (state) => state.entries.filter((e) => e.date === DATE).map((e) => e.label);
+  const WANT = Object.values(LABELS).map(([, want]) => want);
+  const assertRoundTripped = (back) => {
+    expect([...labelsOn(back)].sort()).toEqual([...WANT].sort());
+    const projectByCode = Object.fromEntries(back.projects.map((p) => [p.code, p.name]));
+    expect(projectByCode[PROJ_PAD]).toBe('Padded Project');
+    expect(projectByCode[PROJ_INTERIOR]).toBe('Two  Spaces');
+    const taskById = Object.fromEntries(back.tasks.map((t) => [t.id, t.label]));
+    expect(taskById[TASK_PAD]).toBe('Padded Task');
+    expect(taskById[TASK_INTERIOR]).toBe('Two  Spaces');
+  };
+
+  it('serialize→parse of the stored state is now EXACT for every label and name', async () => {
+    const state = await stored();
+    const back = TT.parseMd(TT.serializeMd(state));
+    // exact means exact: what came out of the DB comes back unchanged, in order
+    expect(labelsOn(back)).toEqual(labelsOn(state));
+    assertRoundTripped(back);
+  });
+
+  it('the mirror the server wrote to disk round-trips these values', async () => {
+    // The end-to-end shape of the bug: the file Settings → Markdown backend hands the user,
+    // written by the server itself from the DB. Before the trim, ' leading' went in and
+    // 'leading' came back out of here.
+    const text = readFileSync(join(DATA_DIR, 'markdown', 'timesheet-seven-five.md'), 'utf8');
+    const back = TT.parseMd(text);
+    assertRoundTripped(back);
+    // and re-serializing what came off disk is a fixed point — no residual drift
+    expect(TT.serializeMd(back)).toBe(text);
+  });
+});
+
 // DC-001: PUT /api/state used to be last-write-wins. A `version` in the body makes
 // the write conditional. These run last — they replace the catalog wholesale.
 // SDD-002 ruling 7 (PLAN-006): a wholesale replace may no longer DROP a referenced

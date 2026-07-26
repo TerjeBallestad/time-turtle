@@ -298,6 +298,18 @@ function replaceAll(table, rows, insert) {
  * client-side trim is bypassable by any direct PUT and so cannot support a data-integrity
  * claim. Same `.trim()` the parser uses, so the two agree exactly; interior whitespace, which
  * the format DOES carry, is untouched.
+ *
+ * SB-075 MADE THE RULE UNIVERSAL — READ THIS BEFORE ADDING A FREE-TEXT COLUMN. SB-072 trimmed
+ * only the two fields shown to be UI-reachable, which left the guarantee narrower than it read:
+ * `project.name`, `task.label` and `entry.label` still trimmed in the CLIENT alone, so a direct
+ * PUT stored padding the mirror ate. All five are now trimmed at this layer, and that is the
+ * complete list of trimmed columns today:
+ *   `clients.name` (here) · `projects.name` (putProjects) · `tasks.label` (putTasks) ·
+ *   `entries.label` + `entries.note` (putEntries)
+ * Every OTHER string a mirror section emits is an identifier the caller chose — `clients.id`,
+ * `projects.code`, `tasks.id`, `entries.id`, `entries.project` — and those are validated or
+ * left verbatim, not normalized. The discipline the ruling bought: any new column whose value
+ * reaches a `|`-delimited cell trims here too, or the guarantee quietly narrows again.
  * @param {Client[]} clients */
 export function putClients(clients) {
   const insert = db.prepare('INSERT INTO clients (id, name, rounding, rate, archived) VALUES (?, ?, ?, ?, ?)');
@@ -311,7 +323,11 @@ export function putClients(clients) {
     ),
   );
 }
-/** @param {Project[]} projects */
+/** SB-075: `name` is trimmed here for the reason spelled out on putClients above — it is a
+ * free-text `|` cell in `## projects`, and ProjectsSection's client-side trim is bypassable
+ * by a direct PUT. The `code` beside it is NOT trimmed: it is the caller's identifier and the
+ * join key every entry carries, so normalizing it here would silently re-key stored rows.
+ * @param {Project[]} projects */
 export function putProjects(projects) {
   const insert = db.prepare(
     'INSERT INTO projects (code, name, client_id, rate, billable, archived) VALUES (?, ?, ?, ?, ?, ?)',
@@ -319,7 +335,7 @@ export function putProjects(projects) {
   replaceAll('projects', projects, (project) =>
     insert.run(
       String(project.code),
-      String(project.name),
+      String(project.name).trim(),
       project.clientId == null ? null : String(project.clientId),
       project.rate == null ? null : +project.rate,
       project.billable === false ? 0 : 1,
@@ -396,12 +412,15 @@ export function renameClientId(oldId, newId) {
 }
 
 /** SDD-002: replace one user's templates only — never the whole table.
+ * SB-075: `label` is trimmed here for the reason spelled out on putClients above — it is a
+ * free-text `|` cell in `## tasks`, and TaskModal's client-side trim is bypassable by a
+ * direct PUT. `id` and `project` are identifiers and stay verbatim.
  * @param {number} userId @param {Task[]} tasks */
 export function putTasks(userId, tasks) {
   db.prepare('DELETE FROM tasks WHERE user_id = ?').run(userId);
   const insert = db.prepare('INSERT INTO tasks (user_id, id, label, project_code) VALUES (?, ?, ?, ?)');
   for (const task of tasks) {
-    insert.run(userId, String(task.id), String(task.label), task.project == null ? null : String(task.project));
+    insert.run(userId, String(task.id), String(task.label).trim(), task.project == null ? null : String(task.project));
   }
 }
 
@@ -460,12 +479,15 @@ export function getAllEntries(from, to) {
 // index.js) because they reach the mirror's unescaped `## commits` section. This layer stays
 // a dumb writer — String(entry.id) — so any NEW write path must run that guard itself.
 //
-// SB-072: `note` is the exception — it is NORMALIZED here rather than rejected, because the
-// mirror parser trims every cell it splits out and so silently eats a note's leading/trailing
-// whitespace on a restore. Trimming on the way in keeps the DB inside what the format can
-// represent; see the putClients comment for the full ruling. Normalization sits at this layer
-// (all write paths, including the admin cross-user one and the demo seed) while rejection sits
-// at the API boundary, where it can return an error. Interior whitespace is untouched.
+// SB-072/SB-075: the free-text pair `label` and `note` are the exception — they are NORMALIZED
+// here rather than rejected, because the mirror parser trims every cell it splits out and so
+// silently eats their leading/trailing whitespace on a restore. (SB-072 did `note`; SB-075 added
+// `label`, which until then trimmed in the client only and so lost the guarantee to any direct
+// PUT.) Trimming on the way in keeps the DB inside what the format can represent; see the
+// putClients comment for the full ruling and the complete list of trimmed columns. Normalization
+// sits at this layer (all write paths, including the admin cross-user one and the demo seed)
+// while rejection sits at the API boundary, where it can return an error. Interior whitespace is
+// untouched, and `date`/`project` stay verbatim — they are not free text.
 /** @param {number} userId @param {Entry[]} entries */
 export function putEntries(userId, entries) {
   db.prepare('DELETE FROM entries WHERE user_id = ?').run(userId);
@@ -482,7 +504,7 @@ export function putEntries(userId, entries) {
       entry.end == null ? null : +entry.end,
       entry.durMin == null ? null : +entry.durMin,
       entry.project == null ? null : String(entry.project),
-      String(entry.label ?? ''),
+      String(entry.label ?? '').trim(),
       String(entry.note ?? '').trim(),
       entry.billable ? 1 : 0,
       entry.editedByAdmin ? 1 : 0,
