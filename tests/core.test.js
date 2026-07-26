@@ -610,6 +610,78 @@ describe('TT.projectCode transliterates rather than dropping (SB-088)', () => {
 });
 
 // ## Verified red-green: 2026-07-26
+// SB-111: three id-minting sites, two de-collision conventions, and two of them broke their own
+// length cap. `derivedClientId` counted `brygga`, `brygga-2`, `brygga-3`; `createProject` and
+// `createTask` APPENDED a literal `2`, so a third collision read `code222` — unreadable and
+// unbounded. All three grew PAST their cap: `base + '-2'` is 26 against TT.slug's 24, `code + '2'`
+// is 10 against a project code's 9.
+//
+// RULING (2026-07-26): one convention everywhere — a `-2` / `-3` suffix that fits INSIDE the cap,
+// with the base truncated to make room rather than the id appended past it. An id is a visible
+// join key in the markdown mirror, so its width is a promise to the reader.
+describe('TT.uniqueId — one de-collision rule, and the suffix fits inside the cap (SB-111)', () => {
+  /** @param {string[]} ids */
+  const taken = (ids) => (id) => ids.includes(id);
+
+  it('hands back the base untouched when nothing holds it', () => {
+    expect(TT.uniqueId('brygga', taken([]), TT.ID_CAP)).toBe('brygga');
+    expect(TT.uniqueId('SOR-NORG', taken(['OTHER']), TT.CODE_CAP)).toBe('SOR-NORG');
+  });
+
+  it('counts -2, -3, -4 … and never repeats the old append-a-2 shape', () => {
+    expect(TT.uniqueId('brygga', taken(['brygga']), TT.ID_CAP)).toBe('brygga-2');
+    expect(TT.uniqueId('brygga', taken(['brygga', 'brygga-2']), TT.ID_CAP)).toBe('brygga-3');
+    expect(TT.uniqueId('brygga', taken(['brygga', 'brygga-2', 'brygga-3']), TT.ID_CAP)).toBe('brygga-4');
+    // the shapes the two old conventions produced, asserted absent
+    expect(TT.uniqueId('brygga', taken(['brygga', 'brygga-2']), TT.ID_CAP)).not.toBe('brygga22');
+  });
+
+  it('truncates the BASE to make room, so the finished id never exceeds the cap', () => {
+    // This is the whole ruling. `base + '-2'` used to be 26 characters against a cap of 24.
+    const base = TT.slug('Ballestad Studios International Holding Company');
+    expect(base).toHaveLength(24); // the base is already AT the cap
+    const next = TT.uniqueId(base, taken([base]), TT.ID_CAP);
+    expect(next).toHaveLength(24);
+    expect(next).toBe('ballestad-studios-inte-2');
+    expect(next.startsWith(base.slice(0, 22))).toBe(true); // still recognisably the same id
+  });
+
+  it('a project code de-collides inside 9, where the old rule made 10', () => {
+    const code = TT.projectCode('Sør-Norge'); // SOR-NORG, 8 characters
+    const next = TT.uniqueId(code, taken([code]), TT.CODE_CAP);
+    expect(next).toBe('SOR-NOR-2');
+    expect(next.length).toBeLessThanOrEqual(TT.CODE_CAP);
+    expect(next).not.toBe('SOR-NORG2'); // 9 here, but 10 on the next collision and unbounded after
+  });
+
+  it('a two-digit suffix still fits — the base gives back one more character', () => {
+    const held = ['base'];
+    for (let n = 2; n <= 10; n++) held.push(TT.uniqueId('base', taken(held), TT.CODE_CAP));
+    expect(held[held.length - 1]).toBe('base-10');
+    for (const id of held) expect(id.length).toBeLessThanOrEqual(TT.CODE_CAP);
+  });
+
+  it('a truncation that lands on a dash drops it — no id reads `foo--2`', () => {
+    expect(TT.uniqueId('abcdefghijklmnopqrstu-vw', taken(['abcdefghijklmnopqrstu-vw']), 24)).toBe('abcdefghijklmnopqrstu-2'); // prettier-ignore
+    expect(TT.uniqueId('abcdefghijklmnopqrstu-vw', taken(['abcdefghijklmnopqrstu-vw']), 24)).not.toContain('--');
+  });
+
+  it('the property the rule exists for: whatever comes out is free', () => {
+    // Every id these sites mint lands in a TEXT PRIMARY KEY; a duplicate is the save-lock SB-067
+    // documents, not a cosmetic clash.
+    for (const cap of [TT.ID_CAP, TT.CODE_CAP]) {
+      const held = ['base'];
+      for (let i = 0; i < 12; i++) {
+        const next = TT.uniqueId('base', taken(held), cap);
+        expect(held).not.toContain(next);
+        expect(next.length).toBeLessThanOrEqual(cap);
+        held.push(next);
+      }
+    }
+  });
+});
+
+// ## Verified red-green: 2026-07-26
 // SB-122: the `[[Wikilink]]` rule was composed TWICE, in opposite orders — the daily-note
 // `Project` cell bracketed first and escaped the brackets along with the name, the catalog note's
 // `Note` column escaped first and bracketed after. Both halves round-tripped, but only because

@@ -343,14 +343,52 @@ const asciiFold = (s) =>
 //
 // This changes what NEW ids look like. It does NOT rename anything already stored, and
 // nothing re-derives an id for an existing row — see the note on TT.projectCode.
+// The two character caps a minted identifier holds to, named once so nothing hardcodes a
+// number the de-collide rule also has to know (SB-111).
+/** Client ids and task ids — what TT.slug emits. */
+TT.ID_CAP = 24;
+/** Project codes — what TT.projectCode emits: four letters, a dash, four letters. */
+TT.CODE_CAP = 9;
 /** @param {string} s @param {string} [fallback] what an unsluggable name becomes */
 TT.slug = (s, fallback = 'task') =>
   asciiFold(s)
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '')
-    .slice(0, 24)
-    .replace(/-+$/g, '') || fallback; // the 24-cap can land mid-dash
+    .slice(0, TT.ID_CAP)
+    .replace(/-+$/g, '') || fallback; // the cap can land mid-dash
+// ONE de-collision rule for every minted identifier — client ids, project codes, task ids
+// (SB-111, ruled 2026-07-26).
+//
+// There were two conventions and they disagreed about both the spelling and the cap.
+// `derivedClientId` counted `brygga`, `brygga-2`, `brygga-3`; `createProject` and `createTask`
+// APPENDED a literal `2`, so a third collision read `code222` — unreadable, and unbounded. All
+// three grew PAST their cap: `base + '-2'` is 26 characters against TT.slug's 24, and `code + '2'`
+// is 10 against a project code's 9. A cap that the de-collide step is allowed to exceed is not a
+// cap; the id is a visible join key in the markdown mirror and, under the vault backend, in an
+// authoritative note, so its width is a promise to the reader.
+//
+// So the suffix fits INSIDE the cap: the BASE is truncated to make room (`-2`, `-3`, … `-10`),
+// never appended past it. A truncation that lands on a dash drops it, the same way TT.slug does,
+// so no id ever reads `foo--2`.
+//
+// NOT A MIGRATION. This is what a NEWLY minted id looks like. Nothing already stored is re-keyed:
+// no client id, project code or task id is re-derived anywhere, and a code rename stays the
+// deliberate, server-reconciled act of DC-005.
+/**
+ * @param {string} base the id the naming rule produced, already capped
+ * @param {(id: string) => boolean} isTaken true while the candidate collides
+ * @param {number} cap the maximum width the finished id may have
+ * @returns {string} `base`, or the first free `base-N` that fits inside `cap`
+ */
+TT.uniqueId = (base, isTaken, cap) => {
+  if (!isTaken(base)) return base;
+  for (let n = 2; ; n++) {
+    const suffix = '-' + n;
+    const head = base.slice(0, Math.max(0, cap - suffix.length)).replace(/-+$/g, '');
+    if (!isTaken(head + suffix)) return head + suffix;
+  }
+};
 // The project code derived from a project's name at creation (`createProject`). Two
 // words or more → first four letters of the first two, joined by a dash (FJEL-NETT);
 // one word → its first eight. Lives here beside TT.slug because it is the same kind of
@@ -782,10 +820,12 @@ function vaultProjectCell(code, projects) {
  * @param {string} cell still escaped @param {Project[]} [projects] @returns {string}
  */
 function vaultProjectCode(cell, projects) {
-  const note = projects ? readWikilink(cell) : null;
-  if (note === null) return TT.decodeCell(cell);
-  const project = projects.find((candidate) => candidate.vaultNote === note);
-  return project ? project.code : TT.decodeCell(cell);
+  if (projects) {
+    const note = readWikilink(cell);
+    const project = note === null ? null : projects.find((candidate) => candidate.vaultNote === note);
+    if (project) return project.code;
+  }
+  return TT.decodeCell(cell);
 }
 
 // ---- vault block region (SB-055) ----

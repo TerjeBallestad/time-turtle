@@ -160,6 +160,21 @@ describe('derivedClientId (fix 2: derive when the name is first set)', () => {
     expect(derivedClientId([client('client1', 'client1')], [], 'client1', PLACEHOLDER)).toBeNull();
   });
 
+  // ## Verified red-green: 2026-07-26
+  // SB-111: the de-collide step used to append past TT.slug's cap — `base + '-2'` is 26
+  // characters against 24. It goes through TT.uniqueId now, which truncates the base to make
+  // room. The `-2` spelling above is unchanged; only the width is.
+  it('de-collides INSIDE the cap rather than growing past it', () => {
+    const LONG = 'Ballestad Studios International Holding Company';
+    const base = makeClientId(LONG); // 24 characters — already at the cap
+    expect(base).toHaveLength(24);
+    const clients = [client(base, LONG), client('client1', LONG)];
+    const derived = derivedClientId(clients, [], 'client1', PLACEHOLDER);
+    expect(derived).toHaveLength(24);
+    expect(derived).toBe('ballestad-studios-inte-2');
+    expect(clients.some((c) => c.id === derived)).toBe(false);
+  });
+
   it('never hands back an id another client already holds', () => {
     // The property the whole fix exists to guarantee: whatever comes out of the derive is
     // free, so the PUT cannot trip the clients.id PRIMARY KEY.
