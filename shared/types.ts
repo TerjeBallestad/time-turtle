@@ -886,6 +886,11 @@ export interface TTModule {
   // so it can tell "nothing usable yet" from a real id, instead of inventing one.
   slug(s: string, fallback?: string): string;
   projectCode(name: string): string;
+  // SB-111: one de-collision rule for every minted identifier. The `-N` suffix fits INSIDE
+  // `cap` — the base is truncated to make room, never appended past it.
+  ID_CAP: number;
+  CODE_CAP: number;
+  uniqueId(base: string, isTaken: (id: string) => boolean, cap: number): string;
   clientOf(state: Catalog, project: Project | null): Client | null;
   rateOf(state: Catalog, code: string | null): number;
   billMinutes(state: Catalog, entry: Entry): number;

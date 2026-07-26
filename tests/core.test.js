@@ -575,4 +575,216 @@ describe('TT.projectCode transliterates rather than dropping (SB-088)', () => {
     expect(TT.projectCode('')).toBe('PROJ');
     expect(TT.projectCode('!!!')).toBe('PROJ');
   });
+
+  // ## Verified red-green: 2026-07-26
+  // SB-110, folded into the same table: the hyphen was DELETED with every other non-alphanumeric,
+  // so "Sør-Norge" collapsed into the single word SORNORGE while "Sør Norge" segmented to
+  // SOR-NORG. Same name, different shape of answer, for a reason the user cannot see.
+  it.each([
+    ['Sør-Norge', 'Sør Norge', 'SOR-NORG'],
+    ['Nord-Trøndelag', 'Nord Trøndelag', 'NORD-TRON'],
+    ['Vest-Agder', 'Vest Agder', 'VEST-AGDE'],
+    ['Ops-maintenance', 'Ops maintenance', 'OPS-MAIN'],
+  ])('%s segments exactly like %s → %s', (hyphenated, spaced, expected) => {
+    expect(TT.projectCode(hyphenated)).toBe(TT.projectCode(spaced));
+    expect(TT.projectCode(hyphenated)).toBe(expected);
+  });
+
+  it('a hyphen is a separator even where it produces nothing to separate', () => {
+    expect(TT.projectCode('Foo-')).toBe('FOO'); // no trailing dash left behind
+    expect(TT.projectCode('-Foo')).toBe('FOO');
+    expect(TT.projectCode('Sør--Norge')).toBe('SOR-NORG'); // a run collapses like a run of spaces
+    expect(TT.projectCode('A-B-C')).toBe('A-B'); // still only the first two words
+    expect(TT.projectCode('-')).toBe('PROJ'); // nothing left ⇒ the fallback, not an empty code
+  });
+
+  it('the length cap: a hyphenated name inherits the two-word shape, and nothing longer', () => {
+    // The ticket asked for this to be checked rather than assumed. A hyphenated name now takes
+    // the same path as its space-separated twin, so 9 (4 + dash + 4) is its maximum — one more
+    // than the single-word cap of 8, and exactly what the spaced form already produced.
+    expect(TT.projectCode('Nord-Trøndelag')).toHaveLength(9);
+    expect(TT.projectCode('Nord Trøndelag')).toHaveLength(9);
+    expect(TT.projectCode('Abcdefgh-Ijklmnop-Qrstuv').length).toBeLessThanOrEqual(9);
+    expect(TT.projectCode('Abcdefghijklmnop')).toHaveLength(8); // one word is still capped at 8
+  });
+});
+
+// ## Verified red-green: 2026-07-26
+// SB-111: three id-minting sites, two de-collision conventions, and two of them broke their own
+// length cap. `derivedClientId` counted `brygga`, `brygga-2`, `brygga-3`; `createProject` and
+// `createTask` APPENDED a literal `2`, so a third collision read `code222` — unreadable and
+// unbounded. All three grew PAST their cap: `base + '-2'` is 26 against TT.slug's 24, `code + '2'`
+// is 10 against a project code's 9.
+//
+// RULING (2026-07-26): one convention everywhere — a `-2` / `-3` suffix that fits INSIDE the cap,
+// with the base truncated to make room rather than the id appended past it. An id is a visible
+// join key in the markdown mirror, so its width is a promise to the reader.
+describe('TT.uniqueId — one de-collision rule, and the suffix fits inside the cap (SB-111)', () => {
+  /** @param {string[]} ids */
+  const taken = (ids) => (id) => ids.includes(id);
+
+  it('hands back the base untouched when nothing holds it', () => {
+    expect(TT.uniqueId('brygga', taken([]), TT.ID_CAP)).toBe('brygga');
+    expect(TT.uniqueId('SOR-NORG', taken(['OTHER']), TT.CODE_CAP)).toBe('SOR-NORG');
+  });
+
+  it('counts -2, -3, -4 … and never repeats the old append-a-2 shape', () => {
+    expect(TT.uniqueId('brygga', taken(['brygga']), TT.ID_CAP)).toBe('brygga-2');
+    expect(TT.uniqueId('brygga', taken(['brygga', 'brygga-2']), TT.ID_CAP)).toBe('brygga-3');
+    expect(TT.uniqueId('brygga', taken(['brygga', 'brygga-2', 'brygga-3']), TT.ID_CAP)).toBe('brygga-4');
+    // the shapes the two old conventions produced, asserted absent
+    expect(TT.uniqueId('brygga', taken(['brygga', 'brygga-2']), TT.ID_CAP)).not.toBe('brygga22');
+  });
+
+  it('truncates the BASE to make room, so the finished id never exceeds the cap', () => {
+    // This is the whole ruling. `base + '-2'` used to be 26 characters against a cap of 24.
+    const base = TT.slug('Ballestad Studios International Holding Company');
+    expect(base).toHaveLength(24); // the base is already AT the cap
+    const next = TT.uniqueId(base, taken([base]), TT.ID_CAP);
+    expect(next).toHaveLength(24);
+    expect(next).toBe('ballestad-studios-inte-2');
+    expect(next.startsWith(base.slice(0, 22))).toBe(true); // still recognisably the same id
+  });
+
+  it('a project code de-collides inside 9, where the old rule made 10', () => {
+    const code = TT.projectCode('Sør-Norge'); // SOR-NORG, 8 characters
+    const next = TT.uniqueId(code, taken([code]), TT.CODE_CAP);
+    expect(next).toBe('SOR-NOR-2');
+    expect(next.length).toBeLessThanOrEqual(TT.CODE_CAP);
+    expect(next).not.toBe('SOR-NORG2'); // 9 here, but 10 on the next collision and unbounded after
+  });
+
+  it('a two-digit suffix still fits — the base gives back one more character', () => {
+    const held = ['base'];
+    for (let n = 2; n <= 10; n++) held.push(TT.uniqueId('base', taken(held), TT.CODE_CAP));
+    expect(held[held.length - 1]).toBe('base-10');
+    for (const id of held) expect(id.length).toBeLessThanOrEqual(TT.CODE_CAP);
+  });
+
+  it('a truncation that lands on a dash drops it — no id reads `foo--2`', () => {
+    expect(TT.uniqueId('abcdefghijklmnopqrstu-vw', taken(['abcdefghijklmnopqrstu-vw']), 24)).toBe('abcdefghijklmnopqrstu-2'); // prettier-ignore
+    expect(TT.uniqueId('abcdefghijklmnopqrstu-vw', taken(['abcdefghijklmnopqrstu-vw']), 24)).not.toContain('--');
+  });
+
+  it('the property the rule exists for: whatever comes out is free', () => {
+    // Every id these sites mint lands in a TEXT PRIMARY KEY; a duplicate is the save-lock SB-067
+    // documents, not a cosmetic clash.
+    for (const cap of [TT.ID_CAP, TT.CODE_CAP]) {
+      const held = ['base'];
+      for (let i = 0; i < 12; i++) {
+        const next = TT.uniqueId('base', taken(held), cap);
+        expect(held).not.toContain(next);
+        expect(next.length).toBeLessThanOrEqual(cap);
+        held.push(next);
+      }
+    }
+  });
+});
+
+// ## Verified red-green: 2026-07-26
+// SB-122: the `[[Wikilink]]` rule was composed TWICE, in opposite orders — the daily-note
+// `Project` cell bracketed first and escaped the brackets along with the name, the catalog note's
+// `Note` column escaped first and bracketed after. Both halves round-tripped, but only because
+// `TT.encodeCell` happens not to escape `[`. That is a coincidence of today's cell codec, not a
+// property either site asserted, and a wikilink is a JOIN KEY here: the catalog says which note a
+// project is written as, the daily block writes that note, and the parser resolves it back to a
+// code. A mangled one is `rateOf()` returning 0, not a cosmetic defect.
+//
+// So the suite below runs every claim TWICE: once under the real `encodeCell`, and once under a
+// WIDENED one that also escapes `[` and `]` — the future change this ticket exists to survive.
+// A test that only passed under today's escape set would be green for the wrong reason.
+describe('the wikilink composition is one rule, independent of encodeCell (SB-122)', () => {
+  /** @param {Partial<import('../shared/types.ts').Project>} o */
+  const P = (o) => ({ code: 'LT-01', name: 'Lifelines Tycoon', clientId: null, rate: null, billable: true, archived: false, ...o }); // prettier-ignore
+  /** @param {Partial<import('../shared/types.ts').VaultEntry>} o */
+  const E = (o) => ({ id: 'ephemeral', date: '2026-01-05', start: null, end: null, durMin: 30, project: null, label: '', note: '', billable: false, ...o }); // prettier-ignore
+  /** The nth line's cells, trimmed and STILL escaped — `| a | b |` → ['a', 'b']. */
+  const cells = (region, line) => TT.splitCells(region.split('\n')[line]).slice(1, -1);
+
+  /**
+   * Run `fn` with `TT.encodeCell` widened to escape `[` and `]` as well. `decodeCell` is already
+   * unconditional (`\X` → `X` for any X), so widening the write half alone is a faithful
+   * simulation of the change — nothing else in the codec needs to move.
+   */
+  const withBracketsEscaped = (fn) => {
+    const real = TT.encodeCell;
+    TT.encodeCell = (s) => (s == null ? '' : String(s)).replace(/[\\|[\]]/g, (c) => '\\' + c);
+    try {
+      expect(TT.encodeCell('a[b')).toBe('a\\[b'); // the premise of this whole block
+      return fn();
+    } finally {
+      TT.encodeCell = real;
+    }
+  };
+
+  // Note names that carry the characters the two orders disagree about, plus the ones the escape
+  // set already covers, so a regression in either half shows up here.
+  const NAMES = [
+    'Nettbutikk rebuild', // the ordinary case — the control
+    'Arkiv | 2025', // the delimiter: an unescaped one splits the row
+    'Back\\slash', // the escape character itself
+    'Notes [draft] 2026', // a bracket INSIDE the name — the coincidence, stated
+    '[[Nested]]', // the whole wikilink syntax as a name
+    'Trailing ]', // the name that collides with the closing bracket pair
+  ];
+
+  /**
+   * The property, stated once: for one note name, the daily block and the catalog note emit the
+   * SAME bytes, and both sides read the model back. Byte equality is what a second composition
+   * breaks; the two round-trips are what a broken read side breaks.
+   */
+  const bothSidesAgree = (note) => {
+    const projects = [P({ vaultNote: note })];
+    const catalog = TT.serializeVaultCatalogSection('projects', projects, { revision: 1 });
+    const parsedCatalog = TT.parseVaultCatalogSection(['# Time Turtle', '', catalog, ''].join('\n'), 'projects');
+    expect(parsedCatalog.quarantine).toBe(false);
+    expect(parsedCatalog.rows[0].vaultNote).toBe(note);
+
+    // the daily block is resolved against the catalog TT just READ BACK, not the one it holds in
+    // memory — that is the join this ticket is about
+    const opts = { headers: ['Time', 'Project'], projects: parsedCatalog.rows };
+    const day = TT.serializeVaultBlock([E({ project: 'LT-01' })], opts);
+    const parsedDay = TT.parseVaultBlock(day, { date: '2026-01-05', projects: parsedCatalog.rows });
+    expect(parsedDay.quarantine).toBe(false);
+    expect(parsedDay.entries[0].project).toBe('LT-01');
+
+    // ONE composition ⇒ one set of bytes. `Note` is the last catalog column, `Project` the second
+    // daily one; both rows are line 4 of their region.
+    const noteCell = cells(catalog, 4).pop();
+    const projectCell = cells(day, 4)[1];
+    expect(projectCell).toBe(noteCell);
+    return projectCell;
+  };
+
+  it.each(NAMES)('%s: the catalog Note cell and the daily Project cell are the same bytes', (note) => {
+    bothSidesAgree(note);
+  });
+
+  it.each(NAMES)('%s: still the same bytes once encodeCell escapes `[` and `]`', (note) => {
+    withBracketsEscaped(() => bothSidesAgree(note));
+  });
+
+  it('the widened escape set really does change the bytes — the guard is not a no-op', () => {
+    // Without this, both blocks above could be passing on identical output and the second one
+    // would prove nothing. A bracket in the NAME is escaped under the wider set and not under the
+    // narrow one, while the structural brackets stay literal in both.
+    const narrow = bothSidesAgree('Notes [draft] 2026');
+    const wide = withBracketsEscaped(() => bothSidesAgree('Notes [draft] 2026'));
+    expect(narrow).toBe('[[Notes [draft] 2026]]');
+    expect(wide).toBe('[[Notes \\[draft\\] 2026]]');
+    expect(wide).not.toBe(narrow);
+  });
+
+  it('a wikilink no project claims is still carried verbatim under the wider escape set', () => {
+    // The pre-SB-122 read side ran WIKILINK_RE on the DECODED cell. Under the wider set the
+    // unclaimed-link fallback is where that difference surfaces: TT must hand back the note text,
+    // never the still-escaped bytes.
+    withBracketsEscaped(() => {
+      const projects = [P({ vaultNote: 'Lifelines Tycoon' })];
+      const day = TT.serializeVaultBlock([E({ project: '[[Planning [2026]]]' })], { headers: ['Time', 'Project'] });
+      const parsed = TT.parseVaultBlock(day, { date: '2026-01-05', projects });
+      expect(parsed.quarantine).toBe(false);
+      expect(parsed.entries[0].project).toBe('[[Planning [2026]]]');
+    });
+  });
 });

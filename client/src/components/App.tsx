@@ -144,9 +144,10 @@ export function App() {
     },
     openTaskModal: (name, entryId) => setTaskModal({ name: name || '', entryId: entryId || null }),
     createTask: ({ label, project }, entryId) => {
-      let id = TT.slug(label);
       updateState((current) => {
-        while (current.tasks.some((task) => task.id === id)) id = id + '2';
+        // SB-111: same de-collision rule as client ids and project codes, and the suffix fits
+        // inside TT.slug's cap. Derived INSIDE the updater so a re-run sees the current tasks.
+        const id = TT.uniqueId(TT.slug(label), (c) => current.tasks.some((task) => task.id === c), TT.ID_CAP);
         const tasks = [...current.tasks, { id, label, project: project || null }];
         // Creating a template from the task cell STAMPS it onto the entry (copy at
         // birth) and derives billable from the project the one moment a projectless
@@ -257,8 +258,7 @@ export function App() {
     },
     addProject: () =>
       updateState((current) => {
-        let code = 'NEW';
-        while (current.projects.some((project) => project.code === code)) code += '2';
+        const code = TT.uniqueId('NEW', (c) => current.projects.some((project) => project.code === c), TT.CODE_CAP); // prettier-ignore
         return {
           ...current,
           projects: [
@@ -268,9 +268,11 @@ export function App() {
         };
       }),
     createProject: (name) => {
-      let code = TT.projectCode(name);
       updateState((current) => {
-        while (current.projects.some((project) => project.code === code)) code = code + '2';
+        // SB-111: one de-collision rule, and the suffix fits inside the code's cap — `SOR-NORG`,
+        // `SOR-NO-2`, `SOR-NO-3`, never the old unbounded `SOR-NORG2` / `SOR-NORG22`. Derived
+        // INSIDE the updater, so a re-run sees the current catalog rather than a stale `code`.
+        const code = TT.uniqueId(TT.projectCode(name), (c) => current.projects.some((project) => project.code === c), TT.CODE_CAP); // prettier-ignore
         return {
           ...current,
           projects: [...current.projects, { code, name, clientId: null, rate: null, billable: true, archived: false }],

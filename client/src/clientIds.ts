@@ -103,8 +103,10 @@ export function derivedClientId(
   if (!name || name === placeholder.trim()) return null; // not named yet
   const base = makeClientId(name);
   if (!base) return null; // nothing sluggable — keep the minted id rather than invent one
+  // SB-111: the de-collide rule is TT.uniqueId now — one convention for client ids, project
+  // codes and task ids. The spelling here was already the ruled one (`brygga-2`); what changed
+  // is that the suffix now fits INSIDE TT.slug's cap instead of pushing the id past it.
   const taken = new Set(clients.filter((candidate) => candidate.id !== client.id).map((c) => c.id));
-  let next = base;
-  for (let n = 2; taken.has(next); n++) next = base + '-' + n;
+  const next = TT.uniqueId(base, (id) => taken.has(id), TT.ID_CAP);
   return next === client.id ? null : next;
 }

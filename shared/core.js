@@ -343,14 +343,52 @@ const asciiFold = (s) =>
 //
 // This changes what NEW ids look like. It does NOT rename anything already stored, and
 // nothing re-derives an id for an existing row — see the note on TT.projectCode.
+// The two character caps a minted identifier holds to, named once so nothing hardcodes a
+// number the de-collide rule also has to know (SB-111).
+/** Client ids and task ids — what TT.slug emits. */
+TT.ID_CAP = 24;
+/** Project codes — what TT.projectCode emits: four letters, a dash, four letters. */
+TT.CODE_CAP = 9;
 /** @param {string} s @param {string} [fallback] what an unsluggable name becomes */
 TT.slug = (s, fallback = 'task') =>
   asciiFold(s)
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '')
-    .slice(0, 24)
-    .replace(/-+$/g, '') || fallback; // the 24-cap can land mid-dash
+    .slice(0, TT.ID_CAP)
+    .replace(/-+$/g, '') || fallback; // the cap can land mid-dash
+// ONE de-collision rule for every minted identifier — client ids, project codes, task ids
+// (SB-111, ruled 2026-07-26).
+//
+// There were two conventions and they disagreed about both the spelling and the cap.
+// `derivedClientId` counted `brygga`, `brygga-2`, `brygga-3`; `createProject` and `createTask`
+// APPENDED a literal `2`, so a third collision read `code222` — unreadable, and unbounded. All
+// three grew PAST their cap: `base + '-2'` is 26 characters against TT.slug's 24, and `code + '2'`
+// is 10 against a project code's 9. A cap that the de-collide step is allowed to exceed is not a
+// cap; the id is a visible join key in the markdown mirror and, under the vault backend, in an
+// authoritative note, so its width is a promise to the reader.
+//
+// So the suffix fits INSIDE the cap: the BASE is truncated to make room (`-2`, `-3`, … `-10`),
+// never appended past it. A truncation that lands on a dash drops it, the same way TT.slug does,
+// so no id ever reads `foo--2`.
+//
+// NOT A MIGRATION. This is what a NEWLY minted id looks like. Nothing already stored is re-keyed:
+// no client id, project code or task id is re-derived anywhere, and a code rename stays the
+// deliberate, server-reconciled act of DC-005.
+/**
+ * @param {string} base the id the naming rule produced, already capped
+ * @param {(id: string) => boolean} isTaken true while the candidate collides
+ * @param {number} cap the maximum width the finished id may have
+ * @returns {string} `base`, or the first free `base-N` that fits inside `cap`
+ */
+TT.uniqueId = (base, isTaken, cap) => {
+  if (!isTaken(base)) return base;
+  for (let n = 2; ; n++) {
+    const suffix = '-' + n;
+    const head = base.slice(0, Math.max(0, cap - suffix.length)).replace(/-+$/g, '');
+    if (!isTaken(head + suffix)) return head + suffix;
+  }
+};
 // The project code derived from a project's name at creation (`createProject`). Two
 // words or more → first four letters of the first two, joined by a dash (FJEL-NETT);
 // one word → its first eight. Lives here beside TT.slug because it is the same kind of
@@ -364,11 +402,24 @@ TT.slug = (s, fallback = 'task') =>
 // NOT A MIGRATION: this is what a NEWLY created project is called. Every stored code
 // keeps its exact bytes — no code, client id or task id is re-derived anywhere, and a
 // rename stays the deliberate, server-reconciled act PLAN-006 made it (DC-005).
+// SB-110: a HYPHEN SEPARATES WORDS, exactly like a space. It used to be deleted along with
+// every other non-alphanumeric, so "Sør-Norge" collapsed into the single word SORNORGE while
+// "Sør Norge" segmented to SOR-NORG — the same name, a different shape of answer, for a reason
+// the user cannot see. Hyphenated proper nouns are ordinary in Norwegian company names
+// (Sør-Norge, Nord-Trøndelag, Vest-Agder), so this is not an edge case in this catalog.
+//
+// The cap interaction, checked rather than assumed: a hyphenated name now takes the SAME path
+// as its space-separated twin, so it inherits that path's shape — two words of at most four
+// letters joined by a dash, at most 9 characters. That is one more than the single-word cap of
+// 8 (Nord-Trøndelag: NORDTRON → NORD-TRON), and it is exactly what "Nord Trøndelag" already
+// produced before this change. No new maximum is introduced, and nothing downstream constrains
+// a code's length — `createProject` is the only caller.
 TT.projectCode = (name) => {
   const words = asciiFold(name)
-    .trim()
     .toUpperCase()
+    .replace(/-/g, ' ')
     .replace(/[^A-Z0-9 ]/g, '')
+    .trim()
     .split(/\s+/);
   const code =
     words.length > 1
@@ -723,30 +774,58 @@ TT.decodeTagsCell = function (cell) {
 // still Terje's bytes, and inventing a code for it would be a guess).
 //
 // The brackets are composed here and stripped here, so `Project.vaultNote` holds the note
-// NAME. Escaping composes on top: the cell is `[[` + note + `]]` and THEN TT.encodeCell'd, so
-// a `|` in a note name escapes like any other content and cannot split the row.
+// NAME. `encodeWikilink` / `readWikilink` below are THE composition — every site that writes
+// or reads a `[[…]]` cell goes through them, in both the daily block and the catalog note.
+//
+// THE ORDER IS DELIBERATE AND IS THE WHOLE POINT OF SB-122 (ruled 2026-07-26). The brackets are
+// STRUCTURE, exactly like the `|` that delimits the cell: they are added AFTER the note name is
+// escaped, and read off BEFORE the inner text is decoded. So the write is
+// `'[[' + encodeCell(note) + ']]'` and the read runs `WIKILINK_RE` on the STILL-ESCAPED cell.
+//
+// It was previously composed twice in OPPOSITE orders — the daily block bracketed first and
+// escaped the brackets along with the name, the catalog escaped first and bracketed after. Both
+// halves round-tripped, but only because `encodeCell` happens not to escape `[`; the two sites
+// emitted the same bytes by coincidence, not by rule. Widening `encodeCell` — a change SB-041
+// has already made once for other characters — would have split them silently, and a wikilink is
+// a join key here, so a mangled one is a rate that resolves to 0, not a cosmetic defect.
+// `tests/core.test.js` pins this by widening `encodeCell` to escape `[`/`]` and asserting both
+// sites still agree; do not restore a second composition.
 const WIKILINK_RE = /^\[\[(.+)\]\]$/;
 /**
- * How a project code is written in a `Project` cell (still UNescaped).
+ * A note name as a finished, ESCAPED `[[…]]` cell. Escape first, bracket after.
+ * @param {string} note @returns {string}
+ */
+const encodeWikilink = (note) => '[[' + TT.encodeCell(note) + ']]';
+/**
+ * The inverse: a still-escaped cell to the DECODED note name, or `null` when the cell is not a
+ * wikilink at all. Brackets off first, decode after.
+ * @param {string} cell still escaped @returns {string | null}
+ */
+function readWikilink(cell) {
+  const m = WIKILINK_RE.exec(cell);
+  return m ? TT.decodeCell(m[1]) : null;
+}
+/**
+ * How a project code is written in a `Project` cell — the finished, ESCAPED cell.
  * @param {string} code @param {Project[]} [projects] @returns {string}
  */
 function vaultProjectCell(code, projects) {
-  if (!projects) return code;
-  const project = projects.find((candidate) => candidate.code === code);
-  return project && project.vaultNote ? '[[' + project.vaultNote + ']]' : code;
+  const project = projects && projects.find((candidate) => candidate.code === code);
+  return project && project.vaultNote ? encodeWikilink(project.vaultNote) : TT.encodeCell(code);
 }
 /**
- * The inverse: a decoded `Project` cell back to a project code. First match wins — two
+ * The inverse: a still-escaped `Project` cell back to a project code. First match wins — two
  * projects claiming one note is a catalog the UI has to prevent, not something the parser
- * can arbitrate.
- * @param {string} value decoded cell @param {Project[]} [projects] @returns {string}
+ * can arbitrate. A wikilink no project claims is carried verbatim (decoded), as is a bare code.
+ * @param {string} cell still escaped @param {Project[]} [projects] @returns {string}
  */
-function vaultProjectCode(value, projects) {
-  if (!projects) return value;
-  const m = WIKILINK_RE.exec(value);
-  if (!m) return value;
-  const project = projects.find((candidate) => candidate.vaultNote === m[1]);
-  return project ? project.code : value;
+function vaultProjectCode(cell, projects) {
+  if (projects) {
+    const note = readWikilink(cell);
+    const project = note === null ? null : projects.find((candidate) => candidate.vaultNote === note);
+    if (project) return project.code;
+  }
+  return TT.decodeCell(cell);
 }
 
 // ---- vault block region (SB-055) ----
@@ -1296,7 +1375,7 @@ function parseAnchoredBlock(md, opts) {
         const tags = TT.decodeTagsCell(raw);
         if (tags.length) entry.tags = tags;
       } else if (keys[c] === 'project') {
-        entry.project = raw === '' ? null : vaultProjectCode(TT.decodeCell(raw), projects);
+        entry.project = raw === '' ? null : vaultProjectCode(raw, projects);
       } else if (keys[c] === 'task') {
         const { label, note } = TT.decodeTaskCell(raw);
         entry.label = label;
@@ -1470,7 +1549,7 @@ TT.serializeVaultBlock = function (entries, opts) {
         keys.map((key) => {
           if (key === 'time') return TT.fmtTimeCell(entry, timeSeparator);
           if (key === 'mode') return TT.encodeTagsCell(entry.tags);
-          if (key === 'project') return entry.project ? TT.encodeCell(vaultProjectCell(entry.project, projects)) : '';
+          if (key === 'project') return entry.project ? vaultProjectCell(entry.project, projects) : '';
           if (key === 'task') return TT.encodeTaskCell({ label: entry.label, note: entry.note });
           if (key === 'bill') return entry.billable ? BILL_YES : '';
           // a vocabulary column TT has no model field for — re-emitted verbatim from the raw
@@ -1701,8 +1780,9 @@ function readCatalogFlag(cell) {
 const writeCatalogFlag = (on) => (on ? CATALOG_CHECK : '');
 /**
  * The Projects table's `Note` column — `Project.vaultNote`, the note this project is written as
- * in a daily-note `Project` cell (SB-059). The brackets are composed and stripped HERE, the same
- * way `vaultProjectCell` does it, because the field holds the note NAME without them.
+ * in a daily-note `Project` cell (SB-059). It goes through `encodeWikilink` / `readWikilink`, the
+ * SAME composition the daily-note `Project` cell uses (SB-122), because the field holds the note
+ * NAME without them and the two sides must emit identical bytes for identical names.
  *
  * A BARE value (no brackets) is honoured as the note name rather than refused, and re-emitted in
  * canonical `[[…]]` form. Refusing would freeze the whole catalog — and with it every rate — over
@@ -1712,11 +1792,11 @@ const writeCatalogFlag = (on) => (on ? CATALOG_CHECK : '');
  */
 function readCatalogNote(cell) {
   if (cell === '') return undefined;
-  const m = WIKILINK_RE.exec(cell);
-  return TT.decodeCell(m ? m[1] : cell);
+  const note = readWikilink(cell);
+  return note === null ? TT.decodeCell(cell) : note;
 }
 /** @param {string | undefined} note @returns {string} */
-const writeCatalogNote = (note) => (note ? '[[' + TT.encodeCell(note) + ']]' : '');
+const writeCatalogNote = (note) => (note ? encodeWikilink(note) : '');
 
 /** @type {Record<string, import('./types.ts').VaultCatalogSectionName>} */
 const CATALOG_SECTION_NAMES = { clients: 'clients', projects: 'projects', tasks: 'tasks', settings: 'settings' };
@@ -2627,6 +2707,19 @@ function migrateV1(state) {
   // intentionally NOT mapped; the project owns billable now — admin re-marks nb projects).
   state.tasks = state.tasks.map((task) => ({ id: task.id, label: task._name, project: task.project }));
 }
+// The NAME cell of a catalog row — the client/project/task display name that sits in cell 1,
+// next to the id in cell 0. One reader for all three sections, because `parts[1] || parts[0]`
+// was written out three times and they must agree.
+//
+// PRESENT-BUT-EMPTY vs ABSENT (SB-107, ruled 2026-07-26). `||` conflated them, so an empty name
+// came back as its own id: `- fjellheim |  | round exact` parsed to `name: 'fjellheim'`, and
+// serialize→parse was not idempotent for a value the write edge accepts. An empty name is a LEGAL
+// STORED VALUE — SB-075 trims `'   '` to `''` at the write edge, which is exactly what made this
+// reachable — so an empty cell reads back as `''`. The id fallback survives for the case it was
+// actually for: a row with NO name cell at all (`- fjellheim`), which a hand-edited or pre-v2
+// mirror can carry and where there is no stored value to preserve.
+/** @param {string[]} parts trimmed, still-escaped cells @returns {string} */
+const nameCell = (parts) => TT.decodeCell(parts[1] === undefined ? parts[0] : parts[1]);
 TT.parseMd = function (md) {
   /** @type {import('./types.ts').CommitSegment[]} */
   const commits = [];
@@ -2677,7 +2770,7 @@ TT.parseMd = function (md) {
       /** @type {Client} */
       const client = {
         id: TT.decodeCell(parts[0]),
-        name: TT.decodeCell(parts[1] || parts[0]),
+        name: nameCell(parts),
         rounding: 'exact',
         rate: null,
         archived: false,
@@ -2694,7 +2787,7 @@ TT.parseMd = function (md) {
       /** @type {Project} */
       const project = {
         code: TT.decodeCell(parts[0]),
-        name: TT.decodeCell(parts[1] || parts[0]),
+        name: nameCell(parts),
         clientId: null,
         rate: null,
         billable: true,
@@ -2714,7 +2807,7 @@ TT.parseMd = function (md) {
     } else if (section === 'tasks') {
       const project = parts[2] && parts[2] !== '—' ? TT.decodeCell(parts[2]) : null;
       const id = TT.decodeCell(parts[0]),
-        label = TT.decodeCell(parts[1] || parts[0]);
+        label = nameCell(parts);
       if (version >= 2) {
         state.tasks.push({ id, label, project });
       } else {
