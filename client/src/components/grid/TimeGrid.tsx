@@ -112,9 +112,13 @@ export function TimeGrid({ date, entries, state, ui, compact }: TimeGridProps) {
       {locked && (
         <div className={styles.lockedBanner}>
           {preVault ? (
-            // No chip: nothing was committed, and DD-017 §4 rules the words. It says what is
-            // true — these hours predate the vault — and promises nothing about phase 3.
-            <span className={styles.lockedHint}>{TT.t('before your vault · read-only')}</span>
+            // No chip, because nothing was ever committed here — and no second copy of the ruled
+            // sentence either. `before your vault · read-only` is said ONCE, by the week (DD-017
+            // §3), and a pre-vault day is only ever on screen underneath that line: the Week view
+            // is the one multi-day surface, and it renders the line when ANY of its days
+            // qualifies. Repeating it per day put the same sentence on screen seven times, which
+            // is what looking at it showed. So the day marks itself and lets the week explain.
+            <span className={styles.lockedHint}>{TT.t('read-only')}</span>
           ) : (
             <>
               <Chip tone={lockedByAdmin ? 'accent' : 'green'} mono={true}>

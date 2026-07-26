@@ -232,6 +232,19 @@
   line-height: 1.55;
   color: var(--text-2);
 }
+/* SB-102 / DD-017 §3: the one line a week from before the vault says about itself. NOT the
+   orange capabilityOff box above it, and the difference is the whole point — nothing here is
+   off, stopped, or waiting on phase 3. These hours simply predate the vault and are held as they
+   are, which is a statement of fact and reads as one: the mono metadata voice the segment chips
+   already use, one hairline rule, no tint. */
+.vaultMark {
+  margin: -8px 0 16px;
+  padding: 5px 0 0;
+  border-top: 1px solid var(--border);
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-3);
+}
 .notFound {
   color: var(--text-3);
   font-size: 12.5px;

@@ -54,6 +54,26 @@ export function WeekView({ state, ui }: ViewProps) {
   // `state.shape` is absent on an older server; shapeCapabilities resolves that to the
   // sqlite row, so this reads `committing: true` and nothing changes.
   const committingOff = TT.shapeOffReason('committing', state.shape);
+  // SB-102 / DD-017 §3. Two rules, and both of them are about not claiming something untrue.
+  const ctx = { shape: state.shape, vaultCutover: state.settings.vaultCutover, commits: state.commits };
+  // CASE A, which DD-017's mock does not cover: the cutover is stamped at an instant, so exactly
+  // one week in an install's life holds days on both sides of it. The line renders when ANY day
+  // of the week is from before the vault, because its stated job is to explain the locked grid
+  // beneath it — and that grid genuinely is locked for those days. It claims nothing about the
+  // editable ones that their own unlocked, add-row-bearing grid does not already contradict, and
+  // the per-day truth is the grid's own banner (TimeGrid), which has always been per-day.
+  const preVaultWeek = days.some((day) => TT.preCutover(day, ctx));
+  // An `open` chip means "you may commit this", which is false when committing is off — so under
+  // `personal` a segment only gets a chip when it has something true to say, which is that it is
+  // frozen. CASE B, also not covered by the mock: a `personal → team → personal` round trip keeps
+  // its original stamp (DD-016), so a frozen segment can sit in a week that is entirely after the
+  // cutover. It still shows its chip. The alternative is enforcing the lock invisibly, and
+  // SB-056's ruling ("a shipped feature must not vanish silently") points the same way. This is
+  // the conservative direction — more marking, never less — and it is one condition, so it is
+  // cheap for Terje to rule the other way. Filed as a ticket rather than treated as settled.
+  //
+  // Under `team`, `committingOff` is null and this is every segment, unchanged.
+  const chips = segments.filter((segment) => !committingOff || committed.has(segment.key) || approved.has(segment.key));
   return (
     <div className={vs.page}>
       <div className={[vs.headerRow, vs.baseline].join(' ')}>
@@ -75,44 +95,59 @@ export function WeekView({ state, ui }: ViewProps) {
           </Button>
         </span>
       </div>
-      <div className={vs.segChipRow}>
-        {segments.map((segment) => {
-          const isCommitted = committed.has(segment.key);
-          const isLocked = approved.has(segment.key);
-          return (
-            <div key={segment.key} className={vs.segChip} data-committed={isCommitted} data-locked={isLocked}>
-              <StatusDot
-                state={isCommitted ? 'solid' : 'outline'}
-                color={isLocked ? 'var(--accent)' : isCommitted ? 'var(--green)' : 'var(--text-4)'}
-                size={7}
-              />
-              <span className={vs.segRange}>{segRange(segment.dates)}</span>
-              <Chip tone={isLocked ? 'accent' : isCommitted ? 'green' : 'neutral'} mono={true}>
-                {isLocked ? TT.t('locked') : isCommitted ? TT.t('committed') : TT.t('open')}
-              </Chip>
-              {isLocked ? (
-                // Approved by an admin: no reopen verb — the segment is theirs to release now.
-                // This note survives under `vault` even though the VERB does not: the capability
-                // gate removes what you cannot do, never the explanation of the state you are
-                // in, and "locked, and here is who locked it" is the second kind.
-                <span className={vs.segLockedNote}>{TT.t('approved by admin')}</span>
-              ) : committingOff ? null : (
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => (isCommitted ? ui.uncommitSegment(segment.key) : ui.commitSegment(segment.key))}
-                >
-                  {isCommitted ? TT.t('reopen') : TT.t('commit')}
-                </Button>
-              )}
-            </div>
-          );
-        })}
-      </div>
-      {/* One line, where the verb was, saying why it is gone. Deliberately not a disabled
-          button: a control you cannot press and which does not explain itself is the "reads as
-          a bug months later" failure, not a fix for it. */}
-      {committingOff && <div className={vs.capabilityOff}>{TT.t(committingOff)}</div>}
+      {/* Rendered only when it has something to say — no empty row, no reserved space. Under
+          `team` `chips` is every segment, so the row is always here exactly as it was. */}
+      {chips.length > 0 && (
+        <div className={vs.segChipRow} data-tt="week-seg-row">
+          {chips.map((segment) => {
+            const isCommitted = committed.has(segment.key);
+            const isLocked = approved.has(segment.key);
+            return (
+              <div key={segment.key} className={vs.segChip} data-committed={isCommitted} data-locked={isLocked}>
+                <StatusDot
+                  state={isCommitted ? 'solid' : 'outline'}
+                  color={isLocked ? 'var(--accent)' : isCommitted ? 'var(--green)' : 'var(--text-4)'}
+                  size={7}
+                />
+                <span className={vs.segRange}>{segRange(segment.dates)}</span>
+                <Chip tone={isLocked ? 'accent' : isCommitted ? 'green' : 'neutral'} mono={true}>
+                  {isLocked ? TT.t('locked') : isCommitted ? TT.t('committed') : TT.t('open')}
+                </Chip>
+                {isLocked ? (
+                  // Approved by an admin: no reopen verb — the segment is theirs to release now.
+                  // This note survives under `vault` even though the VERB does not: the capability
+                  // gate removes what you cannot do, never the explanation of the state you are
+                  // in, and "locked, and here is who locked it" is the second kind.
+                  <span className={vs.segLockedNote}>{TT.t('approved by admin')}</span>
+                ) : committingOff ? null : (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => (isCommitted ? ui.uncommitSegment(segment.key) : ui.commitSegment(segment.key))}
+                  >
+                    {isCommitted ? TT.t('reopen') : TT.t('commit')}
+                  </Button>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+      {/* DD-017 §3: the standing `capabilityOff` line that used to sit here — on EVERY week,
+          forever — is gone. "Committing is off and why" now lives in exactly the two homes DD-017
+          names: the vault section of Settings (VaultSection.tsx) and the startup banner
+          (server/src/index.js). Both were verified present before this third copy was deleted;
+          deleting it is only safe while they exist. ReviewView keeps its own, which is SB-098's
+          surface and out of scope here.
+
+          What replaces it is narrower and only appears when it is true: a week that predates the
+          vault says so once, and that line explains the locked grid below rather than a missing
+          button. */}
+      {preVaultWeek && (
+        <div className={vs.vaultMark} data-tt="week-pre-vault">
+          {TT.t('before your vault · read-only')}
+        </div>
+      )}
       {days.map((day) => {
         const entries = entriesOn(state, day);
         if (!entries.length && day !== today && TT.parseDate(day) > new Date()) return null;
