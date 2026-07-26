@@ -293,6 +293,32 @@ describe('catalog note — Clients and Projects (SB-058 task 1)', () => {
       }
     });
 
+    it('an unknown section name is REFUSED, not thrown (SB-124)', () => {
+      // The untrusted-input direction the TypeScript union does not defend. `server/src/` is plain
+      // JS and SB-057's sync engine feeds this function names taken off real notes, so the name
+      // arrives as whatever a human typed — and a throw there is a crash on the boot scan instead
+      // of a quarantine a human can read. Called from JS with a name derived from a PARSED note
+      // rather than a literal, which is the shape that actually reaches it.
+      const note = noteWith(region('clients', [FJELLHEIM]));
+      const parsed = TT.parseVaultCatalogSection(note, 'clients');
+      expect(parsed.quarantine).toBe(false);
+      // A section key derived from the NOTE — the heading as written — rather than typed as a
+      // literal. `Clients` is not `clients`, and a caller reading section names off a note has no
+      // reason to know that. Before SB-124 this reached `spec.heading` on `undefined` and threw.
+      const fromTheNote = parsed.heading;
+      expect(fromTheNote).toBe('Clients');
+      const res = TT.parseVaultCatalogSection(note, fromTheNote);
+      expect(res.quarantine).toBe(true);
+      expect(res.reason).toBe('catalog-unknown-section');
+      expect(res.section).toBe(fromTheNote); // it names what it could not resolve
+      // a few more shapes an untrusted name really takes, none of which may throw
+      for (const bad of ['', 'Projects', 'entries', 'tidslogg', '__proto__'])
+        expect(TT.parseVaultCatalogSection(note, bad).reason).toBe('catalog-unknown-section');
+      // and the four valid sections are the control — the refusal must not have widened
+      for (const section of ['clients', 'projects', 'tasks', 'settings'])
+        expect(TT.parseVaultCatalogSection(noteWith(region(section, [])), section).quarantine).toBe(false);
+    });
+
     it('covers every catalog-only quarantine reason the codec can produce', () => {
       // The same guard tests/roundtrip.test.js keeps over the BLOCK half of the union, here over
       // the catalog half — a new reason added without a refusal golden beside it fails.
@@ -306,7 +332,7 @@ describe('catalog note — Clients and Projects (SB-058 task 1)', () => {
       const reasons = [...union[1].matchAll(/\|\s*'([a-z-]+)'/g)].map((m) => m[1]);
       // Pinned, like the block guard it mirrors: `toBeGreaterThan(0)` would let coverage shrink
       // silently if the scrape ever under-matched.
-      expect(reasons.length).toBe(6);
+      expect(reasons.length).toBe(7);
       const core = readFileSync(new URL('../shared/core.js', import.meta.url), 'utf8');
       // A golden is either a row of the section-level table above or an assertion anywhere else
       // in this file — the whole-note reasons (a revision disagreement, a dangling client) can

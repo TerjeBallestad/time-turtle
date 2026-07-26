@@ -354,6 +354,12 @@ export interface AppState extends Catalog {
   shape?: Shape;
   /** DC-002: TT_SHAPE_LOCK is set, so the shape is env-only and read-only in the UI. */
   shapeLocked?: boolean;
+  /**
+   * SB-057: the daily notes TT has stopped writing to. Additive and read-only, the same shape
+   * `mirrorBlocked` takes and for the identical reason — a note that silently stops syncing still
+   * looks current. Always present (an empty array under `team`, which has no vault).
+   */
+  vaultQuarantined?: VaultQuarantinedNote[];
 }
 
 /**
@@ -384,6 +390,29 @@ export interface MirrorBlock {
   userId?: number;
   /** SB-095: the display name for `userId`, so the admin surface need not join against /api/users. */
   userName?: string;
+}
+
+/**
+ * SB-057 task 8: a daily note Time Turtle has stopped writing to, carried on `GET /api/state` and
+ * on every save response — modelled on `MirrorBlock`, which is the shape this repo already proved.
+ *
+ * STICKY SERVER STATE, NOT A TOAST, and for the reason SB-065 already paid for once: a writer that
+ * quietly ceases to write leaves the file drifting while it still LOOKS current. Under `personal`
+ * it is worse, because the vault IS the storage — a silently quarantined day is a day whose hours
+ * stop syncing with no signal anywhere.
+ *
+ * There is deliberately NO resolution action. SB-103 (`[grill]`) owns what a human can DO about a
+ * quarantine, and all three of its options are additive on top of this.
+ */
+export interface VaultQuarantinedNote {
+  /** absolute path of the note TT declined to write */
+  path: string;
+  /** the note's calendar date, `YYYY-MM-DD` */
+  date: string;
+  /** a `VaultQuarantineReason` or `VaultArbitrationReason` — rendered through `TT.vaultQuarantineText` */
+  reason: string;
+  /** when this note FIRST quarantined; sticky, so it does not look new on every scan pass */
+  detectedAt: string | null;
 }
 
 // ---- vault block (SB-055 / SB-045) ----
@@ -507,7 +536,16 @@ export type VaultCatalogQuarantineReason =
    * sections always carry the same N — a disagreement means a merge or a partial hand edit, and
    * it is refused rather than reconciled to the maximum. See SB-104.
    */
-  | 'catalog-revision-mismatch';
+  | 'catalog-revision-mismatch'
+  /**
+   * SB-124: the section name handed to `TT.parseVaultCatalogSection` is not one of the four. A
+   * refusal rather than a throw, because every neighbouring vault codec refuses and says why
+   * (SB-083) — and because TypeScript's union guards only the TS callers. `server/src/` is plain
+   * JS, and SB-057's sync engine feeds this function names derived from real notes, which is the
+   * one direction the type system does not defend. Not producible through the app: nothing a
+   * human can type into a catalog reaches it, which is why its golden is a direct call.
+   */
+  | 'catalog-unknown-section';
 
 /**
  * Every refusal TT's vault codecs can produce — what a boot scan records and surfaces, and the
@@ -671,6 +709,114 @@ export interface VaultCatalogWriteResult {
   section: VaultCatalogSectionName | null;
 }
 
+// ---- the vault index (SB-057) ----
+/**
+ * What TT last read from, and last wrote to, one daily note. One row per PATH, held in SQLite —
+ * see the `vault_index` DDL in server/src/db.js for the full argument, including what this table
+ * is deliberately NOT (a corruption detector: DD-009 put that on the note itself).
+ *
+ * `known` is the only state that licenses a write (design decision 2). `unknown` covers a file
+ * TT could not read, a read that timed out, and a day left lazy because it is iCloud-dataless —
+ * all of which mean "TT has not confirmed reading this day", which is exactly what makes writing
+ * to it forbidden.
+ */
+export type VaultIndexState = 'known' | 'unknown' | 'quarantined';
+
+export interface VaultIndexRow {
+  /** absolute path of the daily note */
+  path: string;
+  /** the note's calendar date, `YYYY-MM-DD` */
+  date: string;
+  state: VaultIndexState;
+  /** the block's revision counter as TT last saw it, or null when TT has never parsed it */
+  rev: number | null;
+  /** `TT.vaultPayloadDigest` over that revision's payload — the anchor's own hash, never a second one */
+  payloadDigest: string | null;
+  /**
+   * The revision BEFORE `rev`, and its payload digest. Set only by `putVaultIndex`, rolled
+   * forward from the current pair, and never readable off a caller's argument. This pair is the
+   * whole reason the table exists: it is what tells "a peer that is one revision behind" from
+   * "somebody restored this note from git" (design decision 5).
+   */
+  prevRev: number | null;
+  prevPayloadDigest: string | null;
+  /** sha256 over the WHOLE FILE — "did this file change at all", never the arbitration input */
+  fileSha: string | null;
+  /** the block's DD-009 digest was present and matched; null when TT has not parsed the file */
+  verified: boolean | null;
+  quarantineReason: VaultQuarantineReason | VaultArbitrationReason | null;
+  /**
+   * When this path FIRST quarantined — sticky, and set only by `putVaultIndex`. `seenAt` moves on
+   * every scan pass including the cheap skip, so it answers "when did TT last look", which is a
+   * different question from the one the surface asks ("since when has this note been stuck").
+   */
+  quarantinedAt?: string | null;
+  /** when TT last looked at this path */
+  seenAt: string | null;
+  /** when TT last WROTE this path — the echo guard's other half */
+  writtenAt: string | null;
+}
+
+/**
+ * The two refusals the ARBITRATION can produce, as opposed to the codec (`VaultQuarantineReason`).
+ * Deliberately a separate union: every member of the codec's unions has a refusal golden over a
+ * note in tests/roundtrip.test.js or tests/catalog.test.js, and neither of these is producible by
+ * a codec at all — they are verdicts about a file's revision compared against TT's own record, and
+ * no note can be written that provokes one on its own.
+ *
+ * Both mean the same thing to a human: TT has stopped writing to this note and will not overwrite
+ * what is in it.
+ */
+export type VaultArbitrationReason =
+  /**
+   * The file went BACK to a revision TT recorded, carrying content TT did not write at that
+   * revision. SB-061's case: the deliberate `git restore` from the vault's checkpoint history, or
+   * another editor rewriting the block. Rewriting from the index here would silently undo the one
+   * recovery gesture that history exists to provide.
+   */
+  | 'external-rewrite'
+  /**
+   * The file's revision is LOWER than the index's and TT has no record of it — the regression is
+   * more than one revision back, or the index was rebuilt. Staleness cannot be PROVEN, and
+   * defaulting to a rewrite when it cannot be proven is the same silent undo as `external-rewrite`
+   * with less evidence behind it.
+   */
+  | 'unprovable-staleness';
+
+/** What the arbitration was told about the file on disk. Pure data — see server/src/vault-arbitrate.js. */
+export interface VaultArbitrationInput {
+  file: {
+    /** false for absent, unreadable, or a read that timed out — all three mean `unknown` */
+    readable: boolean;
+    /** whole-file sha256, or null when TT could not read it. The cheap "did anything change" test. */
+    sha: string | null;
+    /**
+     * `TT.vaultPayloadDigest` over the block's payload lines — the hash the bottom anchor carries.
+     * Never the whole-file sha (design decision 3): that one moves when Terje edits `## Captures`.
+     */
+    payloadDigest: string | null;
+    /** `TT.parseVaultBlock`'s result, or null when there is nothing to parse */
+    parse: VaultBlockParseResult | null;
+  } | null;
+  /** the `vault_index` row for this path, or null when TT has never recorded one */
+  index: VaultIndexRow | null;
+}
+
+/**
+ * What TT should do about one daily note.
+ *
+ * `skip` nothing changed · `unknown` TT could not read it, so it may not write it either ·
+ * `import` take the file's rows into the index · `import-and-rewrite` take them AND write the
+ * block back at `rev` · `rewrite-from-index` the file is provably behind, write TT's copy over it ·
+ * `quarantine` leave the file completely alone and surface the reason.
+ */
+export interface VaultArbitrationVerdict {
+  verdict: 'skip' | 'import' | 'import-and-rewrite' | 'rewrite-from-index' | 'quarantine' | 'unknown';
+  reason?: VaultQuarantineReason | VaultArbitrationReason;
+  /** the revision the resulting index row (and any write) should carry */
+  rev?: number;
+}
+
 // ---- parsed time cell (discriminated union) ----
 export type ParsedTime =
   | { kind: 'range'; start: number; end: number }
@@ -729,6 +875,11 @@ export interface PutStateResponse {
    * still succeeded; only the mirror declined.
    */
   mirrorBlocked?: MirrorBlock | null;
+  /**
+   * SB-057: on the PUT response too, so the save that TRIPS a quarantine is the moment the client
+   * learns about it — exactly what SB-085 established for `mirrorBlocked`, for the same reason.
+   */
+  vaultQuarantined?: VaultQuarantinedNote[];
 }
 
 /**
@@ -894,6 +1045,21 @@ export interface TTModule {
    * the server's 403 body and the client's on-screen explanation cannot drift.
    */
   shapeOffReason(capability: keyof ShapeCapabilities, shape?: string | null): string | null;
+  /** SB-057: the headline every quarantine opens with. One home, so server and screen agree. */
+  VAULT_QUARANTINE_HEADLINE: string;
+  /** SB-057: the line for a reason this build does not know — rendered instead of a blank. */
+  VAULT_QUARANTINE_FALLBACK: string;
+  /** SB-057: why a note stopped syncing, as a sentence. Unknown reasons take the fallback. */
+  vaultQuarantineText(reason: string | null | undefined): string;
+  /**
+   * SB-057 / DD-016 + DD-017: is this entry the vault's? A false answer means the entry lives in
+   * SQLite and never reaches a daily note — and never triggers DD-012 adoption on its behalf.
+   * The one home of the predicate; SB-102 consumes this rather than adding a second copy.
+   */
+  vaultBound(
+    entry: Entry,
+    context: { shape?: string | null; vaultCutover?: string | null; commits?: CommitSegment[] },
+  ): boolean;
   nowMin(): number;
   isRunning(entry: Entry): boolean;
   entryMinutes(entry: Entry): number;

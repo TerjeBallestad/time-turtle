@@ -37,8 +37,10 @@
 // contract "atomic against the index"; what a vault write does inside one is SB-057's to
 // define. That hole is NAMED, not forgotten.
 
-import { activeCapabilities } from './backend.js';
+import { activeCapabilities, activeBackend } from './backend.js';
 import { writeMirror, retireMirrors } from './markdown.js';
+import { getEntries as storedEntries, putEntries as putStoredEntries, afterCommit } from './db.js';
+import { writeVaultEntries } from './vault-write.js';
 
 export {
   // settings
@@ -56,14 +58,26 @@ export {
   // per-user task templates (SDD-002)
   getTasks,
   putTasks,
-  // entries
+  // entries. `getEntries` stays a straight re-export under BOTH shapes: DD-006's "SQLite is the
+  // derived index" is the architecture, so reading the index IS reading the vault, provided the
+  // sync engine keeps it in step. A filesystem read on every GET /api/state would re-read 85 notes
+  // to answer a request the index answers in a millisecond, and would make `getEntries` a call
+  // that can fail. `putEntries` is the one that fans out — see below.
   getEntries,
-  putEntries,
   // every user's entries, for the admin team report (server-side aggregation only)
   getAllEntries,
   // the per-user commit ledger (SDD-002 ruling 4)
   getCommits,
   putCommits,
+  // SB-057: the vault index — what TT last read from, and last wrote to, each daily note. On the
+  // seam because it IS storage state: under `personal` it is the bookkeeping that keeps DD-006's
+  // "SQLite is the derived index" honest, and this file's header names SB-057 as the ticket that
+  // fills the hole. See the `vault_index` DDL in db.js for what it is and is not.
+  getVaultIndex,
+  getVaultIndexByDate,
+  listVaultIndex,
+  putVaultIndex,
+  deleteVaultIndex,
   // DC-001 optimistic-concurrency counters
   getVersions,
   bumpCatalogVersion,
@@ -77,6 +91,41 @@ export {
   // atomicity
   transaction,
 } from './db.js';
+
+// ---- the per-date fan-out, the OTHER half of DD-006's derived index (SB-057) ----
+//
+// The seam this file's header named and left empty. Under `vault`, a save writes SQLite exactly as
+// it always did — the index is still the read path — and THEN fans out to the daily notes the save
+// is entitled to touch. Under `sqlite` this is byte-for-byte the old `db.putEntries` and there is
+// no branch anyone can forget, which is the same argument `mirror` above makes for DD-011.
+//
+// THE `before` SNAPSHOT IS TAKEN HERE and nowhere else, because here is the last moment it exists:
+// `db.putEntries` is DELETE-all-then-insert. The writer needs it for the deletion half of the
+// write scope rule — "this date HAD entries, TT has read its file, and it is now absent from the
+// PUT" is a real deletion, and it is only distinguishable from "TT has never seen Tuesday" while
+// the old set is still readable.
+//
+// AND IT RUNS AFTER THE COMMIT, NOT INSIDE IT — `afterCommit`, not a bare call. This route is
+// called from inside `store.transaction(...)` and the transaction CONTINUES afterwards, so a bare
+// call would fsync daily notes (and, once SB-068 lands, take a git checkpoint over the whole vault)
+// while nothing had committed. A throw later in the same transaction would then roll SQLite back
+// and leave the vault describing entries the index no longer holds — the one direction DD-006's
+// "SQLite is the derived index" cannot survive. See `afterCommit` in db.js for the full argument;
+// outside a transaction it just runs.
+//
+// The fan-out never throws on its own account either (see vault-write.js): a note that will not
+// write is a note that has stopped syncing, never a failed save. Same posture SB-065 chose for the
+// mirror, which occupies exactly this position in the sequence for exactly this reason.
+/** @param {number} userId @param {import('../../shared/types.ts').Entry[]} entries */
+export function putEntries(userId, entries) {
+  if (activeBackend() !== 'vault') {
+    putStoredEntries(userId, entries);
+    return;
+  }
+  const before = storedEntries(userId);
+  putStoredEntries(userId, entries);
+  afterCommit(() => writeVaultEntries(userId, entries, before));
+}
 
 // ---- the markdown mirror, as a CAPABILITY OF THE STORE (SB-056 / DD-011) ----
 //

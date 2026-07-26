@@ -146,6 +146,103 @@ TT.shapeCapabilities = (shape) => (shape && SHAPE_CAPABILITIES[shape]) || SHAPE_
  */
 TT.backendFor = (shape) => (shape && SHAPE_BACKEND[shape]) || SHAPE_BACKEND.team;
 
+// ---- why a note stopped syncing, in words a person can act on (SB-057 task 8) ----
+//
+// THE FRAME, and it is the whole point: *Time Turtle cannot prove it wrote this block, so it has
+// stopped writing to this note.* It never says the hours were corrupted, because two of the
+// commonest reasons are not damage at all:
+//
+//   • `verified: false` on an ADOPTED note is not damage (SB-091 rider 3). The adopted anchor
+//     deliberately carries no digest — one computed at adoption time would be taken over the very
+//     bytes it is meant to check.
+//   • `digest-mismatch` after Obsidian's table editor reflows cell padding is not damage either
+//     (SB-080's stated trade-off). The digest is over RAW LINE BYTES on purpose, so a purely
+//     cosmetic reflow trips it. The line below says "does not match" and offers the reflow as the
+//     first explanation, in that order, because crying wolf about someone's hours is worse than
+//     being vague.
+//
+// English, because the server has no locale — the Norwegian UI translates these in
+// client/src/i18n.ts, where the CLAIM must match rather than the bytes (the SHAPE_OFF_REASONS
+// discipline). A reason the map does not know degrades to a GENERIC line rather than a blank:
+// SB-090 already moved eight goldens onto a new reason name, and a surface that renders nothing
+// for an unfamiliar code is a note that silently stops syncing — which is the failure this whole
+// task exists to prevent. Catalog-only reasons are deliberately absent and take the fallback: no
+// daily-note row can carry one until the catalog is wired to the engine.
+/** @type {Record<string, string>} */
+const VAULT_QUARANTINE_REASONS = {
+  'no-heading': 'the Time Log heading is not in this note.',
+  'crlf-line-endings': 'this note uses Windows line endings, which Time Turtle will not rewrite.',
+  'multiple-headings': 'this note has more than one Time Log heading, so nothing can say which is the day’s.',
+  'no-revision': 'the block has no revision line, and its contents are not ones Time Turtle can describe.',
+  'malformed-revision': 'the revision line is there but Time Turtle cannot read it — its short fingerprint is damaged.',
+  'revision-past-next-heading':
+    'the revision line sits in a later section, so the block has no end Time Turtle trusts.',
+  'multiple-revisions': 'the block has more than one revision line.',
+  'no-table': 'there is no table under the heading.',
+  'unexpected-content-in-block': 'there is something under the heading that is not part of the table.',
+  'digest-mismatch':
+    'the block’s fingerprint does not match the table it labels. Often this is only a table editor reflowing the spacing; it can also mean another machine’s edit was merged in.',
+  'unknown-header': 'the table has a column Time Turtle does not know.',
+  'duplicate-header': 'the table has the same column twice.',
+  'row-cell-count': 'a row has a different number of cells than the header.',
+  'unparseable-time': 'a Time cell is not one Time Turtle can read.',
+  'bad-bill-cell': 'a Bill cell is neither a check mark nor blank, and that cell decides money.',
+  'write-would-corrupt': 'what Time Turtle would write here is something it could not read back.',
+  // the two arbitration verdicts (server/src/vault-arbitrate.js)
+  'external-rewrite':
+    'this note went back to an earlier revision with contents Time Turtle did not write — a restore from history, or another editor.',
+  'unprovable-staleness':
+    'this note’s revision is older than the one Time Turtle recorded, and Time Turtle has no record of it — so it cannot tell an out-of-date copy from a deliberate restore.',
+};
+/** The line every quarantine opens with. One home, so the server and the screen cannot drift. */
+TT.VAULT_QUARANTINE_HEADLINE = 'Time Turtle cannot prove it wrote this block, so it has stopped writing to this note.';
+/** The generic line for a reason this build does not know — never a blank. */
+TT.VAULT_QUARANTINE_FALLBACK = 'Time Turtle refused this note and did not say why in words this version knows.';
+/**
+ * Why this note stopped syncing, as a sentence. Never throws and never returns an empty string:
+ * an unknown reason takes the generic line.
+ * @param {string | null | undefined} reason @returns {string}
+ */
+TT.vaultQuarantineText = (reason) => (reason && VAULT_QUARANTINE_REASONS[reason]) || TT.VAULT_QUARANTINE_FALLBACK;
+
+/**
+ * IS THIS ENTRY THE VAULT'S? — DD-016 + DD-017, and SB-100 hands it to SB-057 by name.
+ *
+ * A non-vault-bound entry is written to SQLite and NEVER to a daily note, and never triggers
+ * DD-012 adoption on its behalf. Three conditions, and each one closes a specific hazard:
+ *
+ *   1. THE SHAPE. Only `personal` has a vault at all.
+ *   2. THE CUTOVER (DD-016). `TT.seedMd()` dates its demo entries relative to FIRST BOOT — `T`,
+ *      `T-1`, `T-2`, `T-7`, `T-8`, `T-9` (see the seed below) — so without this a fresh personal
+ *      install ADOPTS six of Terje's real daily notes and writes Fjellheim AS demo hours into
+ *      them. The cutover is stored as an ISO instant and compared day-grained, because
+ *      `Entry.date` is a day; `stampVaultCutover` stores the finer value precisely so this can
+ *      choose, and `''` (never stamped) means no history is excluded.
+ *   3. THE LEDGER (DD-017). `TT.weekSegments` cuts on (ISO week ∩ month) and NEVER on a date, so
+ *      committing the current week and then switching mid-week leaves a frozen money snapshot
+ *      astride the cutover. A committed segment stays whole: not one of its days reaches a note.
+ *
+ * ONE HOME, deliberately. SB-102 wants the same predicate; whoever lands first writes it and the
+ * second consumes it. A second copy is a rule that agrees today and diverges on the first ruling.
+ *
+ * SKIPPED, NOT REFUSED, at the call site: `useServerSync` re-queues any non-409 failure and
+ * retries every 4 s forever, so turning this into a 403 would be a permanent toast loop for
+ * anyone with pre-cutover history.
+ * @param {Entry} entry
+ * @param {{ shape?: string | null, vaultCutover?: string | null, commits?: import('./types.ts').CommitSegment[] }} context
+ * @returns {boolean}
+ */
+TT.vaultBound = function (entry, context) {
+  const ctx = context || {};
+  if (ctx.shape !== 'personal') return false;
+  if (!entry || typeof entry.date !== 'string') return false;
+  const cutoverDay = String(ctx.vaultCutover || '').slice(0, 10);
+  if (cutoverDay && entry.date < cutoverDay) return false;
+  const key = TT.segmentKey(entry.date);
+  for (const segment of ctx.commits || []) if (segment && segment.key === key) return false;
+  return true;
+};
+
 /**
  * Where inside the vault TT reads and writes, when nothing has been chosen. HERE, not in
  * server/src/db.js and not in the client's fallback, because SB-057/SB-058 extend this shape
@@ -2017,7 +2114,22 @@ TT.serializeVaultCatalogSection = function (section, rows, opts) {
  * @returns {import('./types.ts').VaultCatalogSectionResult}
  */
 TT.parseVaultCatalogSection = function (md, section) {
-  const spec = CATALOG_SECTIONS[section];
+  // `hasOwnProperty`, not a truthiness test on the lookup: `CATALOG_SECTIONS['__proto__']` resolves
+  // to `Object.prototype`, which is TRUTHY and has no `heading` — so a bare `if (!spec)` would let
+  // that one name through to report `no-heading` about a section that does not exist. An untrusted
+  // string really does take that shape, which is the whole reason this check is here.
+  const spec = Object.prototype.hasOwnProperty.call(CATALOG_SECTIONS, section) ? CATALOG_SECTIONS[section] : null;
+  // SB-124: REFUSE, DO NOT THROW. Every other vault codec here is documented as never throwing —
+  // it returns a verdict, because SB-083's posture is "TT refuses, but it says why" and a refusal
+  // a caller can inspect is the mechanism that makes that true. A throw is not a refusal: it skips
+  // the quarantine reporting entirely and hands a human a stack trace, or a dead boot scan, instead
+  // of a line explaining what TT could not read.
+  //
+  // The TYPE guards TypeScript callers and stays — but `server/src/` is plain JS, and SB-057's sync
+  // engine is the first caller that hands this function a section name derived from a note a HUMAN
+  // typed rather than a typed literal. That is exactly the untrusted-input direction the type
+  // system does not defend. Before this, an unknown name reached `spec.heading` on `undefined`.
+  if (!spec) return { quarantine: true, reason: 'catalog-unknown-section', section };
   const loc = TT.locateVaultBlock(md, { heading: spec.heading });
   // propagated UNCHANGED, plus the section name — the locator owns its reasons, and a shared
   // reason like 'no-heading' only becomes actionable once you know WHICH heading

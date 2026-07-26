@@ -2,7 +2,7 @@ import React from 'react';
 import TT from '../../i18n';
 import { SectionLabel, SegToggle, Select, Input } from '../../ds';
 import st from './settings.module.css';
-import type { AppState, Shape, VaultPaths, VaultTimeSeparator } from '../../../../shared/types';
+import type { AppState, Shape, VaultPaths, VaultQuarantinedNote, VaultTimeSeparator } from '../../../../shared/types';
 import type { UiActions } from '../../types';
 
 interface SettingsProps {
@@ -69,6 +69,58 @@ function PathRow({
   );
 }
 
+/** An ISO instant as a local `Sun 26 Jul 13:07`. MirrorDirRow's formatter, same reason: stamps are UTC. */
+function whenLocal(iso: string): string {
+  const at = new Date(iso);
+  if (Number.isNaN(at.getTime())) return iso;
+  const hh = String(at.getHours()).padStart(2, '0');
+  const mm = String(at.getMinutes()).padStart(2, '0');
+  return TT.fmtDayShort(TT.dateStr(at)) + ' ' + hh + ':' + mm;
+}
+
+/**
+ * SB-057 task 8: the daily notes Time Turtle has stopped writing to.
+ *
+ * STICKY STATE A PERSON CAN SEE, not a log line — modelled on `mirrorBlocked`, which is the shape
+ * this repo already proved (SB-065 fixed exactly this failure once for the mirror: quietly ceasing
+ * to write leaves the file drifting while it still LOOKS current). Under `personal` it is worse,
+ * because the vault IS the storage.
+ *
+ * NO ACTION BUTTON, deliberately. SB-103 (`[grill]`) owns what a human can DO about a quarantine,
+ * and all three of its options are additive on top of this. Shipping a button here would rule it.
+ *
+ * THE WORDING NEVER SAYS THE HOURS WERE CORRUPTED. Two of the commonest reasons are not damage —
+ * an adopted note's missing digest (SB-091 rider 3) and a table editor reflowing cell padding
+ * (SB-080's trade-off) — so the headline is *cannot prove it wrote this block*. The per-reason line
+ * comes from `TT.vaultQuarantineText`, which falls back to a generic sentence rather than a blank:
+ * SB-090 is open and will move reason names, and a row that renders nothing for an unfamiliar code
+ * is a note that silently stops syncing, which is the whole failure this surface exists to prevent.
+ */
+function QuarantinedNotes({ notes }: { notes: VaultQuarantinedNote[] }) {
+  if (!notes.length) return null;
+  return (
+    <div className={st.mirrorBlock} data-tt="vault-quarantined">
+      <div className={st.mirrorBlockHead}>
+        <span className={st.mirrorBlockDot}></span>
+        <span className={st.mirrorBlockTitle}>
+          {TT.t('Notes paused')} ({notes.length})
+        </span>
+      </div>
+      <div className={st.mirrorBlockBody}>{TT.t(TT.VAULT_QUARANTINE_HEADLINE)}</div>
+      {notes.map((note) => (
+        <div key={note.path} className={st.vaultQuarantineRow}>
+          <div className={st.mirrorBlockPath}>{note.path}</div>
+          <div className={st.mirrorBlockMeta}>
+            {note.date}
+            {note.detectedAt ? ' · ' + TT.t('paused') + ' ' + whenLocal(note.detectedAt) : ''}
+          </div>
+          <div className={st.mirrorBlockBody}>{TT.t(TT.vaultQuarantineText(note.reason))}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export function VaultSection({ state, ui }: SettingsProps) {
   // The EFFECTIVE shape, not the stored one: TT_SHAPE and TT_SHAPE_LOCK can both beat the
   // setting, and the toggle has to show what is actually in force.
@@ -111,7 +163,7 @@ export function VaultSection({ state, ui }: SettingsProps) {
               before SB-057 fills the vault store in. */}
           <div className={st.vaultWarn}>
             {TT.t(
-              'The personal shape is not finished: the markdown mirror is off (the files it wrote are retired), committing is off until weekly notes land, and markdown paste-back is off. Nothing syncs these paths yet.',
+              'The personal shape is not finished: the markdown mirror is off (the files it wrote are retired), committing is off until weekly notes land, and markdown paste-back is off. Daily notes DO sync — hours you log here are written into them, and edits made elsewhere are read back.',
             )}
           </div>
           <PathRow
@@ -141,6 +193,10 @@ export function VaultSection({ state, ui }: SettingsProps) {
             )}
             onCommit={(timeLogHeading) => ui.setVaultPaths({ timeLogHeading })}
           />
+          {/* Under the paths, because that is where "which files" already lives, and a paused note
+              is a fact ABOUT those files. Above the separator, because it is the one thing on this
+              screen that needs doing something about. */}
+          <QuarantinedNotes notes={state.vaultQuarantined ?? []} />
           <div className={st.mirror}>
             <div className={st.mirrorRow}>
               <span className={[st.label, st.mirrorLabel, st.vaultLabel].join(' ')}>{TT.t('Time separator')}</span>
