@@ -873,6 +873,11 @@ describe('vault block locator (SB-055)', () => {
   }
 
   // ---- near-misses on the bottom anchor: backticks are LITERAL SYNTAX (SB-045) ----
+  // Not the anchor, and not ANCHOR-SHAPED either: the inline-code span TT writes is missing,
+  // unterminated, doubled, indented or trailed by prose, or what it opens with is not
+  // `revision: <digits>`. TT cannot tell any of these from a line a human typed, so "there is no
+  // revision line here" is the honest verdict and they stay exactly where SB-045 put them.
+  // SB-090 deliberately did NOT widen `malformed-revision` to cover them: see the list below.
   const NEAR_MISSES = [
     'revision: 8', // bare — no backticks
     '`revision:8`', // no space
@@ -882,19 +887,6 @@ describe('vault block locator (SB-055)', () => {
     '  `revision: 8`', // indented (this is the code-fence shape)
     '`revision: 8` and more text', // not the whole line
     '``revision: 8``', // a double-backtick span
-    // ---- and the digest half of the anchor (DD-009) ----
-    // Each of these is a MALFORMED digest, not an absent one. Absent is legal and unverified;
-    // malformed fails the whole match, so the line stops being an anchor at all. That is the
-    // safe direction — the alternative is a near-miss silently reading as "no digest here",
-    // which is the one shape that would let a damaged block report itself merely unverified.
-    '`revision: 8 · `', // present separator, empty digest
-    '`revision: 8 · a3f`', // three hex characters
-    '`revision: 8 · a3f11`', // five
-    '`revision: 8 · zzzz`', // not hex
-    '`revision: 8 · A3F1`', // uppercase — TT writes one canonical spelling
-    '`revision: 8 a3f1`', // no separator
-    '`revision: 8 - a3f1`', // a hyphen, not U+00B7
-    '`revision: 8·a3f1`', // separator without its spaces
   ];
   for (const anchor of NEAR_MISSES) {
     it(`does NOT accept ${JSON.stringify(anchor)} as the bottom anchor`, () => {
@@ -909,6 +901,51 @@ describe('vault block locator (SB-055)', () => {
       expect(loc.reason).toBe('no-revision');
     });
   }
+
+  // ---- the digest half of the anchor (DD-009), which is a DIFFERENT refusal (SB-090) ----
+  // Each of these is a MALFORMED digest, not an absent one. Absent is legal and unverified;
+  // malformed fails the whole match, so the line stops being an anchor at all. That is the safe
+  // direction — the alternative is a near-miss silently reading as "no digest here", which is the
+  // one shape that would let a damaged block report itself merely unverified. What SB-090 changed
+  // is the REASON, not the refusal: every line here opens the canonical span `` `revision: N ``
+  // and closes it at end of line, so it is unmistakably the bottom anchor to the human reading the
+  // note, and calling it missing was a lie about a line sitting plainly on screen.
+  // ## Verified red-green: 2026-07-26 — all eight failed against the unfixed locator, reporting
+  // 'no-revision'; and the digest-absent guard below fails if the digest is ever made mandatory.
+  const MALFORMED_DIGESTS = [
+    '`revision: 8 · `', // present separator, empty digest
+    '`revision: 8 · a3f`', // three hex characters
+    '`revision: 8 · a3f11`', // five
+    '`revision: 8 · zzzz`', // not hex
+    '`revision: 8 · A3F1`', // uppercase — TT writes one canonical spelling
+    '`revision: 8 a3f1`', // no separator
+    '`revision: 8 - a3f1`', // a hyphen, not U+00B7
+    '`revision: 8·a3f1`', // separator without its spaces
+  ];
+  for (const anchor of MALFORMED_DIGESTS) {
+    it(`reports ${JSON.stringify(anchor)} as a MALFORMED revision line, not a missing one`, () => {
+      const md = HOST_NOTE.replace('`revision: 8`', anchor);
+      const loc = TT.locateVaultBlock(md);
+      expect(loc.quarantine).toBe(true);
+      // still not an anchor — nothing is read off it, and the block is not writable
+      expect(loc.revision).toBeUndefined();
+      expect(TT.writeVaultBlock(md, []).md).toBe(md);
+      expect(loc.reason).toBe('malformed-revision');
+    });
+  }
+
+  // The boundary on the other side, and the one that would break real notes if it moved: a
+  // DIGEST-LESS anchor is not malformed, it is the legitimate pre-cutover and hand-made shape
+  // (DD-009 consequence 2), and it must keep locating and parsing exactly as before. It is also
+  // the shape the malformed probe would happily match if it were ever consulted on a line
+  // REVISION_RE had already accepted — so this is the assertion that catches that reordering.
+  it('a digest-LESS anchor is untouched: it locates, it parses, it is merely unverified', () => {
+    const loc = TT.locateVaultBlock(HOST_NOTE); // HOST_NOTE's anchor is `revision: 8`, no digest
+    expect(loc.quarantine).toBe(false);
+    expect(loc.revision).toBe(8);
+    expect(loc.digest).toBe(null);
+    expect(loc.verified).toBe(false);
+  });
 
   it('a fenced example of the block format is inert — neither anchor nor hard stop', () => {
     const doc = ['# doc', '', '## Format', '', '```markdown', '## Time Log', '', '`revision: 3`', '```', ''].join('\n');
@@ -1646,6 +1683,10 @@ describe('vault block round-trip (SB-055)', () => {
       // DD-012: `OK` with its revision line deleted is an ADOPTABLE note now, not a refusal —
       // heading once, one well-formed TT table, nothing else — so it moved to the adoption
       // suite. 'no-revision' survives as a locator-only verdict; see `elsewhere` below.
+      // SB-090: the anchor is present and unreadable, which is neither "missing" nor "mismatched".
+      // Unlike 'no-revision' above, `writeVaultBlock` CAN produce this one — adoption is gated on
+      // 'no-revision' and nothing else, so a note whose anchor TT cannot read is never adopted.
+      ['malformed-revision', OK.replace('`revision: 3`', '`revision: 3 · zzzz`')],
       ['revision-past-next-heading', OK.replace('`revision: 3`\n', '').replace('- a stray thought', '`revision: 3`')],
       ['multiple-revisions', OK.replace('`revision: 3`', '`revision: 3`\n\n`revision: 4`')],
       ['no-table', OK.replace('| Time | Mode | Project | Task | Bill |\n|---|---|---|---|---|\n', '')],
@@ -1682,7 +1723,7 @@ describe('vault block round-trip (SB-055)', () => {
       const union = /export type VaultQuarantineReason =([\s\S]*?);/.exec(types);
       expect(union, 'VaultQuarantineReason union not found in shared/types.ts').toBeTruthy();
       const reasons = [...union[1].matchAll(/'([a-z-]+)'/g)].map((m) => m[1]);
-      expect(reasons.length).toBe(15);
+      expect(reasons.length).toBe(16);
       const core = readFileSync(new URL('../shared/core.js', import.meta.url), 'utf8');
       // covered by their own tests in the end-gate review-regression section below.
       // 'no-revision' is on this list as of DD-012: `writeVaultBlock` can no longer produce it,
@@ -1933,6 +1974,18 @@ describe('vault block — end-gate review regressions (SB-055)', () => {
     it('a missing heading in a tainted note reports CRLF', () => {
       const md = taint(lf.replace('## Time Log', '## Something Else'));
       expect(TT.locateVaultBlock(md)).toEqual({ quarantine: true, reason: 'crlf-line-endings' });
+    });
+
+    // SB-090's signal sits UNDER this one and must stay there. A stray `\r` explains the whole
+    // file, a bad digest explains one line, so the file-wide diagnosis wins. The trap this pins:
+    // the taint is on a DIFFERENT line than the anchor, so the malformed anchor line itself is
+    // clean and would match the malformed probe happily if the probe ran first.
+    // ## Verified red-green: 2026-07-26
+    it('a malformed digest in a CRLF-tainted note reports CRLF, not `malformed-revision`', () => {
+      const broken = lf.replace(/ · [0-9a-f]{4}`$/m, ' · zzzz`');
+      expect(broken).not.toBe(lf); // the fixture bites
+      expect(TT.locateVaultBlock(broken)).toEqual({ quarantine: true, reason: 'malformed-revision' });
+      expect(TT.locateVaultBlock(taint(broken))).toEqual({ quarantine: true, reason: 'crlf-line-endings' });
     });
 
     // …and the refusals that found MORE than they expected keep their own reason: CRLF cannot
@@ -2625,6 +2678,17 @@ describe('adopting a hand-made daily note (SB-091 / DD-012)', () => {
       name: 'a revision line loose past the next heading',
       reason: 'revision-past-next-heading',
       md: HAND_MADE.replace('- something Terje wrote', '`revision: 8`'),
+    },
+    {
+      // SB-090. Adoption acts ONLY on 'no-revision', and this note no longer reports it: the
+      // anchor is present and unreadable, not absent. Before SB-090 this shape reached adoption,
+      // which inserted a SECOND anchor below the damaged one and then refused the result as
+      // 'unexpected-content-in-block' — a refusal three steps removed from what is actually
+      // wrong. TT does not repair a token it cannot read (SB-083), so refusing up front and
+      // naming the line is the whole fix.
+      name: 'a revision line whose digest is malformed — present, unreadable, not adoptable',
+      reason: 'malformed-revision',
+      md: HAND_MADE.replace('| 30m | #admin | FAG | Invoicing | |\n', '| 30m | #admin | FAG | Invoicing | |\n\n`revision: 4 · zzzz`\n'), // prettier-ignore
     },
     {
       name: 'a real pre-cutover note (SB-049 stays closed)',

@@ -376,6 +376,18 @@ export type VaultQuarantineReason =
   | 'crlf-line-endings'
   | 'multiple-headings'
   | 'no-revision'
+  /**
+   * The bottom anchor is THERE — the note carries `` `revision: N …` `` inside the block — but
+   * TT cannot read it, because the digest half is malformed: empty, the wrong length, non-hex,
+   * uppercase, or separated by something other than ` · ` (SB-090). Distinct from `no-revision`
+   * because that one says "the line is missing" about a line the human is looking straight at,
+   * which is the same lie SB-084 fixed for CRLF with a different cause. Distinct from
+   * `digest-mismatch` too — there the token is well-formed and describes different bytes, here
+   * the token is not a token. TT refuses either way and repairs neither (SB-083), it just says
+   * which of the two it is. NOT produced for lines that merely resemble the anchor without
+   * carrying its inline-code span. See `MALFORMED_REVISION_RE` in shared/core.js.
+   */
+  | 'malformed-revision'
   | 'revision-past-next-heading'
   | 'multiple-revisions'
   | 'no-table'
