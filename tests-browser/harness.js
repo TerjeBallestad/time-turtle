@@ -96,9 +96,40 @@ export async function startApp(opts = {}) {
   page.on('pageerror', (e) => pageErrors.push(e.message));
 
   await page.goto(`http://localhost:${port}`);
-  await page.locator('input[type=text]').fill(ADMIN_EMAIL);
-  await page.locator('input[type=password]').fill(ADMIN_PASSWORD);
-  await page.locator('button:has-text("Sign in")').click();
+
+  // SB-098 item 1: under `personal` there IS no sign-in — `requireUser` resolves the single
+  // local user with no cookie, so `/api/state` answers 200 on the first load and the client
+  // never renders the Login screen. Signing in here would hang on a form that does not exist,
+  // which is the harness feeling the feature rather than working around it.
+  if (opts.shape !== 'personal') {
+    await page.locator('input[type=text]').fill(ADMIN_EMAIL);
+    await page.locator('input[type=password]').fill(ADMIN_PASSWORD);
+    await page.locator('button:has-text("Sign in")').click();
+  }
+
+  // SB-098 item 4: a data dir with nothing stored, no TT_SHAPE and one user IS DD-015's open
+  // state, so the first-run question renders and it is NOT skippable. Every default-harness
+  // case therefore meets it, and answering it here is deliberate rather than a workaround:
+  //
+  //   • it is DETERMINISTIC, not a "dismiss the modal if it happens to be there" branch. The
+  //     server decides (`AppState.shapeOpen`) on exactly the conditions reproduced above, so
+  //     the modal is present precisely when `opts.shape` is unset and absent otherwise. A
+  //     timing-dependent probe here would be a flake source in every browser test at once.
+  //   • it answers "my company's", which is the TRAP HALF. The open state resolves to an
+  //     effective `team`, so this is the answer that a compare-first gesture would silently
+  //     swallow (SB-133's early return) — leaving the question open and this click useless. If
+  //     that regression ever lands, `+ client` below is never reachable and EVERY browser test
+  //     goes red on the same line, which is a louder alarm than one dedicated test.
+  // `onboarding: true` stops HERE, with the question still on screen and unanswered, for the one
+  // test whose subject is the question itself. It cannot go on to Settings: the modal is not
+  // skippable, so the nav behind it is genuinely unreachable — which is the property under test.
+  if (opts.onboarding) return { port, child, dataDir, mdDir, vaultDir, browser, page, pageErrors };
+  if (!opts.shape) {
+    await page.locator('[data-tt="shape-choice-team"]').waitFor({ timeout: 15000 });
+    await page.locator('[data-tt="shape-choice-team"]').click();
+    await page.locator('[data-tt="shape-choice"]').waitFor({ state: 'detached', timeout: 15000 });
+  }
+
   await page.locator('text=Settings').first().waitFor({ timeout: 15000 });
   await page.locator('text=Settings').first().click();
   await page.locator('button:has-text("+ client")').first().waitFor({ timeout: 15000 });

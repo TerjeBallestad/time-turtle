@@ -56,6 +56,14 @@ export interface UiActions {
    * nobody selects one.
    */
   setShape: (shape: Shape) => void;
+  /**
+   * SB-098 item 4: answer the first-run question. Same channel as `setShape` and the same
+   * reload-don't-guess discipline, MINUS the "you clicked what is already selected" early
+   * return — which is not a detail here but the whole difference. The open state resolves to
+   * an effective `team`, so answering "my company's" IS clicking the shape already in force,
+   * and a compare-first gesture stores nothing and asks again on the next load.
+   */
+  chooseShape: (shape: Shape) => void;
   /** SB-056: where inside the vault TT reads and writes. */
   setVaultPaths: (patch: Partial<VaultPaths>) => void;
   /** SB-063: which characters the vault daily note writes between a start and an end time. */

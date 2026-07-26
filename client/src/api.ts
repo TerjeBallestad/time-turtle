@@ -11,7 +11,9 @@ import type {
   MirrorAcknowledgeResponse,
   MirrorBlocksResponse,
   ProjectRenameResponse,
+  ShapeChoiceResponse,
   TeamReportResponse,
+  Shape,
   User,
   Settings,
   Client,
@@ -72,6 +74,17 @@ export const api = {
   logout: () => request<OkResponse>('POST', '/api/auth/logout'),
   getState: () => request<StateResponse>('GET', '/api/state'),
   putState: (patch: StatePatch) => request<PutStateResponse>('PUT', '/api/state', patch),
+  /**
+   * SB-098 / SB-139 — choose what this install IS. The dedicated channel, not a settings edit:
+   * it carries one field instead of round-tripping the whole settings object (the class of bug
+   * SB-133 closed), and it can store an answer EQUAL to the shape already in force, which the
+   * Settings selector's early return deliberately cannot.
+   *
+   * Nothing debounced or retried goes through here, so its refusals are real refusals — a 403
+   * from the lock or from DD-006's single-user guard surfaces as a toast and cannot wedge
+   * `useServerSync` the way one on `PUT /api/state` would.
+   */
+  setShape: (shape: Shape) => request<ShapeChoiceResponse>('POST', '/api/shape', { shape }),
   /**
    * SB-065: clear a standing mirror refusal. This is NOT a dismiss — it ADOPTS the bytes
    * currently on disk as TT's stamp, which is consent for the next save to overwrite them.

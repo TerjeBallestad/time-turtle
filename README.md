@@ -37,10 +37,31 @@ more than one user boots stamped `team` silently — an install with five users 
 existing. One user, unlocked and nothing stored is the open state; `TT_SHAPE_LOCK` means never
 ask at all.
 
+A genuinely fresh install — one user, unlocked, nothing stored — is **asked once**, on the
+first admin sign-in: _my own Obsidian-backed timesheet_, or _my company's_. The question is not
+skippable, because `team` is the safe half of it: it is the status quo, the repo default, and
+reversible in **Settings → Vault**. Every other install is inferred by the rules above and sees
+nothing.
+
 Choosing `personal` today turns three shipped things off, and the banner says so: the markdown
 mirror stops (and the files already written are retired — see below), committing is off until
 the weekly-note rollup lands, and markdown paste-back is off. Nothing yet syncs the SQLite
 index from vault files; that is SB-057.
+
+**Personal means no login (SB-098 / DD-015).** Under `personal` there is one human and the
+machine is theirs, so the cookie challenge asks a question with one answer: the server resolves
+the single local session itself, the login screen is never rendered, and the surfaces that
+presuppose a second person — Users, roles, the password section, sign-out, the review view —
+are **absent**, not disabled. The user record underneath is untouched (`user_id 1`, every
+`user_id` join), which is what lets a switch back to `team` put all of them back.
+
+Two things hold that up and neither is optional. The gate keys off the **effective shape the
+server resolved** — never anything a client sends, or any request could claim `personal` and
+skip the check. And a `personal` instance **binds loopback only**: `127.0.0.1`, so it is not
+reachable from other machines. `TT_HOST` chooses the bind address for a `team` instance (unset
+means every interface, as before); under `personal` a `TT_HOST` that is not loopback is a
+**refusal to start**, because "no login" on a reachable interface means no login for anyone on
+the same wifi.
 
 **The cutover (DD-016).** Storing `shape: 'personal'` stamps `vaultCutover` with the instant it
 happened. The vault never receives entries dated before it — they stay in SQLite, are never
@@ -131,6 +152,7 @@ just make a real admin user in Settings → Users and delete the default one.
 | var                                    | default                             | purpose                                                                                   |
 | -------------------------------------- | ----------------------------------- | ----------------------------------------------------------------------------------------- |
 | `PORT`                                 | `3001`                              | API port                                                                                  |
+| `TT_HOST`                              | every interface                     | bind address; `personal` forces loopback and REFUSES TO START if this is not loopback     |
 | `TT_DATA_DIR`                          | `server/data`                       | DB + secret location — the instance (`tt --data DIR` wins over it)                        |
 | `TT_MD_DIR`                            | `<data>/markdown`                   | markdown mirror dir fallback (Settings → Mirror folder wins)                              |
 | `TT_MD_DIR_LOCK`                       | unset                               | `1` freezes the mirror at `TT_MD_DIR` — Settings → Mirror folder is ignored and read-only |

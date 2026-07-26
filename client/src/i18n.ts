@@ -78,6 +78,23 @@ const NO: Record<string, string> = {
     'dette notatet gikk tilbake til en tidligere revisjon med innhold Time Turtle ikke skrev — en gjenoppretting fra historikken, eller en annen redigerer.',
   'this note’s revision is older than the one Time Turtle recorded, and Time Turtle has no record of it — so it cannot tell an out-of-date copy from a deliberate restore.':
     'revisjonen i dette notatet er eldre enn den Time Turtle har notert, og Time Turtle har ingen oppføring av den — så den kan ikke skille en utdatert kopi fra en bevisst gjenoppretting.',
+  // SB-098 item 4: the first-run question (ShapeChoice.tsx). SHAPE LANGUAGE IN BOTH LANGUAGES —
+  // never `sqlite`, never `vault` as an engine name. DD-015's point is that an install chooses
+  // what it IS and the storage falls out of that, and someone opening Time Turtle for the first
+  // time can answer "mine or my company's" without knowing either word.
+  //
+  // 'Hvelv' is already this surface's established Norwegian for the Obsidian vault (see 'Vault'
+  // below and 'Hvelvmappe'), so the closing line points at the section the answer can be changed
+  // in using the name that section actually carries in the sidebar.
+  'Whose hours will this Time Turtle keep?': 'Hvem sine timer skal denne Time Turtle holde styr på?',
+  'My own Obsidian-backed timesheet': 'Min egen Obsidian-baserte timeliste',
+  'One person, no sign-in. Your Obsidian vault keeps the hours — Time Turtle writes them into your daily notes and reads back the edits you make there.':
+    'Én person, ingen innlogging. Obsidian-hvelvet ditt holder timene — Time Turtle skriver dem inn i dagsnotatene dine og leser tilbake endringene du gjør der.',
+  'My company’s': 'Bedriften min',
+  'Several people, each signing in, with roles and a review step before hours are invoiced. Time Turtle keeps the hours and mirrors every save to markdown.':
+    'Flere personer som logger inn hver for seg, med roller og et godkjenningssteg før timene faktureres. Time Turtle holder timene og speiler hver lagring til markdown.',
+  'Asked once. You can change the answer later under Settings → Vault.':
+    'Spørsmålet stilles én gang. Du kan endre svaret senere under Innstillinger → Hvelv.',
   Vault: 'Hvelv',
   'Instance shape': 'Instansform',
   Team: 'Lag',

@@ -1012,11 +1012,27 @@ app.post('/api/shape', requireUser, requireAdmin, (req, res) => {
     const users = db.listUsers().length;
     if (users > 1) return res.status(403).json({ error: shapeSwitchRefusal(users) });
   }
+  // NO `bumpCatalogVersion()`, and that is a considered omission rather than a forgotten line.
+  //
+  // `shape` is instance-local: it never travels to the vault or the mirror, it is not one of the
+  // catalog COLLECTIONS DC-001's version guards, and storing it cannot clobber another client's
+  // edit — so there is no lost update for a bump to prevent here.
+  //
+  // Bumping it does real harm, measured: this route's caller reloads afterwards, and a reload
+  // hands `useServerSync` a whole new state object while leaving its cached `versionRef` on the
+  // pre-bump number (it is re-baselined only on the FIRST load and after a 409). Every reference
+  // in the new state differs, so the hook immediately queues a full PUT — carrying the stale
+  // version, straight into a 409. The client recovers by reloading, but the patch it was holding
+  // is dropped by design, so the user's next keystrokes vanish with a "someone else saved first"
+  // toast on a single-user install. The browser suite caught it as an empty markdown mirror.
+  //
+  // That staleness is a pre-existing defect on the `load()`-after-write paths (the Settings shape
+  // toggle, renameProject, renameClient) and it is NOT fixed here: `useServerSync`'s 409 handling
+  // is SB-105, which Terje is ruling separately. This route simply declines to add a new way in.
   store.transaction(() => {
     // putSettings stamps the DD-016 cutover for `personal` itself, so nothing that can store
     // the shape can skip it — including this route.
     store.putSettings({ shape });
-    store.bumpCatalogVersion();
   });
   // The vault the engine watches is decided by the shape, so re-point it here for the same
   // reason the settings PUT does: without this, answering "personal" leaves the sync engine
