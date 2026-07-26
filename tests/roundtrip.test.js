@@ -2726,3 +2726,80 @@ describe('adopting a hand-made daily note (SB-091 / DD-012)', () => {
     expect(TT.parseVaultBlock(vocabularised).adopted).toBe(true);
   });
 });
+
+// ## Verified red-green: 2026-07-26
+// SB-107: `parseMd` read a catalog row's NAME as `TT.decodeCell(parts[1] || parts[0])`, which
+// conflates two different facts — a name cell that is PRESENT AND EMPTY, and a name cell that is
+// ABSENT. An empty stored name came back as its own id, so serialize→parse was not idempotent for
+// a value the write edge accepts.
+//
+// It is newly reachable because of SB-075: before it, a whitespace-only name was stored as `'   '`
+// (truthy, so it round-tripped as itself); after it, a `PUT '   '` stores `''`, which is falsy.
+// SB-075's executor deliberately left the whitespace-only case out of its assertions rather than
+// letting the suite be green by luck — this block is the case it left, now that the reader is fixed.
+//
+// RULING (2026-07-26): an empty name is a LEGAL STORED VALUE. The reader returns `''` for a present
+// -but-empty cell and falls back to the id only when the cell is absent — a row with no name cell
+// at all, which a hand-edited or pre-v2 mirror can carry and where there is nothing to preserve.
+describe('an empty name round-trips as an empty name, not as its own id (SB-107)', () => {
+  /** A minimal v2 state — the fields serializeMd reads, and nothing else. */
+  const state = (over) => ({
+    settings: { currency: 'kr', language: 'en' },
+    clients: [],
+    projects: [],
+    tasks: [],
+    entries: [],
+    commits: [],
+    ...over,
+  });
+  const CLIENT = { id: 'blank-client', name: '', rounding: 'exact', rate: null, archived: false };
+  const PROJECT = { code: 'BLANK-P', name: '', clientId: null, rate: null, billable: true, archived: false };
+  const TASK = { id: 'blank-task', label: '', project: null };
+
+  it('a client, a project and a task with an EMPTY name all come back empty', () => {
+    const back = TT.parseMd(TT.serializeMd(state({ clients: [CLIENT], projects: [PROJECT], tasks: [TASK] })));
+    expect(back.clients[0]).toEqual(CLIENT);
+    expect(back.projects[0]).toEqual(PROJECT);
+    expect(back.tasks[0]).toEqual(TASK);
+    // the id/code is still the id/code — the fallback is gone, not the identifier
+    expect(back.clients[0].id).toBe('blank-client');
+    expect(back.projects[0].code).toBe('BLANK-P');
+    expect(back.tasks[0].id).toBe('blank-task');
+  });
+
+  it('the whitespace-only name SB-075 turns into an empty one round-trips the same way', () => {
+    // What SB-075's write edge actually stores: `PUT '   '` → `''`. The mirror is the only place
+    // the value can be lost after that, and this is the assertion its executor left out.
+    const trimmed = (s) => s.trim();
+    expect(trimmed('   ')).toBe('');
+    const md = TT.serializeMd(state({ projects: [{ ...PROJECT, name: trimmed('   ') }], tasks: [{ ...TASK, label: trimmed('\t\n ') }] })); // prettier-ignore
+    const back = TT.parseMd(md);
+    expect(back.projects[0].name).toBe('');
+    expect(back.tasks[0].label).toBe('');
+    expect(TT.serializeMd(state({ projects: back.projects, tasks: back.tasks }))).toBe(md); // idempotent
+  });
+
+  it('serialize(parse(md)) is byte-identical for a mirror carrying empty names', () => {
+    const md = TT.serializeMd(state({ clients: [CLIENT], projects: [PROJECT], tasks: [TASK] }));
+    expect(md).toContain('- blank-client |  | round exact');
+    expect(md).toContain('- BLANK-P |  | —');
+    expect(md).toContain('- blank-task |  | —');
+    const back = TT.parseMd(md);
+    expect(TT.serializeMd(state({ clients: back.clients, projects: back.projects, tasks: back.tasks }))).toBe(md);
+  });
+
+  it('control: an ABSENT name cell still falls back to the id — the case the `||` was for', () => {
+    // A hand-edited or pre-v2 row with no name cell at all. There is no stored value to preserve
+    // here, so the id remains the best available name and this behaviour is unchanged.
+    const md = ['# timesheet', '', 'currency: kr', 'format: 2', '', '## clients', '- fjellheim', '', '## projects', '- FJH-NETT', '', '## tasks', '- general', ''].join('\n'); // prettier-ignore
+    const back = TT.parseMd(md);
+    expect(back.clients[0].name).toBe('fjellheim');
+    expect(back.projects[0].name).toBe('FJH-NETT');
+    expect(back.tasks[0].label).toBe('general');
+  });
+
+  it('control: a non-empty name is untouched', () => {
+    const back = TT.parseMd(TT.serializeMd(state({ clients: [{ ...CLIENT, name: 'Fjellheim AS' }] })));
+    expect(back.clients[0].name).toBe('Fjellheim AS');
+  });
+});

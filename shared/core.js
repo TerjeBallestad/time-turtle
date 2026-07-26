@@ -2654,6 +2654,19 @@ function migrateV1(state) {
   // intentionally NOT mapped; the project owns billable now — admin re-marks nb projects).
   state.tasks = state.tasks.map((task) => ({ id: task.id, label: task._name, project: task.project }));
 }
+// The NAME cell of a catalog row — the client/project/task display name that sits in cell 1,
+// next to the id in cell 0. One reader for all three sections, because `parts[1] || parts[0]`
+// was written out three times and they must agree.
+//
+// PRESENT-BUT-EMPTY vs ABSENT (SB-107, ruled 2026-07-26). `||` conflated them, so an empty name
+// came back as its own id: `- fjellheim |  | round exact` parsed to `name: 'fjellheim'`, and
+// serialize→parse was not idempotent for a value the write edge accepts. An empty name is a LEGAL
+// STORED VALUE — SB-075 trims `'   '` to `''` at the write edge, which is exactly what made this
+// reachable — so an empty cell reads back as `''`. The id fallback survives for the case it was
+// actually for: a row with NO name cell at all (`- fjellheim`), which a hand-edited or pre-v2
+// mirror can carry and where there is no stored value to preserve.
+/** @param {string[]} parts trimmed, still-escaped cells @returns {string} */
+const nameCell = (parts) => TT.decodeCell(parts[1] === undefined ? parts[0] : parts[1]);
 TT.parseMd = function (md) {
   /** @type {import('./types.ts').CommitSegment[]} */
   const commits = [];
@@ -2704,7 +2717,7 @@ TT.parseMd = function (md) {
       /** @type {Client} */
       const client = {
         id: TT.decodeCell(parts[0]),
-        name: TT.decodeCell(parts[1] || parts[0]),
+        name: nameCell(parts),
         rounding: 'exact',
         rate: null,
         archived: false,
@@ -2721,7 +2734,7 @@ TT.parseMd = function (md) {
       /** @type {Project} */
       const project = {
         code: TT.decodeCell(parts[0]),
-        name: TT.decodeCell(parts[1] || parts[0]),
+        name: nameCell(parts),
         clientId: null,
         rate: null,
         billable: true,
@@ -2741,7 +2754,7 @@ TT.parseMd = function (md) {
     } else if (section === 'tasks') {
       const project = parts[2] && parts[2] !== '—' ? TT.decodeCell(parts[2]) : null;
       const id = TT.decodeCell(parts[0]),
-        label = TT.decodeCell(parts[1] || parts[0]);
+        label = nameCell(parts);
       if (version >= 2) {
         state.tasks.push({ id, label, project });
       } else {
