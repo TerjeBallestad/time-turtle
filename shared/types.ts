@@ -371,6 +371,19 @@ export interface MirrorBlock {
   reason: string;
   /** when TT last wrote this path, if it ever did */
   lastWrittenAt: string | null;
+  /**
+   * SB-095: WHOSE mirror this is. Present only where blocks are reported ACROSS users —
+   * `GET /api/mirror/blocks`, the admin read — because that is the only place the answer is
+   * not already known: on `/api/state` and every one-mirror response the block belongs to the
+   * session user by construction, and the guard itself is keyed by PATH, not by user, so
+   * identity is attached at the reporting boundary rather than stored.
+   *
+   * It is not decoration: `POST /api/mirror/acknowledge` clears another user's block by
+   * `{userId}`, so without this the admin surface has a block it cannot act on.
+   */
+  userId?: number;
+  /** SB-095: the display name for `userId`, so the admin surface need not join against /api/users. */
+  userName?: string;
 }
 
 // ---- vault block (SB-055 / SB-045) ----
@@ -817,6 +830,26 @@ export interface MirrorAcknowledgeResponse {
   ok: boolean;
   cleared: boolean;
   path: string;
+}
+/**
+ * SB-095 — `GET /api/mirror/blocks`, admin only. Every standing mirror refusal on this
+ * instance, the caller's own included.
+ *
+ * SAME SHAPE AS SB-086's `ProjectRenameResponse`, deliberately: several users' blocks are
+ * reported as a LIST under the plural name `mirrorBlocks`, where the one-mirror routes carry
+ * a single `mirrorBlocked`. The only addition is `userId`/`userName` on each block, which the
+ * rename response does not need (its caller just renamed something) and this one cannot do
+ * without — the acknowledge call is keyed by user.
+ *
+ * The caller's OWN block is included rather than filtered out server-side: "every block on
+ * this instance" is a claim with no exceptions to remember. The client drops its own, which
+ * it already renders from `/api/state`.
+ *
+ * Blind, like the rename report: a mirror path and a name, never entry content. The caller is
+ * an admin who can already list users and knows the mirror folder.
+ */
+export interface MirrorBlocksResponse {
+  mirrorBlocks: MirrorBlock[];
 }
 export interface UsersResponse {
   users: User[];

@@ -9,6 +9,7 @@ import type {
   OkResponse,
   ClientRenameResponse,
   MirrorAcknowledgeResponse,
+  MirrorBlocksResponse,
   ProjectRenameResponse,
   TeamReportResponse,
   User,
@@ -79,6 +80,13 @@ export const api = {
    */
   acknowledgeMirror: (userId?: number) =>
     request<MirrorAcknowledgeResponse>('POST', '/api/mirror/acknowledge', userId === undefined ? {} : { userId }),
+  /**
+   * SB-095 — admin only: every standing mirror refusal on the instance, the caller's own
+   * included. `/api/state` reports only the session user's, so this is the only way an admin
+   * learns an employee's mirror has stopped. The list shape is SB-086's (`mirrorBlocks`),
+   * plus the `userId` each block needs for `acknowledgeMirror`.
+   */
+  mirrorBlocks: () => request<MirrorBlocksResponse>('GET', '/api/mirror/blocks'),
   listUsers: () => request<UsersResponse>('GET', '/api/users'),
   createUser: (u: UserCreateRequest) => request<UserResponse>('POST', '/api/users', u),
   deleteUser: (id: number) => request<OkResponse>('DELETE', '/api/users/' + id),

@@ -783,6 +783,30 @@ app.post('/api/mirror/acknowledge', requireUser, (req, res) => {
   res.json({ ok: true, cleared, path });
 });
 
+// SB-095: the cross-user READ that makes the line above reachable. `GET /api/state` reports
+// only the session user's block, so an admin could neither see nor clear an employee's —
+// even though the acknowledge route has taken `{userId}` since SB-065. The write plumbing
+// was built and unreachable; this is the missing read.
+//
+// Shape follows SB-086 rather than inventing a third: several users' blocks come back as a
+// LIST under the plural name (`mirrorBlocks`), where the one-mirror routes carry a singular
+// `mirrorBlocked`. Each block additionally carries `userId`/`userName`, because the guard is
+// keyed by PATH and the acknowledge call is keyed by USER — without the identity the admin
+// has a report it cannot act on.
+//
+// The caller's own block is INCLUDED. "Every block on this instance" is a claim with no
+// exception to remember, and the client already renders its own from /api/state, so it drops
+// the duplicate there — one filter in one place beats a server-side carve-out.
+app.get('/api/mirror/blocks', requireUser, requireAdmin, (req, res) => {
+  /** @type {import('../../shared/types.ts').MirrorBlock[]} */
+  const mirrorBlocks = [];
+  for (const user of db.listUsers()) {
+    const block = mirrorBlockFor(user);
+    if (block) mirrorBlocks.push({ ...block, userId: user.id, userName: user.name });
+  }
+  res.json({ mirrorBlocks });
+});
+
 // ---- team reports (admin) ----
 // Deliberately not folded into /api/state: that stays per-user, and shipping every
 // user's raw entries to the client to pivot them there would leak notes and

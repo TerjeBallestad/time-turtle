@@ -369,11 +369,16 @@ export function App() {
     // and clears the block; nothing is written until the next save. Deliberately NOT a
     // reload — `load()` hands useServerSync a fresh object for every synced key, which would
     // PUT the whole state straight back and turn "acknowledge" into "overwrite now".
-    acknowledgeMirror: () =>
+    //
+    // SB-095: with a `userId` this is an ADMIN clearing someone else's block. Only the
+    // session's own block is mirrored into local state — clearing `mirrorBlocked` for an
+    // employee's adoption would erase the admin's own standing refusal from the screen while
+    // the server still holds it.
+    acknowledgeMirror: (userId) =>
       api
-        .acknowledgeMirror()
+        .acknowledgeMirror(userId)
         .then(() => {
-          setMirrorBlocked(null);
+          if (userId === undefined || userId === state.user.id) setMirrorBlocked(null);
           toast(TT.t('mirror unblocked — the next save overwrites the file'));
           return true;
         })
@@ -381,6 +386,13 @@ export function App() {
           toast(err.message);
           return false;
         }),
+    // SB-095: admin-only. A 403/500 resolves [] rather than throwing — the section is an
+    // extra affordance, and a failed read should leave it drawing nothing, not break Settings.
+    mirrorBlocks: () =>
+      api
+        .mirrorBlocks()
+        .then((r) => r.mirrorBlocks)
+        .catch(() => []),
     importMd: (md) => {
       try {
         const parsed = TT.parseMd(md);
