@@ -40,7 +40,7 @@ export function ReviewView({ state, ui, onReviewChanged }: ViewProps) {
   // verbs are unreachable with content. It is here because the composition can change without
   // this file being reopened: the server already 403s approve/release under `vault`, and a
   // surface offering a verb that can only fail is precisely what DD-008's comment forbids.
-  const committingOff = TT.backendOffReason('committing', state.backend);
+  const committingOff = TT.shapeOffReason('committing', state.shape);
   const [users, setUsers] = React.useState<User[] | null>(null);
   const [selId, setSelId] = React.useState<number | null>(null);
   const [sheet, setSheet] = React.useState<UserTimesheet | null>(null);

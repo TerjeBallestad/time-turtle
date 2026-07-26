@@ -22,29 +22,43 @@ admin only). The setting overrides the `TT_MD_DIR` env var and re-targets on the
 On a shared server, where "admin" is not the machine owner, set `TT_MD_DIR_LOCK=1`: the mirror
 is then frozen at `TT_MD_DIR`, the setting is ignored, and changing it is rejected (403).
 
-**Storage backend (SB-056).** `backend` selects which store holds the timesheet: `sqlite` (the
-default, and what everything above describes) or `vault`, which makes an Obsidian vault the
-source of truth and demotes SQLite to a derived index. `TT_BACKEND` supplies the default,
-**Settings → Vault → Backend** beats it, and `TT_BACKEND_LOCK=1` freezes it at `TT_BACKEND` —
-the stored setting is then ignored and changing it is rejected (403), exactly like the mirror
-lock. The startup banner names the effective backend and which source won.
+**Instance shape (SB-100 / DD-015).** `shape` says what an install _is_: `team` (the default,
+and what everything above describes) or `personal`, one human with an Obsidian vault as the
+source of truth and SQLite demoted to a derived index. The storage backend — `sqlite` or
+`vault` — is **derived** from the shape and is never selected; naming the choice after the
+storage engine made the codebase claim that the storage engine decides whether you log in.
+`TT_SHAPE` supplies the default, **Settings → Vault → Instance shape** beats it, and
+`TT_SHAPE_LOCK=1` freezes it at `TT_SHAPE` — the stored setting is then ignored and changing it
+is rejected (403), exactly like the mirror lock. The startup banner names the effective shape,
+which source won, and the storage it derives.
 
-Selecting `vault` today turns three shipped things off, and the banner says so: the markdown
+The shape is INFERRED, never asked for, when the answer is already obvious: a data dir holding
+more than one user boots stamped `team` silently — an install with five users has answered by
+existing. One user, unlocked and nothing stored is the open state; `TT_SHAPE_LOCK` means never
+ask at all.
+
+Choosing `personal` today turns three shipped things off, and the banner says so: the markdown
 mirror stops (and the files already written are retired — see below), committing is off until
 the weekly-note rollup lands, and markdown paste-back is off. Nothing yet syncs the SQLite
 index from vault files; that is SB-057.
 
+**The cutover (DD-016).** Storing `shape: 'personal'` stamps `vaultCutover` with the instant it
+happened. The vault never receives entries dated before it — they stay in SQLite, are never
+written to a daily note and never trigger adoption of an existing one — which is what keeps
+demo hours and a flipped install's history out of real daily notes. The stamp lands here; the
+write filter that enforces it lands with the vault writer (SB-057).
+
 **One vault, one person.** A vault has a single `Calendar/Daily` tree, so there is no answer to
 whose daily note a second person's hours would land in. The server refuses to add a user while
-`vault` is active, refuses to switch to `vault` while more than one user exists, and — the case
-a copied data dir creates — **refuses to start** when it boots into `vault` with several users
-already stored. Recover from that with:
+`personal` is active, refuses to switch to `personal` while more than one user exists, and —
+the case a copied data dir creates — **refuses to start** when it boots into `personal` with
+several users already stored. Recover from that with:
 
 ```sh
-TT_BACKEND_LOCK=1 TT_BACKEND=sqlite tt serve
+TT_SHAPE_LOCK=1 TT_SHAPE=team tt serve
 ```
 
-The lock is the load-bearing half: `TT_BACKEND=sqlite` on its own loses to the stored `vault`
+The lock is the load-bearing half: `TT_SHAPE=team` on its own loses to the stored `personal`
 setting, so only the locked form gets a wedged install back up.
 
 **Roles:**
@@ -115,8 +129,8 @@ just make a real admin user in Settings → Users and delete the default one.
 | `TT_DATA_DIR`                          | `server/data`                       | DB + secret location — the instance (`tt --data DIR` wins over it)                        |
 | `TT_MD_DIR`                            | `<data>/markdown`                   | markdown mirror dir fallback (Settings → Mirror folder wins)                              |
 | `TT_MD_DIR_LOCK`                       | unset                               | `1` freezes the mirror at `TT_MD_DIR` — Settings → Mirror folder is ignored and read-only |
-| `TT_BACKEND`                           | `sqlite`                            | default storage backend, `sqlite` or `vault` (Settings → Vault → Backend wins)            |
-| `TT_BACKEND_LOCK`                      | unset                               | `1` freezes the backend at `TT_BACKEND` — the stored setting is ignored and read-only     |
+| `TT_SHAPE`                             | `team`                              | default instance shape, `team` or `personal` (Settings → Vault → Instance shape wins)     |
+| `TT_SHAPE_LOCK`                        | unset                               | `1` freezes the shape at `TT_SHAPE` — the stored setting is ignored and read-only         |
 | `TT_ADMIN_EMAIL` / `TT_ADMIN_PASSWORD` | `admin@timeturtle.local` / `turtle` | first-run admin                                                                           |
 | `TT_SEED_DEMO`                         | `1`                                 | seed demo clients/projects/entries on first run                                           |
 | `TT_SECRET`                            | generated → `data/.secret`          | session-signing secret                                                                    |

@@ -39,21 +39,21 @@ export function WeekView({ state, ui }: ViewProps) {
   // SDD-002 ruling 5 (SB-025): an admin-APPROVED segment is LOCKED — the employee can no
   // longer reopen it, so its reopen verb is gone and the chip reads 'locked'.
   const approved = approvedKeys(state);
-  // SB-056 / DD-008: under the vault backend there is nowhere to persist a commit — the ledger
+  // SB-056 / DD-008: in the personal shape there is nowhere to persist a commit — the ledger
   // belongs in weekly notes, which are phase 3 — so the server refuses one. This is the half
   // the user actually meets. SB-056's ruling is explicit that it must not be a hidden disabled
-  // button: "switching backends silently losing a shipped feature is the kind of thing that
+  // button: "switching shapes silently losing a shipped feature is the kind of thing that
   // reads as a bug months later… it should say WHY it is off and that phase 3 restores it."
   //
   // It is also not optional. `useServerSync` re-queues any non-409 failure and re-arms a 4 s
   // timer forever, so leaving the verb on screen under `vault` would turn one click into a
   // permanent toast loop. The gate the server enforces and the gate the UI shows have to be
-  // the same gate, which is why both read `TT.backendCapabilities` rather than either one
+  // the same gate, which is why both read `TT.shapeCapabilities` rather than either one
   // deciding for itself.
   //
-  // `state.backend` is absent on an older server; backendCapabilities resolves that to the
+  // `state.shape` is absent on an older server; shapeCapabilities resolves that to the
   // sqlite row, so this reads `committing: true` and nothing changes.
-  const committingOff = TT.backendOffReason('committing', state.backend);
+  const committingOff = TT.shapeOffReason('committing', state.shape);
   return (
     <div className={vs.page}>
       <div className={[vs.headerRow, vs.baseline].join(' ')}>

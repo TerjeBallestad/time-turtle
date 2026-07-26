@@ -2,7 +2,7 @@ import React from 'react';
 import TT from '../../i18n';
 import { SectionLabel, SegToggle, Select, Input } from '../../ds';
 import st from './settings.module.css';
-import type { AppState, Backend, VaultPaths, VaultTimeSeparator } from '../../../../shared/types';
+import type { AppState, Shape, VaultPaths, VaultTimeSeparator } from '../../../../shared/types';
 import type { UiActions } from '../../types';
 
 interface SettingsProps {
@@ -11,11 +11,14 @@ interface SettingsProps {
 }
 
 /**
- * SB-056: the vault settings surface — the backend selector, `vaultPaths`, and the time
+ * SB-056 / SB-100: the vault settings surface — the SHAPE selector, `vaultPaths`, and the time
  * separator SB-063 shipped deliberately WITHOUT a control.
  *
- * SB-063's reasoning for shipping headless was that its only consumer was a vault backend that
- * did not exist yet. That reasoning expires exactly here, at the commit that makes `vault`
+ * The selector chooses what this install IS, never which storage engine it runs (DD-015). The
+ * backend falls out of the shape and has no control anywhere in the app.
+ *
+ * SB-063's reasoning for shipping headless was that its only consumer was a vault store that
+ * did not exist yet. That reasoning expires exactly here, at the commit that makes `personal`
  * selectable, and this repo is its own live example of what the failure looks like: perfect
  * plumbing, a green api test, and a setting nobody can change from the app. Which is why this
  * task is judged at the browser rung and not at `api`.
@@ -67,10 +70,10 @@ function PathRow({
 }
 
 export function VaultSection({ state, ui }: SettingsProps) {
-  // The EFFECTIVE backend, not the stored one: TT_BACKEND and TT_BACKEND_LOCK can both beat the
+  // The EFFECTIVE shape, not the stored one: TT_SHAPE and TT_SHAPE_LOCK can both beat the
   // setting, and the toggle has to show what is actually in force.
-  const backend: Backend = state.backend ?? 'sqlite';
-  const locked = !!state.backendLocked;
+  const shape: Shape = state.shape ?? 'team';
+  const locked = !!state.shapeLocked;
   // TT.VAULT_PATHS_DEFAULT, not a local literal: SB-057/SB-058 extend this shape additively, and
   // a copy here would go on producing a VaultPaths missing whatever key they add.
   const paths: VaultPaths = state.settings.vaultPaths ?? TT.VAULT_PATHS_DEFAULT;
@@ -80,35 +83,35 @@ export function VaultSection({ state, ui }: SettingsProps) {
       <SectionLabel style={{ marginBottom: 10 }}>{TT.t('Vault')}</SectionLabel>
       <div className={st.mirror}>
         <div className={st.mirrorRow}>
-          <span className={[st.label, st.mirrorLabel, st.vaultLabel].join(' ')}>{TT.t('Storage backend')}</span>
+          <span className={[st.label, st.mirrorLabel, st.vaultLabel].join(' ')}>{TT.t('Instance shape')}</span>
           {locked ? (
-            <span className={st.vaultLocked}>{backend}</span>
+            <span className={st.vaultLocked}>{shape}</span>
           ) : (
             <SegToggle
-              value={backend}
-              onChange={(next) => ui.setBackend(next as Backend)}
+              value={shape}
+              onChange={(next) => ui.setShape(next as Shape)}
               options={[
-                { value: 'sqlite', label: TT.t('SQLite') },
-                { value: 'vault', label: TT.t('Obsidian vault') },
+                { value: 'team', label: TT.t('Team') },
+                { value: 'personal', label: TT.t('Personal') },
               ]}
             />
           )}
         </div>
         <div className={st.mirrorHint}>
           {locked
-            ? TT.t('the server pins the storage backend (TT_BACKEND_LOCK) — change it in the server environment.')
+            ? TT.t('the server pins the instance shape (TT_SHAPE_LOCK) — change it in the server environment.')
             : TT.t(
-                'SQLite is the source of truth and every save mirrors to markdown. The vault backend makes an Obsidian vault the source of truth instead.',
+                'A team install keeps SQLite as the source of truth and mirrors every save to markdown. A personal install is one person, with an Obsidian vault as the source of truth instead.',
               )}
         </div>
       </div>
-      {backend === 'vault' && (
+      {shape === 'personal' && (
         <>
-          {/* Design decision 3, said out loud rather than discovered: `vault` is selectable
+          {/* Design decision 3, said out loud rather than discovered: `personal` is selectable
               before SB-057 fills the vault store in. */}
           <div className={st.vaultWarn}>
             {TT.t(
-              'The vault backend is not finished: the markdown mirror is off (the files it wrote are retired), committing is off until weekly notes land, and markdown paste-back is off. Nothing syncs these paths yet.',
+              'The personal shape is not finished: the markdown mirror is off (the files it wrote are retired), committing is off until weekly notes land, and markdown paste-back is off. Nothing syncs these paths yet.',
             )}
           </div>
           <PathRow

@@ -217,7 +217,7 @@
   padding-right: 5px;
 }
 /* SB-056: why a verb that used to be here is not. Same orange "stopped, not failed" note the
-   settings view uses for the mirror block — nothing is broken and nothing is lost, this backend
+   settings view uses for the mirror block — nothing is broken and nothing is lost, this shape
    simply has nowhere to put a commit until phase 3. Deliberately a sentence and not a disabled
    button: a control you cannot press and which does not explain itself IS the failure DD-008's
    comment names, not a fix for it. */

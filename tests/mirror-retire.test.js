@@ -1,6 +1,6 @@
-// SB-056 / DD-011: retiring the v2 mirror files the backend toggle leaves behind.
+// SB-056 / DD-011: retiring the v2 mirror files the shape toggle leaves behind.
 //
-// Under `vault` the mirror stops AND the toggle retires what it already wrote. "Silently stop
+// Under `personal` the mirror stops AND the toggle retires what it already wrote. "Silently stop
 // updating" is the one option DD-011 rules out by name: `mdDir` points into an Obsidian vault
 // on the machine this was ruled for, so those files sit next to the daily notes, frozen at
 // cutover and still looking current — the stale-restore hazard SB-069 accepted risk on.
@@ -13,27 +13,27 @@
 // The case SB-065 makes dangerous and this file exists to pin: retiring a file TT is REFUSING
 // to write. Retirement is rename-only, so an unstamped foreign file comes through byte-identical.
 //
-// ## Verified red-green: 2026-07-26 (output TRANSCRIBED from the run, not reconstructed —
-//    an end-gate reviewer re-ran this mutation and caught three quoted lines that the named
-//    mutation cannot produce. Each test stops at its FIRST failing assertion, which is what
-//    these are.)
+// ## Verified red-green: 2026-07-26, RE-RUN by SB-100 under the new names (output TRANSCRIBED
+//    from the run, not reconstructed — a renamed transcript that was not re-run is a lying
+//    stamp. Each test stops at its FIRST failing assertion, which is what these are.)
 //   Making `retireMirrors()` (server/src/markdown.js) `return []` immediately — all 7 fail:
-//     FAIL  switching to vault retires the mirror, and the bytes survive under the new name
+//     FAIL  switching to personal retires the mirror, and the bytes survive under the new name
 //           AssertionError: expected [ 'timesheet-admin.md' ] to deeply equal [ Array(1) ]
-//     FAIL  a second save under vault retires nothing further …            (same assertion)
-//     FAIL  a hand-written file at a user's mirror path is renamed …       (same assertion)
-//     FAIL  a sticky block is cleared with its path, so a switch back to sqlite is not wedged
+//     FAIL  a second save under personal retires nothing further …        (same assertion)
+//     FAIL  a hand-written file at a user's mirror path is renamed …      (same assertion)
+//     FAIL  a sticky block is cleared with its path, so a switch back to team is not wedged
 //           AssertionError: expected { …(4) } to be falsy
-//     FAIL  a server booted straight into vault sweeps files …             (same assertion)
-//     FAIL  retires a file TT wrote under an mdDir that has since moved …  (same assertion)
+//     FAIL  a server booted straight into personal sweeps files …         (same assertion)
+//     FAIL  retires a file TT wrote under an mdDir that has since moved … (same assertion)
 //     FAIL  a second retirement on the same day does not clobber the first (same assertion)
 //   i.e. without it the files really do sit there under their current-looking names.
 //
 //   That mutation stops at the FILENAME assertions, so it does not exercise the byte
 //   comparisons — which are the load-bearing half. The mutation that reaches them is the
 //   TOMBSTONE, the other shape DD-011 permits and this plan rejected: replace the rename with
-//   `writeFileSync(to, '<!-- retired -->'); unlinkSync(path)`. 6 of 7 fail, on content:
-//     FAIL  switching to vault retires the mirror, and the bytes survive under the new name
+//   `writeFileSync(to, '<!-- retired by Time Turtle -->\n'); unlinkSync(path)`. 6 of 7 fail,
+//   on content:
+//     FAIL  switching to personal retires the mirror, and the bytes survive under the new name
 //           AssertionError: expected '<!-- retired by Time Turtle -->\n' to be '# timesheet\n\ncurrency: kr\nlanguage…'
 //     FAIL  a hand-written file at a user's mirror path is renamed, never opened
 //           AssertionError: expected '<!-- retired by Time Turtle -->\n' to be '# a human wrote this\n\nnothing here …'
@@ -77,11 +77,11 @@ async function logAnHour(admin, id) {
   return put;
 }
 
-describe('retiring the v2 mirror under the vault backend', () => {
-  it('switching to vault retires the mirror, and the bytes survive under the new name', async () => {
+describe('retiring the v2 mirror in the personal shape', () => {
+  it('switching to personal retires the mirror, and the bytes survive under the new name', async () => {
     const { data, md } = dataDir('retire-basic');
-    const sqlite = await startServer({ TT_DATA_DIR: data, TT_MD_DIR: md });
-    const admin = await adminOn(sqlite.port);
+    const team = await startServer({ TT_DATA_DIR: data, TT_MD_DIR: md });
+    const admin = await adminOn(team.port);
     const put = await logAnHour(admin, 'e1-retire');
     const canonical = put.json.mirror;
     expect(mdFiles(md)).toEqual(['timesheet-admin.md']);
@@ -91,7 +91,7 @@ describe('retiring the v2 mirror under the vault backend', () => {
 
     // The switch itself: a settings write, which is also the mirror call that retires.
     const state = await admin('GET', '/api/state');
-    expect((await admin('PUT', '/api/state', { settings: { ...state.json.settings, backend: 'vault' } })).status).toBe(
+    expect((await admin('PUT', '/api/state', { settings: { ...state.json.settings, shape: 'personal' } })).status).toBe(
       200,
     );
 
@@ -100,16 +100,16 @@ describe('retiring the v2 mirror under the vault backend', () => {
     // Not eaten: byte-for-byte what the canonical file held.
     expect(readFileSync(join(md, retiredName), 'utf8')).toBe(before);
     expect(existsSync(canonical)).toBe(false);
-    await stopServer(sqlite.child);
+    await stopServer(team.child);
   }, 40000);
 
-  it('a second save under vault retires nothing further — it does not re-retire the retired file', async () => {
+  it('a second save under personal retires nothing further — it does not re-retire the retired file', async () => {
     const { data, md } = dataDir('retire-idempotent');
-    const sqlite = await startServer({ TT_DATA_DIR: data, TT_MD_DIR: md });
-    const admin = await adminOn(sqlite.port);
+    const team = await startServer({ TT_DATA_DIR: data, TT_MD_DIR: md });
+    const admin = await adminOn(team.port);
     await logAnHour(admin, 'e1-idem');
     const state = await admin('GET', '/api/state');
-    await admin('PUT', '/api/state', { settings: { ...state.json.settings, backend: 'vault' } });
+    await admin('PUT', '/api/state', { settings: { ...state.json.settings, shape: 'personal' } });
     const afterFirst = mdFiles(md);
     expect(afterFirst).toEqual([`timesheet-admin.retired-${TODAY}.md`]);
 
@@ -119,7 +119,7 @@ describe('retiring the v2 mirror under the vault backend', () => {
     await logAnHour(admin, 'e2-idem');
     await logAnHour(admin, 'e3-idem');
     expect(mdFiles(md)).toEqual(afterFirst);
-    await stopServer(sqlite.child);
+    await stopServer(team.child);
   }, 40000);
 
   it('a hand-written file at a user’s mirror path is renamed, never opened — the SB-065 case', async () => {
@@ -130,8 +130,8 @@ describe('retiring the v2 mirror under the vault backend', () => {
     mkdirSync(md, { recursive: true });
     writeFileSync(join(md, 'timesheet-admin.md'), FOREIGN, 'utf8');
 
-    const vault = await startServer({ TT_DATA_DIR: data, TT_MD_DIR: md, TT_BACKEND: 'vault' });
-    const admin = await adminOn(vault.port);
+    const personal = await startServer({ TT_DATA_DIR: data, TT_MD_DIR: md, TT_SHAPE: 'personal' });
+    const admin = await adminOn(personal.port);
     await logAnHour(admin, 'e1-foreign');
 
     const retired = mdFiles(md);
@@ -139,12 +139,12 @@ describe('retiring the v2 mirror under the vault backend', () => {
     // Read the bytes BACK. Asserting the rename without this is the fake evidence: it would
     // pass against a retirement that renamed and then rewrote.
     expect(readFileSync(join(md, retired[0]), 'utf8')).toBe(FOREIGN);
-    await stopServer(vault.child);
+    await stopServer(personal.child);
   }, 40000);
 
-  it('a sticky block is cleared with its path, so a switch back to sqlite is not wedged', async () => {
+  it('a sticky block is cleared with its path, so a switch back to team is not wedged', async () => {
     const { data, md } = dataDir('retire-blocked');
-    // 1. sqlite writes a mirror, then a foreign hand edits it → the next save blocks.
+    // 1. the team shape writes a mirror, then a foreign hand edits it → the next save blocks.
     const first = await startServer({ TT_DATA_DIR: data, TT_MD_DIR: md });
     let admin = await adminOn(first.port);
     const put = await logAnHour(admin, 'e1-block');
@@ -153,16 +153,16 @@ describe('retiring the v2 mirror under the vault backend', () => {
     expect(blocked.json.mirrorBlocked).toBeTruthy();
     await stopServer(first.child);
 
-    // 2. switch to vault: the blocked path retires, bytes and all, and the block goes with it.
-    const vault = await startServer({ TT_DATA_DIR: data, TT_MD_DIR: md, TT_BACKEND: 'vault' });
-    admin = await adminOn(vault.port);
-    const vaultState = await admin('GET', '/api/state');
-    expect(vaultState.json.mirrorBlocked).toBeFalsy();
+    // 2. switch to personal: the blocked path retires, bytes and all, and the block goes with it.
+    const personal = await startServer({ TT_DATA_DIR: data, TT_MD_DIR: md, TT_SHAPE: 'personal' });
+    admin = await adminOn(personal.port);
+    const personalState = await admin('GET', '/api/state');
+    expect(personalState.json.mirrorBlocked).toBeFalsy();
     expect(mdFiles(md)).toEqual([`timesheet-admin.retired-${TODAY}.md`]);
     expect(readFileSync(join(md, `timesheet-admin.retired-${TODAY}.md`), 'utf8')).toBe('# edited by another machine\n');
-    await stopServer(vault.child);
+    await stopServer(personal.child);
 
-    // 3. back to sqlite. A block left standing would refuse forever against a file that is not
+    // 3. back to team. A block left standing would refuse forever against a file that is not
     // even there — writeMirror rejects a standing block before it looks at the disk at all.
     const back = await startServer({ TT_DATA_DIR: data, TT_MD_DIR: md });
     admin = await adminOn(back.port);
@@ -175,22 +175,22 @@ describe('retiring the v2 mirror under the vault backend', () => {
     await stopServer(back.child);
   }, 60000);
 
-  it('a server booted straight into vault sweeps files an earlier sqlite run left, with no save at all', async () => {
-    // An install switched by TT_BACKEND alone never fires a settings write. Without the boot
+  it('a server booted straight into personal sweeps files an earlier team run left, with no save at all', async () => {
+    // An install switched by TT_SHAPE alone never fires a settings write. Without the boot
     // sweep the files would sit there looking current until somebody happened to save.
     const { data, md } = dataDir('retire-boot');
-    const sqlite = await startServer({ TT_DATA_DIR: data, TT_MD_DIR: md });
-    const admin = await adminOn(sqlite.port);
+    const team = await startServer({ TT_DATA_DIR: data, TT_MD_DIR: md });
+    const admin = await adminOn(team.port);
     const put = await logAnHour(admin, 'e1-boot');
     const before = readFileSync(put.json.mirror, 'utf8');
     expect(mdFiles(md)).toEqual(['timesheet-admin.md']);
-    await stopServer(sqlite.child);
+    await stopServer(team.child);
 
-    const vault = await startServer({ TT_DATA_DIR: data, TT_MD_DIR: md, TT_BACKEND: 'vault' });
+    const personal = await startServer({ TT_DATA_DIR: data, TT_MD_DIR: md, TT_SHAPE: 'personal' });
     // NOT logging in, NOT saving — the sweep has to have happened at boot.
     expect(mdFiles(md)).toEqual([`timesheet-admin.retired-${TODAY}.md`]);
     expect(readFileSync(join(md, `timesheet-admin.retired-${TODAY}.md`), 'utf8')).toBe(before);
-    await stopServer(vault.child);
+    await stopServer(personal.child);
   }, 40000);
 
   it('retires a file TT wrote under an mdDir that has since moved — the ledger, not a glob', async () => {
@@ -199,8 +199,8 @@ describe('retiring the v2 mirror under the vault backend', () => {
     const { data, md } = dataDir('retire-moved');
     const elsewhere = mkdtempSync(join(tmpdir(), 'tt-retire-moved-old-'));
 
-    const sqlite = await startServer({ TT_DATA_DIR: data, TT_MD_DIR: md });
-    const admin = await adminOn(sqlite.port);
+    const team = await startServer({ TT_DATA_DIR: data, TT_MD_DIR: md });
+    const admin = await adminOn(team.port);
     // write a mirror at `elsewhere`, then move the setting to a different folder
     const state = await admin('GET', '/api/state');
     expect((await admin('PUT', '/api/state', { settings: { ...state.json.settings, mdDir: elsewhere } })).status).toBe(
@@ -213,7 +213,7 @@ describe('retiring the v2 mirror under the vault backend', () => {
     expect(mdFiles(md)).toEqual(['timesheet-admin.md']);
 
     const now = await admin('GET', '/api/state');
-    expect((await admin('PUT', '/api/state', { settings: { ...now.json.settings, backend: 'vault' } })).status).toBe(
+    expect((await admin('PUT', '/api/state', { settings: { ...now.json.settings, shape: 'personal' } })).status).toBe(
       200,
     );
     // BOTH are retired: the current path (a live mirrorPath) and the abandoned one (a stamp
@@ -221,32 +221,32 @@ describe('retiring the v2 mirror under the vault backend', () => {
     expect(mdFiles(md)).toEqual([`timesheet-admin.retired-${TODAY}.md`]);
     expect(mdFiles(elsewhere)).toEqual([`timesheet-admin.retired-${TODAY}.md`]);
     expect(readFileSync(join(elsewhere, `timesheet-admin.retired-${TODAY}.md`), 'utf8')).toBe(oldBytes);
-    await stopServer(sqlite.child);
+    await stopServer(team.child);
   }, 40000);
 
   it('a second retirement on the same day does not clobber the first — the -2 suffix', async () => {
     const { data, md } = dataDir('retire-collision');
-    const sqlite = await startServer({ TT_DATA_DIR: data, TT_MD_DIR: md });
-    let admin = await adminOn(sqlite.port);
+    const team = await startServer({ TT_DATA_DIR: data, TT_MD_DIR: md });
+    let admin = await adminOn(team.port);
     await logAnHour(admin, 'e1-coll');
     const firstBytes = readFileSync(join(md, 'timesheet-admin.md'), 'utf8');
     let state = await admin('GET', '/api/state');
-    await admin('PUT', '/api/state', { settings: { ...state.json.settings, backend: 'vault' } });
+    await admin('PUT', '/api/state', { settings: { ...state.json.settings, shape: 'personal' } });
     expect(mdFiles(md)).toEqual([`timesheet-admin.retired-${TODAY}.md`]);
 
-    // back to sqlite, write a DIFFERENT mirror, and retire again the same day
+    // back to team, write a DIFFERENT mirror, and retire again the same day
     state = await admin('GET', '/api/state');
-    await admin('PUT', '/api/state', { settings: { ...state.json.settings, backend: 'sqlite' } });
+    await admin('PUT', '/api/state', { settings: { ...state.json.settings, shape: 'team' } });
     await logAnHour(admin, 'e2-coll');
     const secondBytes = readFileSync(join(md, 'timesheet-admin.md'), 'utf8');
     expect(secondBytes).not.toBe(firstBytes);
     state = await admin('GET', '/api/state');
-    await admin('PUT', '/api/state', { settings: { ...state.json.settings, backend: 'vault' } });
+    await admin('PUT', '/api/state', { settings: { ...state.json.settings, shape: 'personal' } });
 
     expect(mdFiles(md)).toEqual([`timesheet-admin.retired-${TODAY}-2.md`, `timesheet-admin.retired-${TODAY}.md`]);
     // Both retirements survive intact — renameSync would have clobbered the first.
     expect(readFileSync(join(md, `timesheet-admin.retired-${TODAY}.md`), 'utf8')).toBe(firstBytes);
     expect(readFileSync(join(md, `timesheet-admin.retired-${TODAY}-2.md`), 'utf8')).toBe(secondBytes);
-    await stopServer(sqlite.child);
+    await stopServer(team.child);
   }, 60000);
 });

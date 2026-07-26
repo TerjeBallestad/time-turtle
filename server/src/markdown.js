@@ -6,7 +6,7 @@ import { homedir } from 'node:os';
 import TT from '../../shared/core.js';
 import { DATA_DIR, MD_DIR, MD_DIR_LOCKED, MD_DIR_FROM_ENV } from './config.js';
 // SB-056: this module reads `db.js` DIRECTLY, not the storage seam, and that is deliberate.
-// `writeMirror` only ever runs under `backend: 'sqlite'` — under `vault` the mirror is off
+// `writeMirror` only ever runs in the `team` shape — under `personal` the mirror is off
 // entirely (DD-011) — so routing it through `store.js` would imply the mirror has a vault
 // meaning it does not have. Under sqlite the two are the same tables anyway.
 import { getSettings, getClients, getProjects, getTasks, getEntries, getCommits, listUsers } from './db.js';
@@ -59,7 +59,7 @@ export function mirrorPath(user) {
 // So: TT stamps every mirror file it writes (content hash + mtime + size) and re-reads the
 // file before the next write. A hash mismatch — or NO STAMP AT ALL — means TT cannot prove
 // it wrote what is there, so it refuses and records a sticky block. Same
-// never-clobber-what-you-did-not-write posture already decided for the vault backend. This
+// never-clobber-what-you-did-not-write posture already decided for the personal shape. This
 // is NOT SB-008: no watcher, nothing is ever read back into the database, and the v2 mirror
 // format is untouched (SB-069 froze it).
 //

@@ -28,7 +28,7 @@ export function MarkdownSection({ state, ui }: SettingsProps) {
   // to refuse on. So this is a client-side gate over an admin-only section whose collections
   // that admin may write anyway; it removes a footgun, not a permission. Giving it real
   // enforcement needs a distinguishable request, which is SB-101's to design.
-  const importOff = TT.backendOffReason('mdImport', state.backend);
+  const importOff = TT.shapeOffReason('mdImport', state.shape);
   const dirty = !importOff && draft != null && draft !== md;
   const download = () => {
     const blob = new Blob([md], { type: 'text/markdown' });
@@ -49,7 +49,7 @@ export function MarkdownSection({ state, ui }: SettingsProps) {
             are false under `vault`, directly above a box that says paste-back is off. */}
         {importOff
           ? TT.t(
-              'The whole timesheet as one markdown file — clients, projects and a section per day. Copy it or download it; under the vault backend it is an export, not the database.',
+              'The whole timesheet as one markdown file — clients, projects and a section per day. Copy it or download it; in the personal shape it is an export, not the database.',
             )
           : TT.t(
               'The whole timesheet persists as one markdown file — clients, projects and a section per day. Sync it to any cloud drive, edit it by hand, paste it back here. This is the entire database.',

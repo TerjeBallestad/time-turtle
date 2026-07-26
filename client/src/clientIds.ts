@@ -3,7 +3,7 @@
 // RULED by Terje 2026-07-26: **client ids are readable identifiers, derived from the
 // name — not opaque keys.** The id is a visible join key in the markdown Terje reads
 // (`- LIFE | Lifelines | client3`, `- client3 | Ballestad Studios | round 15`), and
-// under the vault backend that markdown is authoritative rather than derived, so an
+// in the personal shape that markdown is authoritative rather than derived, so an
 // opaque nanoid is a claim the format cannot make.
 //
 // This module is deliberately pure and free of React/i18n so it can be unit-tested

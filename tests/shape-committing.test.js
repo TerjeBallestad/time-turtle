@@ -1,25 +1,32 @@
-// SB-056 / DD-008: committing is refused under the vault backend, server-side.
+// SB-056 / DD-008: committing is refused in the personal shape, server-side.
 //
-// The ledger lives in weekly notes, which are phase 3, so under `vault` there is nowhere to
-// persist a commit. The two alternatives were rejected: a SQLite ledger under `vault` is the
+// The ledger lives in weekly notes, which are phase 3, so under `personal` there is nowhere to
+// persist a commit. The two alternatives were rejected: a SQLite ledger under `personal` is the
 // per-machine silent divergence this whole map exists to kill, and moving it into Catalog.md
 // now is pre-planning behind fog.
 //
 // A CONTRAST PAIR, always. A 403 on its own could equally have come from the employee/admin
 // split, so every refusal here is made BY AN ADMIN, the message is asserted to name the
-// backend, and the identical call is made against a sqlite server and asserted to succeed.
+// shape, and the identical call is made against a team server and asserted to succeed.
 //
 // And every refusal re-reads the STORED ledger afterwards: a 403 raised AFTER putCommits would
 // look identical from outside the process.
 //
-// ## Verified red-green: 2026-07-26
+// ## Verified red-green: 2026-07-26, RE-RUN by SB-100 under the new names (output TRANSCRIBED
+//    from the run, not reconstructed.)
 //   Dropping the capability check (commitCapabilityRefusal → `return null`, and the
-//   segmentLockHandler guard removed):
-//     FAIL  a new commit is refused, and the stored ledger is untouched
+//   segmentLockHandler guard forced to `const off = null`) — 4 of 6 fail:
+//     FAIL  refuses a NEW commit, as the admin, naming the shape — and the stored ledger …
 //           AssertionError: expected 200 to be 403
-//     FAIL  approve and release are refused
+//     FAIL  refuses approve and release
 //           AssertionError: expected 200 to be 403
-//   The sqlite half of every pair stays green throughout, which is what makes it a contrast.
+//     FAIL  keeps saving entries at 200 with the pre-switch ledger riding along
+//           AssertionError: expected [ '2026-W30-2026-07', …(1) ] to deeply equal [ '2026-W30-2026-07' ]
+//     FAIL  refuses UN-committing too — dropping a key is a change to the ledger
+//           AssertionError: expected 200 to be 403
+//   The third is a CASCADE, not an independent guard: the un-refused commit from the first test
+//   is still in the ledger when it re-reads. Named rather than counted as evidence.
+//   The team half of every pair stays green throughout, which is what makes it a contrast.
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -52,11 +59,11 @@ async function logAndCommit(port, id, date, key) {
   return { admin, userId: me.json.user.id, put };
 }
 
-describe('committing under the sqlite backend (the contrast)', () => {
+describe('committing in the team shape (the contrast)', () => {
   it('commits, approves and releases exactly as it always did', async () => {
-    const { data, md } = dataDir('commit-sqlite');
+    const { data, md } = dataDir('commit-team');
     const server = await startServer({ TT_DATA_DIR: data, TT_MD_DIR: md });
-    const { admin, userId, put } = await logAndCommit(server.port, 'e1-sqlite', DATE, KEY);
+    const { admin, userId, put } = await logAndCommit(server.port, 'e1-team', DATE, KEY);
     expect(put.status).toBe(200);
     const state = await admin('GET', '/api/state');
     expect(state.json.commits.map((c) => c.key)).toContain(KEY);
@@ -67,31 +74,32 @@ describe('committing under the sqlite backend (the contrast)', () => {
   }, 40000);
 });
 
-describe('committing under the vault backend', () => {
-  // One data dir, committed under sqlite and then restarted on vault — which is the situation
-  // the ride-along exists for, and the only way to have an approvable segment to refuse.
+describe('committing in the personal shape', () => {
+  // One data dir, committed under `team` and then restarted on `personal` — which is the
+  // situation the ride-along exists for, and the only way to have an approvable segment to
+  // refuse.
   let PORT;
   let USER_ID;
   let ADMIN;
 
   beforeAll(async () => {
-    const { data, md } = dataDir('commit-vault');
-    const sqlite = await startServer({ TT_DATA_DIR: data, TT_MD_DIR: md });
-    const seeded = await logAndCommit(sqlite.port, 'e1-vault', DATE, KEY);
+    const { data, md } = dataDir('commit-personal');
+    const team = await startServer({ TT_DATA_DIR: data, TT_MD_DIR: md });
+    const seeded = await logAndCommit(team.port, 'e1-personal', DATE, KEY);
     expect(seeded.put.status).toBe(200);
     USER_ID = seeded.userId;
-    await stopServer(sqlite.child);
+    await stopServer(team.child);
 
-    const vault = await startServer({ TT_DATA_DIR: data, TT_MD_DIR: md, TT_BACKEND: 'vault' });
-    PORT = vault.port;
+    const personal = await startServer({ TT_DATA_DIR: data, TT_MD_DIR: md, TT_SHAPE: 'personal' });
+    PORT = personal.port;
     ADMIN = await adminOn(PORT);
-    expect((await ADMIN('GET', '/api/state')).json.backend).toBe('vault');
+    expect((await ADMIN('GET', '/api/state')).json.shape).toBe('personal');
   }, 60000);
 
-  it('refuses a NEW commit, as the admin, naming the backend — and the stored ledger is untouched', async () => {
+  it('refuses a NEW commit, as the admin, naming the shape — and the stored ledger is untouched', async () => {
     const state = await ADMIN('GET', '/api/state');
     const entry = {
-      id: 'e2-vault',
+      id: 'e2-personal',
       date: OTHER_DATE,
       start: 540,
       end: 600,
@@ -106,8 +114,8 @@ describe('committing under the vault backend', () => {
     });
     expect(put.status).toBe(403);
     // NOT just the status: an admin session cannot be 403'd by the employee/admin split, and
-    // the message has to say which backend and why, because it reaches the user via the toast.
-    expect(put.json.error).toMatch(/vault backend/);
+    // the message has to say which shape and why, because it reaches the user via the toast.
+    expect(put.json.error).toMatch(/personal shape/);
     expect(put.json.error).toMatch(/weekly notes/);
 
     // Re-read: a 403 raised AFTER putCommits would look identical from outside.
@@ -118,11 +126,11 @@ describe('committing under the vault backend', () => {
   it('refuses approve and release', async () => {
     const approve = await ADMIN('POST', `/api/users/${USER_ID}/segments/${KEY}/approve`, {});
     expect(approve.status).toBe(403);
-    expect(approve.json.error).toMatch(/vault backend/);
+    expect(approve.json.error).toMatch(/personal shape/);
 
     const release = await ADMIN('POST', `/api/users/${USER_ID}/segments/${KEY}/release`, {});
     expect(release.status).toBe(403);
-    expect(release.json.error).toMatch(/vault backend/);
+    expect(release.json.error).toMatch(/personal shape/);
 
     // Neither lock stamp landed.
     const after = await ADMIN('GET', '/api/state');
@@ -138,7 +146,7 @@ describe('committing under the vault backend', () => {
     // logs. The client re-sends the whole ledger on every debounce; here is that debounce.
     const state = await ADMIN('GET', '/api/state');
     const entry = {
-      id: 'e3-vault',
+      id: 'e3-personal',
       date: DATE,
       start: 660,
       end: 720,
@@ -163,9 +171,9 @@ describe('committing under the vault backend', () => {
   it('the admin cross-user edit corrects the entry but leaves the frozen ledger alone', async () => {
     // END-GATE REVIEW FINDING: the THIRD ledger-write site. `PUT /api/users/:id/entries`
     // RE-FREEZES the money snapshot of any committed segment it touches, and the first pass
-    // gated only PUT /api/state and the lock verbs — so under `vault` an admin correcting an
-    // hour inside a pre-switch committed week still rewrote a ledger the backend is declared
-    // unable to hold. Reachable today: under `vault` the single user IS an admin, and the
+    // gated only PUT /api/state and the lock verbs — so under `personal` an admin correcting an
+    // hour inside a pre-switch committed week still rewrote a ledger the shape is declared
+    // unable to hold. Reachable today: under `personal` the single user IS an admin, and the
     // Review surface is not otherwise gated.
     //
     // The ENTRY edit still lands. Refusing it would wedge an admin out of correcting any week
@@ -173,7 +181,7 @@ describe('committing under the vault backend', () => {
     // ledger that is frozen, not the timesheet.
     const before = await ADMIN('GET', '/api/state');
     const frozen = before.json.commits.find((c) => c.key === KEY);
-    const target = before.json.entries.find((e) => e.id === 'e1-vault');
+    const target = before.json.entries.find((e) => e.id === 'e1-personal');
     expect(frozen.snapshot[target.id]).toBeTruthy();
 
     const edited = { ...target, label: 'corrected by admin', end: 660 };
@@ -195,7 +203,7 @@ describe('committing under the vault backend', () => {
   it('refuses UN-committing too — dropping a key is a change to the ledger', async () => {
     const put = await ADMIN('PUT', '/api/state', { commits: [] });
     expect(put.status).toBe(403);
-    expect(put.json.error).toMatch(/vault backend/);
+    expect(put.json.error).toMatch(/personal shape/);
     const after = await ADMIN('GET', '/api/state');
     expect(after.json.commits.map((c) => c.key)).toEqual([KEY]);
   });

@@ -4,7 +4,7 @@ import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
 import { PORT, MD_DIR_LOCKED } from './config.js';
-import { backendTarget, activeBackend, backendLocked } from './backend.js';
+import { shapeTarget, activeShape, shapeLocked } from './backend.js';
 import { verifyPassword, makeToken, readSessionCookie, sessionCookie, clearCookie } from './auth.js';
 // SB-056: the split is at the import site on purpose. `db` is IDENTITY ONLY here — users,
 // passwords, token versions, the first-run seed — and every TIMESHEET-STORAGE read/write goes
@@ -28,37 +28,37 @@ import TT from '../../shared/core.js';
 // A vault belongs to ONE person. There is no sane answer to whose `Calendar/Daily/2026-07-26.md`
 // two employees' entries land in, so this is ruled out by construction rather than deferred to
 // a merge story nobody wants to write. It is also what makes the seam line in store.js correct:
-// identity stays in SQLite under both backends precisely BECAUSE the vault holds one user.
+// identity stays in SQLite under both shapes precisely BECAUSE the vault holds one user.
 //
 // THREE DIRECTIONS, and the third is the one the ticket does not spell out:
-//   1. `POST /api/users` under `vault`             → 403 (in the user-management routes)
-//   2. switching TO `vault` with >1 user stored    → 403 (in PUT /api/state)
-//   3. BOOTING with an effective `vault` backend against a data dir that already holds
+//   1. `POST /api/users` under `personal`             → 403 (in the user-management routes)
+//   2. switching TO `personal` with >1 user stored    → 403 (in PUT /api/state)
+//   3. BOOTING with an effective `personal` shape against a data dir that already holds
 //      several users → the server refuses to start (before app.listen).
 //
 // Direction 3 exists because no runtime guard can fire there: nobody wrote anything, the
-// combination simply arrived — a copied data dir, a restored backup, `TT_BACKEND=vault` typed
-// on the wrong machine. Two alternatives were considered and rejected. Falling back to
-// `sqlite` would restart the mirror INTO the vault, re-creating the two-representations hazard
-// DD-011 just closed. A refused-writes read-only mode is more surface, and the recovery still
-// needs a shell. Refusing to start is the loudest available reading of DD-006's "loud and
-// explicit", and it is the only one that cannot be mistaken for working.
+// combination simply arrived — a copied data dir, a restored backup, `TT_SHAPE=personal` typed
+// on the wrong machine. Two alternatives were considered and rejected. Falling back to `team`
+// would restart the mirror INTO the vault, re-creating the two-representations hazard DD-011
+// just closed. A refused-writes read-only mode is more surface, and the recovery still needs a
+// shell. Refusing to start is the loudest available reading of DD-006's "loud and explicit",
+// and it is the only one that cannot be mistaken for working.
 //
-// It is a BACKEND claim, not a role claim — under `vault` there is exactly one user and they
+// It is a SHAPE claim, not a role claim — under `personal` there is exactly one user and they
 // are an admin — so its evidence uses an admin session and that is the right evidence here,
 // not a shortcut around the role-evidence rule.
 
-/** The ONLY string that beats a stored `vault` setting. It belongs verbatim in every refusal. */
-const BACKEND_RECOVERY = 'TT_BACKEND_LOCK=1 TT_BACKEND=sqlite';
+/** The ONLY string that beats a stored `personal` setting. It belongs verbatim in every refusal. */
+const SHAPE_RECOVERY = 'TT_SHAPE_LOCK=1 TT_SHAPE=team';
 const SECOND_USER_REFUSAL =
-  'a vault belongs to one person, so the vault backend allows exactly one user (DD-006): there is no answer to whose daily note a second person’s hours would land in. Switch to the sqlite backend to add users.';
+  'a vault belongs to one person, so the personal shape allows exactly one user (DD-006): there is no answer to whose daily note a second person’s hours would land in. Switch to the team shape to add users.';
 /** @param {number} count how many users are already stored */
-const backendSwitchRefusal = (count) =>
-  `cannot switch to the vault backend: a vault belongs to one person and this install has ${count} users (DD-006). Delete the others first, or stay on the sqlite backend.`;
+const shapeSwitchRefusal = (count) =>
+  `cannot switch to the personal shape: a vault belongs to one person and this install has ${count} users (DD-006). Delete the others first, or stay on the team shape.`;
 
-/** Is the effective backend one that permits only a single user? @returns {boolean} */
-function singleUserBackend() {
-  return activeBackend() === 'vault';
+/** Is the effective shape one that permits only a single user? @returns {boolean} */
+function singleUserShape() {
+  return activeShape() === 'personal';
 }
 
 db.seedIfEmpty();
@@ -68,31 +68,69 @@ db.seedIfEmpty();
 //
 // IT RUNS BEFORE THE SWEEP, and the order is load-bearing. A process whose contract is "I
 // refuse to start" must not mutate the vault on its way out: with the sweep first, a copied
-// data dir booted into `vault` renamed every mirror file it could find and THEN exited 1
+// data dir booted into `personal` renamed every mirror file it could find and THEN exited 1
 // telling the operator to recover — leaving a spurious `.retired-<date>.md` behind from a boot
 // that never happened. Rename-only means no bytes were lost, but the file they were looking at
 // had moved for no reason.
 {
   const users = db.listUsers().length;
-  if (singleUserBackend() && users > 1) {
+  if (singleUserShape() && users > 1) {
     console.error(
-      `[time-turtle] refusing to start: the vault backend allows exactly one user (DD-006) and this data dir holds ${users}.`,
+      `[time-turtle] refusing to start: the personal shape allows exactly one user (DD-006) and this data dir holds ${users}.`,
     );
-    console.error(`[time-turtle] recover with:  ${BACKEND_RECOVERY}`);
-    console.error(
-      '[time-turtle] that combination beats the stored backend setting, which TT_BACKEND on its own does not.',
-    );
+    console.error(`[time-turtle] recover with:  ${SHAPE_RECOVERY}`);
+    console.error('[time-turtle] that combination beats the stored shape setting, which TT_SHAPE on its own does not.');
     process.exit(1);
   }
 }
 
+// ---- SB-100: what the boot answers for itself ----
+//
+// BOTH WRITES BELOW SIT AFTER THE REFUSAL, and that is the same load-bearing ordering the
+// retirement sweep has: a process whose contract is "I refuse to start" must not mutate the
+// data dir on its way out. A refused boot writes neither a shape nor a cutover.
+{
+  const target = shapeTarget();
+  // DD-015, the inference rule: more than one user has ANSWERED THE QUESTION BY EXISTING.
+  // Stamp `team`, silently, never ask — every deployed team install sails past this with no
+  // modal, and SB-098's first-run question never has to render a refusal it cannot resolve.
+  //
+  // Keyed on `source === 'default'`, NOT on the user count alone. `env`, `env-locked` and
+  // `setting` are all installs that have already answered, and re-answering one underneath its
+  // operator would turn the loud direction-3 boot refusal into silence — someone who types
+  // TT_SHAPE=personal at a five-user data dir must still be refused, not quietly overruled.
+  //
+  // `default` + one user is the OPEN state, and it deliberately stays open: SB-098 ships the
+  // asking, and a row written here would answer the question before anyone was asked.
+  if (target.source === 'default' && db.listUsers().length > 1) {
+    store.putSettings({ shape: 'team' });
+    console.log(
+      `[time-turtle] inferred shape: team — this data dir holds ${db.listUsers().length} users, which answers it (DD-015)`,
+    );
+  }
+  // DD-016, the cutover: the instant this install became `personal`. Stamped for the EFFECTIVE
+  // shape rather than only for a stored one, because `TT_SHAPE=personal` reaches the same live
+  // vault without ever writing a setting — and an unstamped vault store has no pre-cutover
+  // history at all, i.e. every entry eligible, which is DD-016's hazard inverted.
+  //
+  // It stamps the DATE, not the shape: the row written here must never turn an env choice into
+  // a stored one, or TT_SHAPE would stop being how you change your mind.
+  //
+  // Idempotent and first-stamp-wins. ENFORCING it — no vault write, no DD-012 adoption for
+  // entries dated before it — is SB-057's, because that is where a vault write first exists.
+  if (target.shape === 'personal') {
+    const at = store.stampVaultCutover();
+    console.log(`[time-turtle] vault cutover: ${at} — entries dated before it stay in SQLite (DD-016)`);
+  }
+}
+
 // SB-056 / DD-011: the one-shot boot sweep. NOT optional and not redundant with the sweep
-// store.mirror does on every save — an install switched by `TT_BACKEND=vault` alone never
+// store.mirror does on every save — an install switched by `TT_SHAPE=personal` alone never
 // fires a settings write, so without this the mirror files would sit next to the daily notes
 // looking current until somebody happened to save. Idempotent; runs after seedIfEmpty so
 // listUsers() is populated on a first run, and after the refusal above so a server that is
 // not going to start touches nothing.
-if (!TT.backendCapabilities(activeBackend()).mirror) retireMirrors();
+if (!TT.shapeCapabilities(activeShape()).mirror) retireMirrors();
 
 const app = express();
 app.use(express.json({ limit: '4mb' }));
@@ -183,12 +221,13 @@ function stateFor(user) {
     user,
     version: store.getVersions(user.id),
     mdDirLocked: MD_DIR_LOCKED,
-    // SB-056: the EFFECTIVE backend, not the stored one — the env and the lock can both beat
+    // SB-100: the EFFECTIVE shape, not the stored one — the env and the lock can both beat
     // the setting, and every client capability check reads this. Additive and read-only: this
-    // pair is the one wire change SB-056 makes, and "backend=sqlite comes out byte-for-byte
-    // unchanged" is a claim about the DB and the mirror bytes, not about the envelope.
-    backend: activeBackend(),
-    backendLocked: backendLocked(),
+    // pair is the one wire change SB-056 makes, and "the team shape comes out byte-for-byte
+    // unchanged" is a claim about the DB and the mirror bytes, not about the envelope. The
+    // BACKEND is not on the wire: it is derived from the shape (DD-015), never chosen.
+    shape: activeShape(),
+    shapeLocked: shapeLocked(),
     // SB-065: a standing mirror refusal is STATE, not a log line — a mirror that has
     // quietly stopped updating still looks current, which is the failure this guards.
     mirrorBlocked: mirrorBlockFor(user),
@@ -352,20 +391,20 @@ function commitLedgerError(commits) {
 
 /**
  * SB-056 / DD-008: the commit capability gate. Returns the refusal message when this request
- * would CHANGE the ledger under a backend that cannot hold one, or null when it may proceed.
+ * would CHANGE the ledger under a shape that cannot hold one, or null when it may proceed.
  *
- * A CHANGE, not the presence of a ledger: an install that committed weeks under `sqlite` and
+ * A CHANGE, not the presence of a ledger: an install that committed weeks under `team` and
  * then switched keeps re-sending those segments on every debounce, and refusing them would
  * wedge it forever (see the call site). So the incoming key SET is compared against the stored
  * one — identical rides along, any difference is refused. Order and duplicates do not matter:
  * `commitLedgerError` has already rejected a repeated key with a 400 before this runs.
  *
- * The wording comes from `TT.backendOffReason` so this and Task 7's on-screen explanation
+ * The wording comes from `TT.shapeOffReason` so this and Task 7's on-screen explanation
  * cannot claim different things.
  * @param {number} userId @param {any[]} incoming @returns {string | null}
  */
 function commitCapabilityRefusal(userId, incoming) {
-  const reason = TT.backendOffReason('committing', activeBackend());
+  const reason = TT.shapeOffReason('committing', activeShape());
   if (!reason) return null;
   const stored = new Set(store.getCommits(userId).map((segment) => segment.key));
   const wanted = new Set(incoming.map((segment) => (segment == null ? undefined : segment.key)));
@@ -626,26 +665,26 @@ app.put('/api/state', requireUser, (req, res) => {
   ) {
     return res.status(403).json({ error: 'mirror folder is locked by server configuration (TT_MD_DIR_LOCK)' });
   }
-  // SB-056, DC-002 again: with TT_BACKEND_LOCK set the backend is env-only. Compare against
+  // SB-100, DC-002 again: with TT_SHAPE_LOCK set the shape is env-only. Compare against
   // the STORED value rather than rejecting the key — the client PUTs the whole settings object
   // on every currency edit, and a blanket 403 would wedge it: `useServerSync` re-queues any
   // non-409 failure and retries every 4 s forever, so an unchanged value has to ride along.
   if (
-    backendLocked() &&
+    shapeLocked() &&
     body.settings &&
-    body.settings.backend !== undefined &&
-    String(body.settings.backend) !== store.getSettings().backend
+    body.settings.shape !== undefined &&
+    String(body.settings.shape) !== store.getSettings().shape
   ) {
-    return res.status(403).json({ error: 'storage backend is locked by server configuration (TT_BACKEND_LOCK)' });
+    return res.status(403).json({ error: 'the instance shape is locked by server configuration (TT_SHAPE_LOCK)' });
   }
-  // SB-056 / DD-006 consequence 1, direction 2: refuse to switch TO `vault` while more than one
-  // user exists. Same compare-not-reject shape as the two locks above — the client re-sends the
-  // whole settings object, so this only fires on an actual CHANGE to `vault`.
-  if (body.settings && body.settings.backend === 'vault' && store.getSettings().backend !== 'vault') {
+  // SB-056 / DD-006 consequence 1, direction 2: refuse to switch TO `personal` while more than
+  // one user exists. Same compare-not-reject shape as the two locks above — the client re-sends
+  // the whole settings object, so this only fires on an actual CHANGE to `personal`.
+  if (body.settings && body.settings.shape === 'personal' && store.getSettings().shape !== 'personal') {
     const users = db.listUsers().length;
-    if (users > 1) return res.status(403).json({ error: backendSwitchRefusal(users) });
+    if (users > 1) return res.status(403).json({ error: shapeSwitchRefusal(users) });
   }
-  // SB-056 / DD-008: committing is a CAPABILITY of the backend, and under `vault` there is
+  // SB-056 / DD-008: committing is a CAPABILITY of the shape, and under `personal` there is
   // nowhere to persist a commit — the ledger belongs in weekly notes, which are phase 3.
   //
   // It refuses a CHANGE to the ledger, not its presence, which is the same shape the mdDir
@@ -895,12 +934,12 @@ app.put('/api/users/:id/entries', requireUser, requireAdmin, (req, res) => {
       }
       store.putEntries(id, marked);
       // SB-056 / DD-008: the THIRD ledger-write site, and the one the first pass missed. Under
-      // `vault` the re-freeze is skipped and the stored ledger is left verbatim — the ENTRY edit
+      // `personal` the re-freeze is skipped and the stored ledger is left verbatim — the ENTRY edit
       // still lands, because refusing it would wedge an admin out of correcting any week that
       // was ever committed, which is the same failure the ride-along exists to prevent. It is
       // the ledger that is frozen, not the timesheet. (Whether pre-switch segments should still
       // be rendered at all is SB-093, not this guard.)
-      if (commitsChanged && !TT.backendOffReason('committing', activeBackend())) store.putCommits(id, reFrozen);
+      if (commitsChanged && !TT.shapeOffReason('committing', activeShape())) store.putCommits(id, reFrozen);
       store.bumpEntriesVersion(id);
     });
   } catch (err) {
@@ -935,7 +974,7 @@ function segmentLockHandler(verb) {
     // covers them. Refused outright rather than compared: unlike the collection-replace PUT
     // above, these are deliberate one-shot verbs — nothing re-sends them on a debounce, so
     // there is no ride-along to preserve and a flat refusal cannot wedge anything.
-    const off = TT.backendOffReason('committing', activeBackend());
+    const off = TT.shapeOffReason('committing', activeShape());
     if (off) return res.status(403).json({ error: off });
     const id = +req.params.id;
     const key = req.params.key;
@@ -1123,11 +1162,11 @@ app.post('/api/clients/:id/rename', requireUser, requireAdmin, (req, res) => {
 // ---- user management (admin) ----
 app.get('/api/users', requireUser, requireAdmin, (req, res) => res.json({ users: db.listUsers() }));
 app.post('/api/users', requireUser, requireAdmin, (req, res) => {
-  // SB-056 / DD-006 consequence 1, direction 1: refuse a second user while `vault` is on.
+  // SB-056 / DD-006 consequence 1, direction 1: refuse a second user while `personal` is on.
   // Before `db.createUser` is reached, so a refusal really does leave the user table alone.
   // There is no sane answer to whose Calendar/Daily/2026-07-26.md two employees' entries land
   // in, which is why this is ruled out by construction rather than deferred to a merge story.
-  if (singleUserBackend()) return res.status(403).json({ error: SECOND_USER_REFUSAL });
+  if (singleUserShape()) return res.status(403).json({ error: SECOND_USER_REFUSAL });
   const { email, name, role, password } = req.body || {};
   if (!email || !name || !password) return res.status(400).json({ error: 'email, name and password are required' });
   if (db.findUserByEmail(email)) return res.status(409).json({ error: 'a user with that email already exists' });
@@ -1156,35 +1195,36 @@ const MIRROR_SOURCE = {
   env: 'TT_MD_DIR',
   default: 'default',
 };
-// SB-056: same lesson, same shape, for the backend. Which source won is the whole point —
-// "TT_BACKEND=vault but the stored setting says sqlite" is otherwise invisible until someone
-// runs a census.
-const BACKEND_SOURCE = {
-  'env-locked': 'TT_BACKEND, frozen by TT_BACKEND_LOCK',
-  setting: 'backend setting',
-  env: 'TT_BACKEND',
+// SB-056: same lesson, same shape, for the instance shape. Which source won is the whole point
+// — "TT_SHAPE=personal but the stored setting says team" is otherwise invisible until someone
+// runs a census. The BACKEND is printed too, but as a DERIVATION (DD-015) and never as a
+// second source: it has no env var and no setting of its own to disagree with.
+const SHAPE_SOURCE = {
+  'env-locked': 'TT_SHAPE, frozen by TT_SHAPE_LOCK',
+  setting: 'shape setting',
+  env: 'TT_SHAPE',
   default: 'default',
 };
 
 app.listen(PORT, () => {
-  const backend = backendTarget();
+  const shape = shapeTarget();
   const target = mirrorTarget();
   console.log(
-    `[time-turtle] api on http://localhost:${PORT}  ·  storage backend: ${backend.backend}  (${BACKEND_SOURCE[backend.source]})`,
+    `[time-turtle] api on http://localhost:${PORT}  ·  shape: ${shape.shape}  (${SHAPE_SOURCE[shape.source]})  ·  storage: ${shape.backend}`,
   );
-  if (backend.shadowed)
+  if (shape.shadowed)
     console.log(
-      `[time-turtle] the stored backend setting overrides TT_BACKEND=${backend.shadowed} — that backend is not in use`,
+      `[time-turtle] the stored shape setting overrides TT_SHAPE=${shape.shadowed} — that shape is not in use`,
     );
-  // SB-056 design decision 3: `vault` is selectable BEFORE SB-057 fills the vault store in,
+  // SB-056 design decision 3: `personal` is selectable BEFORE SB-057 fills the vault store in,
   // because SB-056's own required evidence needs it selectable and DD-011's retirement is
   // present tense. The cost is real and is said out loud here rather than discovered.
-  if (backend.backend === 'vault')
+  if (shape.shape === 'personal')
     console.log(
-      '[time-turtle] vault backend: the markdown mirror is off (DD-011), committing is off until phase 3 (DD-008), markdown paste-back is off, and nothing yet syncs the SQLite index from vault files (SB-057)',
+      '[time-turtle] personal shape: the markdown mirror is off (DD-011), committing is off until phase 3 (DD-008), markdown paste-back is off, and nothing yet syncs the SQLite index from vault files (SB-057)',
     );
   console.log(
-    `[time-turtle] markdown mirror → ${target.dir}  (${MIRROR_SOURCE[target.source]})${backend.backend === 'vault' ? '  — not written under the vault backend' : ''}`,
+    `[time-turtle] markdown mirror → ${target.dir}  (${MIRROR_SOURCE[target.source]})${shape.shape === 'personal' ? '  — not written in the personal shape' : ''}`,
   );
   if (target.shadowed)
     console.log(
