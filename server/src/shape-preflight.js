@@ -28,7 +28,7 @@ import { existsSync } from 'node:fs';
 import TT from '../../shared/core.js';
 import * as db from './db.js';
 import * as store from './store.js';
-import { mirrorCandidates } from './markdown.js';
+import { mirrorCandidates, mirrorPath } from './markdown.js';
 
 /**
  * THE CUTOVER THAT WOULD BE IN FORCE AFTER THE SWITCH — not necessarily the stored one.
@@ -56,12 +56,21 @@ function cutoverInForce() {
  * `to === 'personal'` — what gets STRANDED:
  *   `{ to, entries: { count, first, last }, commits: { segments }, mirrors: string[], users: number }`
  *
+ * `to === 'team'` — what the way back WRITES:
+ *   `{ to, vaultDays: { count, first, last }, mirrors: string[], users: number }`
+ *
+ * THE TWO PAYLOADS SHARE ONLY `to`, `mirrors` AND `users`, deliberately. Switching to `team`
+ * strands nothing and freezes nothing, so there is no honest `entries` or `commits` to report —
+ * and a key that means one thing in one direction and something else in the other is two terms
+ * wearing one word.
+ *
  * @param {number} userId the CALLER's id — entry and commit counts are theirs and nobody else's
  * @param {string} to the TARGET shape, one of `TT.SHAPES`
  * @returns {Record<string, unknown>}
  */
 export function shapePreflight(userId, to) {
   if (to === 'personal') return toPersonal(userId);
+  if (to === 'team') return toTeam();
   // Deliberately loud rather than an empty object, so a shape with no preflight cannot quietly
   // start answering "nothing would happen". The route validates against TT.SHAPES first, so
   // this is reached only by a shape that is legal and unimplemented.
@@ -104,6 +113,62 @@ function toPersonal(userId) {
     commits: { segments: commits.length },
     mirrors: existingMirrors(mirrorCandidates()),
     users: db.listUsers().length,
+  };
+}
+
+/**
+ * The `team` direction — the way back, and DD-018's finding that forced its second ruling:
+ * `writeMirror` writes the user's FULL timesheet, and under `personal` SQLite is the derived
+ * index holding everything. So switching back does not RESUME a feature, it writes a fresh
+ * `timesheet-<slug>.md` covering every day the `## Time Log` blocks already cover, into the same
+ * vault — two markdown representations of the same hours. The numbers that sentence needs are
+ * server-owned (DD-018 clause 6), so they come from here.
+ *
+ * MECHANISM_DEVIATION, declared in PLAN-013's setupNotes and requiring no human decision:
+ * DD-018 specifies only the `personal` payload, and these numbers appear only inside SB-116's
+ * modal mock. SB-115's own signature is `?to=personal|team`, so leaving this a 400 would make the
+ * ticket's signature a lie and force SB-116 to grow the endpoint from the client side. Nothing
+ * renders it yet, so SB-116 may reshape it — everything in it must still be true today.
+ * @returns {Record<string, unknown>}
+ */
+function toTeam() {
+  // `known` + `rev != null` is "TT HOLDS A BLOCK IN THIS NOTE" — the only state that licenses a
+  // write (shared/types.ts: "`known` is the only state that licenses a write") and the only one
+  // where a `## Time Log` block exists to stop updating.
+  //
+  // COUNTING EVERY ROW would silently promise TT maintains blocks in notes it could not even
+  // read: `unknown` is a file TT failed to read, or a read that timed out, or a day left lazy
+  // because it is iCloud-dataless; `quarantined` is one TT is actively refusing. Neither is a day
+  // whose block stops updating, because neither is a day whose block TT was updating.
+  //
+  // This is TT's OWN record in SQLite. Nothing on disk is opened — DD-018's "no vault read".
+  const dates = store
+    .listVaultIndex()
+    .filter((row) => row.state === 'known' && row.rev != null)
+    .map((row) => row.date)
+    .sort();
+
+  const users = db.listUsers();
+  return {
+    to: 'team',
+    // Simultaneously "days already written into your daily notes" and "`## Time Log` blocks that
+    // stop updating" — SB-116's mock uses one number for both because it IS one set.
+    vaultDays: {
+      count: dates.length,
+      first: dates.length ? dates[0] : null,
+      last: dates.length ? dates[dates.length - 1] : null,
+    },
+    // `mirrors` KEEPS ONE MEANING ACROSS BOTH DIRECTIONS: the mirror files this switch acts on.
+    // Under `personal` the switch retires them; under `team` it resumes writing them. The verb
+    // belongs to the direction, the direction is already in `to`, and the client owns the verb.
+    //
+    // NOT existence-filtered here, and that is the difference rather than an oversight: this is a
+    // claim about what the resumed mirror WILL write, and under `personal` those files have just
+    // been retired, so filtering by existence would answer "no files" to "which files will
+    // reappear". The `personal` direction filters because there the claim is about files a sweep
+    // will really rename.
+    mirrors: users.map(mirrorPath).sort(),
+    users: users.length,
   };
 }
 

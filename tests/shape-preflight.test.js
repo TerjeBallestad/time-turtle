@@ -80,8 +80,33 @@
 //           AssertionError: expected [] to include '/var/folders/…/timesheet-admin.md'
 //   One definition, two consumers, and the same break reds both — which is the whole reason the
 //   set was extracted rather than copied.
+//
+//   ---- the way back (Task 2), green baseline 10 of 10 ----
+//
+//   The `to=team` branch was written AFTER its test, and the test's first run against Task 1's
+//   personal-only module was red for the right reason:
+//     FAIL  answers with vaultDays, mirrors and users — the way-back numbers, and only those
+//           AssertionError: expected 500 to be 200 // Object.is equality
+//
+//   M8 — the `state === 'known' && rev != null` filter dropped, i.e. every `vault_index` row
+//   counted. 1 of 10:
+//     FAIL  answers with vaultDays, mirrors and users — the way-back numbers, and only those
+//           AssertionError: expected false to be true // Object.is equality
+//   That `false` is the poll for the COUNT TO DROP timing out: with the filter gone, quarantining
+//   a note does not reduce `vaultDays`, which is precisely the silent promise the filter exists to
+//   refuse — that TT maintains blocks in notes it could not even read.
+//
+//   M9 — `to=team`'s `mirrors` existence-filtered like `to=personal`'s. 1 of 10:
+//     FAIL  answers with vaultDays, mirrors and users — the way-back numbers, and only those
+//           AssertionError: expected [] to deeply equal [ Array(1) ]
+//   Under `personal` those files have just been retired, so filtering by existence answers "no
+//   files" to "which files will reappear".
+//
+//   M10 — `entries` and `commits` added to the `to=team` payload. 1 of 10:
+//     FAIL  answers with vaultDays, mirrors and users — the way-back numbers, and only those
+//           AssertionError: expected { to: 'team', …(5) } to not have property "entries"
 import { describe, it, expect, afterAll } from 'vitest';
-import { mkdtempSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readdirSync, readFileSync, statSync, existsSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
@@ -90,6 +115,16 @@ import TT from '../shared/core.js';
 import { startServer, stopServer, stopAllServers, adminOn, session } from './util.js';
 
 afterAll(stopAllServers);
+
+/** Poll an async predicate — the vault fan-out and the scan are both fire-and-forget. */
+async function until(predicate, { timeout = 8000, step = 50 } = {}) {
+  const deadline = Date.now() + timeout;
+  for (;;) {
+    if (await predicate()) return true;
+    if (Date.now() > deadline) return false;
+    await new Promise((r) => setTimeout(r, step));
+  }
+}
 
 function dataDir(label) {
   const data = mkdtempSync(join(tmpdir(), 'tt-' + label + '-'));
@@ -418,6 +453,182 @@ describe('DD-017: a committed segment freezes WHOLE, so the ledger wins over the
     expect(stranded).toContain(PAST);
     expect(after.json.entries.count).toBe(stranded.length);
   }, 60000);
+});
+
+// ---- the way back (PLAN-013 Task 2) ----
+//
+// DD-018's finding that forced its second ruling: `writeMirror` writes the user's FULL timesheet,
+// and under `personal` SQLite is the derived index holding everything — so switching back does not
+// resume a feature, it writes a fresh `timesheet-<slug>.md` covering every day the `## Time Log`
+// blocks already cover, into the same vault. Two markdown representations of the same hours.
+//
+// A REAL personal install with a REAL vault, and real daily notes TT really wrote, because a
+// `to=team` suite run against an install with no vault configured has every count at 0 and every
+// implementation on earth passes it.
+//
+// Red-green for this block is M8..M10 in the file header.
+const VAULT_LABEL = 'vaultday'; // distinctive, so the corruption below cannot hit anything else
+
+/**
+ * A `personal` install with a vault wired up and three days really written into daily notes.
+ * Returns with the server STILL RUNNING.
+ */
+async function personalInstallWithVault(label) {
+  const { data, md } = dataDir(label);
+  const vault = mkdtempSync(join(tmpdir(), 'tt-' + label + '-vault-'));
+  const dailyDir = join(vault, 'Calendar', 'Daily');
+  mkdirSync(dailyDir, { recursive: true });
+
+  const server = await startServer({ TT_DATA_DIR: data, TT_MD_DIR: md, TT_SHAPE: 'personal', TT_SEED_DEMO: '0' });
+  const admin = await adminOn(server.port);
+  expect((await admin('GET', '/api/state')).json.shape).toBe('personal'); // never assert vacuously
+  // ONLY `vaultPaths` — echoing the whole settings object back would store `shape: 'team'`, which
+  // a stored setting would then make win over TT_SHAPE (the hazard vault-write.test.js names).
+  let state = await admin('GET', '/api/state');
+  expect(
+    (
+      await admin('PUT', '/api/state', {
+        settings: { vaultPaths: { root: vault, daily: 'Calendar/Daily' } },
+        version: state.json.version,
+      })
+    ).status,
+  ).toBe(200);
+
+  // Days TT really writes: today onward, so the cutover cannot exclude them.
+  const written = [0, 1, 2].map((n) => TT.addDays(TT.todayStr(), n));
+  state = await admin('GET', '/api/state');
+  expect(
+    (
+      await admin('PUT', '/api/state', {
+        entries: written.map((date, i) => entry('vault-' + i, date, VAULT_LABEL)),
+        version: state.json.version,
+      })
+    ).status,
+  ).toBe(200);
+  for (const date of written) {
+    expect(await until(() => existsSync(join(dailyDir, date + '.md'))), `no note written for ${date}`).toBe(true);
+  }
+  // The index catches up asynchronously; ask the endpoint itself rather than guessing a sleep.
+  expect(
+    await until(
+      async () => (await admin('GET', '/api/shape/preflight?to=team')).json.vaultDays.count >= written.length,
+    ),
+  ).toBe(true);
+
+  return { data, md, vault, dailyDir, server, admin, written };
+}
+
+describe('GET /api/shape/preflight?to=team — the way back', () => {
+  it('answers with vaultDays, mirrors and users — the way-back numbers, and only those', async () => {
+    const install = await personalInstallWithVault('preflight-team');
+    const { data, md, dailyDir, admin, written } = install;
+
+    const before = await admin('GET', '/api/shape/preflight?to=team');
+    expect(before.status).toBe(200);
+    expect(before.json.to).toBe('team');
+    expect(before.json.vaultDays.count).toBe(written.length);
+
+    // NOW BREAK ONE NOTE, so the `known`-only filter has something real to exclude. Editing the
+    // payload while leaving TT's DD-009 digest token alone is the SB-051 chimera: a structurally
+    // valid block describing different bytes. TT quarantines it rather than adopting it — and a
+    // note TT is REFUSING is not a note whose `## Time Log` block stops updating.
+    const spoiled = written[written.length - 1];
+    const notePath = join(dailyDir, spoiled + '.md');
+    const original = readFileSync(notePath, 'utf8');
+    expect(original).toContain(VAULT_LABEL);
+    writeFileSync(notePath, original.replace(VAULT_LABEL, 'tampered-by-a-peer'), 'utf8');
+
+    // Re-pointing `vaultPaths` re-arms the engine and fires a fresh scan (server/src/index.js).
+    const state = await admin('GET', '/api/state');
+    expect(
+      (
+        await admin('PUT', '/api/state', {
+          settings: { vaultPaths: { root: install.vault, daily: 'Calendar/Daily' } },
+          version: state.json.version,
+        })
+      ).status,
+    ).toBe(200);
+    // Poll the ENDPOINT for the drop — the observable the claim is actually about.
+    expect(
+      await until(
+        async () => (await admin('GET', '/api/shape/preflight?to=team')).json.vaultDays.count === written.length - 1,
+      ),
+    ).toBe(true);
+
+    const res = await admin('GET', '/api/shape/preflight?to=team');
+    const personal = await admin('GET', '/api/shape/preflight?to=personal');
+    await stopServer(install.server.child);
+
+    // THE TWO DIRECTIONS DO NOT LEAK INTO EACH OTHER. Switching TO team strands nothing and
+    // freezes nothing, so there is no honest `entries` or `commits` to report; a key that means one
+    // thing one way and something else the other is two terms wearing one word.
+    expect(res.json).not.toHaveProperty('entries');
+    expect(res.json).not.toHaveProperty('commits');
+    expect(personal.json).not.toHaveProperty('vaultDays');
+
+    // vaultDays against THAT dir's own `vault_index`, never a literal — and specifically against
+    // the `known` + `rev != null` rows, which is "TT holds a block in this note".
+    const rows = dbVaultIndex(data);
+    const counted = rows.filter((r) => r.state === 'known' && r.rev != null);
+    expect(res.json.vaultDays.count).toBe(counted.length);
+    const dates = counted.map((r) => r.date).sort();
+    expect(res.json.vaultDays.first).toBe(dates[0]);
+    expect(res.json.vaultDays.last).toBe(dates[dates.length - 1]);
+
+    // …and the filter is doing work: the spoiled day IS in the table, is NOT `known`, and is NOT
+    // counted. Without this an implementation that counts every row passes everything above.
+    const spoiledRow = rows.find((r) => r.date === spoiled);
+    expect(spoiledRow).toBeTruthy();
+    expect(spoiledRow.state).toBe('quarantined');
+    expect(dates).not.toContain(spoiled);
+    expect(rows.length).toBeGreaterThan(counted.length);
+    for (const date of written.slice(0, -1)) expect(dates).toContain(date);
+
+    // `mirrors` is the file the RESUMED mirror would write — a claim about the future, so it is
+    // NOT filtered by existence. Under `personal` the mirror is off and no such file is on disk,
+    // and the list must still name it. (Under `to=personal` the same key IS existence-filtered,
+    // because there the claim is about files a sweep will really rename.)
+    expect(res.json.mirrors).toEqual([join(md, 'timesheet-admin.md')]);
+    expect(existsSync(res.json.mirrors[0])).toBe(false);
+    expect(personal.json.mirrors).toEqual([]);
+    expect(res.json.users).toBe(1);
+  }, 120000);
+
+  it('mutates nothing either — the same digest instrument, the team direction', async () => {
+    // MEASURED FROM A `team` BOOT, and that is a constraint of the instrument rather than a dodge.
+    // On a live `personal` install `applyVerdict` rewrites `seen_at` on EVERY scan pass, including
+    // the cheap `skip` — so the data dir legitimately changes a few times a minute with nobody
+    // touching it, and "byte-identical" is not a property that install has. Under `team`,
+    // `vaultSyncConfig()` returns null (`activeBackend() !== 'vault'`), the engine never starts,
+    // and the `vault_index` rows written during the personal phase are still in SQLite for
+    // `to=team` to count. So this asks the way-back question of a dir that really has vault days.
+    const install = await personalInstallWithVault('preflight-team-immutable');
+    const { data, md } = install;
+    await stopServer(install.server.child);
+
+    const env = { TT_DATA_DIR: data, TT_MD_DIR: md, TT_SHAPE: 'team', TT_SEED_DEMO: '0' };
+    const settle = await startServer(env); // the personal → team transition, done once
+    await adminOn(settle.port);
+    await stopServer(settle.child);
+    const seeded = digestDir(data);
+
+    // THE CONTROL: a second team boot that calls nothing. If this is not inert, the comparison
+    // below is between two equally-dirty states and proves nothing.
+    const control = await startServer(env);
+    await adminOn(control.port);
+    await stopServer(control.child);
+    expect(digestDir(data)).toBe(seeded);
+
+    const measured = await startServer(env);
+    const caller = await adminOn(measured.port);
+    // The dir really does have days to report, or a no-op implementation passes this.
+    expect((await caller('GET', '/api/shape/preflight?to=team')).json.vaultDays.count).toBeGreaterThan(0);
+    for (const to of ['team', 'personal', 'team']) {
+      expect((await caller('GET', `/api/shape/preflight?to=${to}`)).status).toBe(200);
+    }
+    await stopServer(measured.child);
+    expect(digestDir(data)).toBe(seeded);
+  }, 120000);
 });
 
 // The role half is proven with a REAL employee session, never by reading the middleware list off
