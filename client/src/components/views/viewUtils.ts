@@ -17,12 +17,13 @@ export function sumMin(entries: Entry[]): number {
 export function committedKeys(state: Catalog): Set<string> {
   return new Set((state.commits ?? []).map((commit) => commit.key));
 }
-// SB-102: a THIN WRAPPER, not a second opinion. "Derive the day's segment key and walk the
-// ledger" is written exactly once, in `TT.committedOn` (shared/core.js), which `TT.frozenSegment`
-// and `TT.readOnlyDay` also gate. This keeps the (state, date) call shape the views already use.
-export function isCommitted(state: Catalog, date: string): boolean {
-  return TT.committedOn(date, state.commits);
-}
+// SB-102: `isCommitted(state, date)` USED TO LIVE HERE and is gone rather than wrapped. It was
+// the repo's second "derive the day's segment key and walk the ledger", its only caller was
+// TimeGrid's lock expression, and that expression is now `TT.readOnlyDay` — which gates
+// `TT.committedOn` (shared/core.js), the one ledger scan. A wrapper with no callers is just the
+// second copy waiting for someone to reach for it, which is the failure `TT.vaultBound`'s own
+// header warns about. `committedKeys` above stays: it is a key SET for the Week chips, not a
+// date lookup, and WeekView asks it a different question.
 // SDD-002 ruling 5 (SB-025): which segments an admin has APPROVED (locked). The employee's
 // ledger carries approvedAt through the server strip, so these are all the Week chip and
 // the locked grid need to render an approved segment as read-only-and-un-reopenable.

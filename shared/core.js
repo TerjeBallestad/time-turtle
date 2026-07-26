@@ -256,7 +256,7 @@ TT.vaultBound = function (entry, context) {
  *
  * Deliberately shape-blind and role-blind: it answers a question about the ledger and nothing
  * else. Every rule that cares — `frozenSegment` under `personal`, `readOnlyDay`'s `team` branch
- * (SDD-002 ruling 6), and `client/src/components/views/viewUtils.ts`'s `isCommitted` — gates THIS
+ * (SDD-002 ruling 6), and `client/src/components/grid/TimeGrid.tsx`'s lock expression — gate THIS
  * rather than writing the scan again. Three copies of "derive the segment key, walk the ledger"
  * is three chances for one of them to keep an old answer after a ruling moves.
  *

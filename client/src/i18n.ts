@@ -27,6 +27,19 @@ const NO: Record<string, string> = {
     'innsending er av i den personlige formen: innsendingsloggen hører hjemme i ukenotatene, som kommer i fase 3 — en SQLite-logg per maskin ville sprikt i stillhet (DD-008). Bytt tilbake til lagform for å sende inn.',
   'applying markdown edits is off in the personal shape: the vault’s daily notes are the markdown surface now, and the v2 mirror files this would restore from are no longer maintained (DD-011). Copy and download still work.':
     'å ta i bruk markdown-endringer er av i den personlige formen: dagsnotatene i hvelvet er markdown-flaten nå, og v2-speilfilene dette ville gjenopprettet fra vedlikeholdes ikke lenger (DD-011). Kopier og last ned virker fortsatt.',
+  // SB-102 / DD-017 §3+§4: the two strings the frozen grid and the Week view render.
+  //
+  // `before your vault · read-only` is Terje's ruled string, not a suggestion — it is what a week
+  // that predates the vault says, once, and it is what the locked grid beneath it says per day.
+  // The Norwegian keeps the ruled shape: the same two halves, the same middot, no extra promise.
+  // Neither side says `cutover` (DD-017 §4 — that is the repo's word, never the screen's) and
+  // neither says anything about phase 3 importing anything, because there is no importer.
+  //
+  // The five pre-existing chip words (`open`/`committed`/`locked`/`commit`/`reopen`) and the two
+  // older lock hints are still English-only and still SB-097's ticket, deliberately not widened
+  // into here. These two are new, so they ship both languages (§5).
+  'before your vault · read-only': 'før hvelvet ditt · skrivebeskyttet',
+  'read-only': 'skrivebeskyttet',
   // SB-102 / DD-017 §1: the frozen-day refusal. Same discipline as the two capability refusals
   // above and for the same reason — `useServerSync` toasts `err.message`, which is the server's
   // raw string, so without this key a Norwegian user gets an English sentence at the one moment
