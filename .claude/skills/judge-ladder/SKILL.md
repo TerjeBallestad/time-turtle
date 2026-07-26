@@ -14,10 +14,16 @@ Route every piece of work to the **cheapest judge that can actually validate it*
 | **build** | `npm run build` (client bundles) · `node --check server/src/*.js shared/*.js` | it parses and bundles | any behavior |
 | **unit** | `npm test` (vitest) — **suite not yet set up (see backlog)**; until it lands, targeted `node -e` scripts over `shared/core.js` | pure logic: time parsing, ISO weeks, billing rounding, markdown round-trip | anything HTTP or rendered |
 | **api** | `curl` against `localhost:3001` with a cookie jar (login → act → assert JSON/status). Role checks are the canon: employee gets 403 on catalog writes, rates come back null | server behavior incl. auth, roles, persistence, mirror writes | anything the user sees |
-| **browser** | claude-in-chrome on `localhost:5173` — click through the real flow, read console (`read_console_messages`), screenshot the result | it renders, the interaction completes, state survives reload | feel, ergonomics-in-daily-use |
+| **browser** | **two instruments, one rung** (DD-013) — `npm run test:browser` (playwright, chromium, headless, against the real built client the API server already serves) · claude-in-chrome on `localhost:5173` — click through the real flow, read console (`read_console_messages`), screenshot the result | it renders, the interaction completes, state survives reload — and, for a committed Playwright flow, keeps doing so | feel, ergonomics-in-daily-use |
 | **terje** | a playable question: *Question / Least build / ≤5-min session / Answer feeds* | feel, keyboard ergonomics, legibility, pitch-readiness | — (the only Track F oracle) |
 
-Both dev servers must be up for `api`/`browser` (`npm run dev`; API :3001, app :5173). The markdown round-trip is the house golden test: `serialize(parse(md)) === md` pins the data model through any refactor.
+**Choosing the browser instrument.** **Chrome for _does this read right_** — a visual verdict on a real session, where the answer is a human-readable observation and a cropped screenshot (SB-085's mirror-blocked row is the example). **Playwright for _does this still work_** — repeatable, parallel-safe, needs nobody's browser connected, and, unlike an observation, it can go **red later**. If the check has a definite pass/fail the machine can state, commit it to `test:browser`; if the check is "look at it and tell me", that is Chrome, and its output is evidence in a report, not a gate.
+
+Playwright lives in `tests-browser/`, **never** in `npm test` — that gate stays fast and always green. Commit only what is structurally invisible below the browser: commit-boundary and mirror-bytes shaped flows, and controls that can lie about their own state (a rejected rename that leaves the refused value on screen). A browser test that only asserts JSON is an api test wearing a DOM — move it to `tests/api.test.js`.
+
+**Neither instrument replaces the `terje` rung.** Playwright can prove the mirror reads `ballestad-studios`; it cannot prove the settings table feels right. Track F still has exactly one oracle.
+
+`api` and the claude-in-chrome instrument need both dev servers up (`npm run dev`; API :3001, app :5173). `npm run test:browser` needs neither — it builds the client and serves it from a throwaway API server on a free port. The markdown round-trip is the house golden test: `serialize(parse(md)) === md` pins the data model through any refactor.
 
 **Delivering the terje rung:** always as a **gate ticket** on the board — `pm create issue "[grill] …"` (ruling) or `"[probe] feel-gate: …"` (usage session), `--related` the plan/SDD it gates — never as a plan task waiting on him. His answer arrives as a PM comment on the ticket; downstream work is `blockedBy` that ticket.
 
