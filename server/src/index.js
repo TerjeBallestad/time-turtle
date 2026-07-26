@@ -4,6 +4,7 @@ import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
 import { PORT, MD_DIR_LOCKED } from './config.js';
+import { backendTarget, activeBackend, backendLocked } from './backend.js';
 import { verifyPassword, makeToken, readSessionCookie, sessionCookie, clearCookie } from './auth.js';
 // SB-056: the split is at the import site on purpose. `db` is IDENTITY ONLY here — users,
 // passwords, token versions, the first-run seed — and every TIMESHEET-STORAGE read/write goes
@@ -11,7 +12,9 @@ import { verifyPassword, makeToken, readSessionCookie, sessionCookie, clearCooki
 // appears below that is not about a user account, it belongs on `store`. See store.js's header.
 import * as db from './db.js';
 import * as store from './store.js';
-import { writeMirror, mirrorTarget, mirrorPath, mirrorBlockFor, acknowledgeMirrorBlock } from './markdown.js';
+// SB-056: `writeMirror` is NOT imported here any more — every mirror write goes through
+// `store.mirror`, which is off under `vault` (DD-011). See store.js.
+import { mirrorTarget, mirrorPath, mirrorBlockFor, acknowledgeMirrorBlock } from './markdown.js';
 import { teamReport } from './reports.js';
 import TT from '../../shared/core.js';
 
@@ -111,6 +114,12 @@ function stateFor(user) {
     user,
     version: store.getVersions(user.id),
     mdDirLocked: MD_DIR_LOCKED,
+    // SB-056: the EFFECTIVE backend, not the stored one — the env and the lock can both beat
+    // the setting, and every client capability check reads this. Additive and read-only: this
+    // pair is the one wire change SB-056 makes, and "backend=sqlite comes out byte-for-byte
+    // unchanged" is a claim about the DB and the mirror bytes, not about the envelope.
+    backend: activeBackend(),
+    backendLocked: backendLocked(),
     // SB-065: a standing mirror refusal is STATE, not a log line — a mirror that has
     // quietly stopped updating still looks current, which is the failure this guards.
     mirrorBlocked: mirrorBlockFor(user),
@@ -525,6 +534,18 @@ app.put('/api/state', requireUser, (req, res) => {
   ) {
     return res.status(403).json({ error: 'mirror folder is locked by server configuration (TT_MD_DIR_LOCK)' });
   }
+  // SB-056, DC-002 again: with TT_BACKEND_LOCK set the backend is env-only. Compare against
+  // the STORED value rather than rejecting the key — the client PUTs the whole settings object
+  // on every currency edit, and a blanket 403 would wedge it: `useServerSync` re-queues any
+  // non-409 failure and retries every 4 s forever, so an unchanged value has to ride along.
+  if (
+    backendLocked() &&
+    body.settings &&
+    body.settings.backend !== undefined &&
+    String(body.settings.backend) !== store.getSettings().backend
+  ) {
+    return res.status(403).json({ error: 'storage backend is locked by server configuration (TT_BACKEND_LOCK)' });
+  }
   const expected = body.version;
   if (expected !== undefined && (typeof expected !== 'object' || expected === null)) {
     return res.status(400).json({ error: 'version must be an object' });
@@ -580,7 +601,7 @@ app.put('/api/state', requireUser, (req, res) => {
   /** @type {string | null} */
   let mirrorError = null;
   try {
-    mirror = writeMirror(req.user);
+    mirror = store.mirror(req.user);
   } catch (err) {
     mirrorError = /** @type {Error} */ (err).message;
     console.error('[time-turtle] markdown mirror failed:', mirrorError);
@@ -775,7 +796,7 @@ app.put('/api/users/:id/entries', requireUser, requireAdmin, (req, res) => {
   /** @type {string | null} */
   let mirrorError = null;
   try {
-    mirror = writeMirror(target); // the correction lands in the TARGET's mirror
+    mirror = store.mirror(target); // the correction lands in the TARGET's mirror
   } catch (err) {
     mirrorError = /** @type {Error} */ (err).message;
     console.error('[time-turtle] markdown mirror failed:', mirrorError);
@@ -819,7 +840,7 @@ function segmentLockHandler(verb) {
     /** @type {string | null} */
     let mirrorError = null;
     try {
-      writeMirror(target);
+      store.mirror(target);
     } catch (err) {
       mirrorError = /** @type {Error} */ (err).message;
       console.error('[time-turtle] markdown mirror failed:', mirrorError);
@@ -841,7 +862,7 @@ app.post('/api/users/:id/segments/:key/release', requireUser, requireAdmin, segm
 // mirrorBlocked for that user, so the rename answered a clean success while one or more
 // users' mirrors had silently entered the blocked state — and a blocked mirror still LOOKS
 // current on disk, which is the exact failure the guard exists to make visible. The other
-// three writeMirror call sites all surface mirrorBlocked on their response; this one was the
+// three store.mirror call sites all surface mirrorBlocked on their response; this one was the
 // odd path out. It reports now, in a LIST rather than the singular the others carry, because
 // this is the one route that writes SEVERAL users' mirrors in a single request. (The client
 // rename below writes exactly one — a pure catalog change — so it keeps the singular shape.)
@@ -882,7 +903,7 @@ app.post('/api/projects/:code/rename', requireUser, requireAdmin, (req, res) => 
     const user = db.findUserById(id);
     if (!user) continue;
     try {
-      writeMirror(user);
+      store.mirror(user);
     } catch (err) {
       const message = /** @type {Error} */ (err).message;
       mirrorErrors.push(message);
@@ -966,7 +987,7 @@ app.post('/api/clients/:id/rename', requireUser, requireAdmin, (req, res) => {
   /** @type {string | null} */
   let mirrorError = null;
   try {
-    mirror = writeMirror(req.user);
+    mirror = store.mirror(req.user);
   } catch (err) {
     mirrorError = /** @type {Error} */ (err).message;
     console.error('[time-turtle] markdown mirror failed:', mirrorError);
@@ -1007,11 +1028,35 @@ const MIRROR_SOURCE = {
   env: 'TT_MD_DIR',
   default: 'default',
 };
+// SB-056: same lesson, same shape, for the backend. Which source won is the whole point —
+// "TT_BACKEND=vault but the stored setting says sqlite" is otherwise invisible until someone
+// runs a census.
+const BACKEND_SOURCE = {
+  'env-locked': 'TT_BACKEND, frozen by TT_BACKEND_LOCK',
+  setting: 'backend setting',
+  env: 'TT_BACKEND',
+  default: 'default',
+};
 
 app.listen(PORT, () => {
+  const backend = backendTarget();
   const target = mirrorTarget();
   console.log(
-    `[time-turtle] api on http://localhost:${PORT}  ·  markdown mirror → ${target.dir}  (${MIRROR_SOURCE[target.source]})`,
+    `[time-turtle] api on http://localhost:${PORT}  ·  storage backend: ${backend.backend}  (${BACKEND_SOURCE[backend.source]})`,
+  );
+  if (backend.shadowed)
+    console.log(
+      `[time-turtle] the stored backend setting overrides TT_BACKEND=${backend.shadowed} — that backend is not in use`,
+    );
+  // SB-056 design decision 3: `vault` is selectable BEFORE SB-057 fills the vault store in,
+  // because SB-056's own required evidence needs it selectable and DD-011's retirement is
+  // present tense. The cost is real and is said out loud here rather than discovered.
+  if (backend.backend === 'vault')
+    console.log(
+      '[time-turtle] vault backend: the markdown mirror is off (DD-011), committing is off until phase 3 (DD-008), markdown paste-back is off, and nothing yet syncs the SQLite index from vault files (SB-057)',
+    );
+  console.log(
+    `[time-turtle] markdown mirror → ${target.dir}  (${MIRROR_SOURCE[target.source]})${backend.backend === 'vault' ? '  — not written under the vault backend' : ''}`,
   );
   if (target.shadowed)
     console.log(

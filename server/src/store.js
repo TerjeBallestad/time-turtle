@@ -37,6 +37,9 @@
 // contract "atomic against the index"; what a vault write does inside one is SB-057's to
 // define. That hole is NAMED, not forgotten.
 
+import { activeCapabilities } from './backend.js';
+import { writeMirror } from './markdown.js';
+
 export {
   // settings
   getSettings,
@@ -70,3 +73,28 @@ export {
   // atomicity
   transaction,
 } from './db.js';
+
+// ---- the markdown mirror, as a CAPABILITY OF THE STORE (SB-056 / DD-011) ----
+//
+// Every mirror-writing call site in the API layer goes through here rather than calling
+// `writeMirror` directly: `PUT /api/state`, the admin cross-user edit, approve/release, and
+// both renames. That is what makes DD-011 correct BY CONSTRUCTION rather than by six
+// remembered conditionals — under `vault` there is no branch anyone can forget, and
+// re-pointing `mdDir` after the switch cannot resurrect a mirror write, because the rule is
+// read off the BACKEND at call time and never off a path captured when the toggle flipped.
+//
+// It is on the store and not inside `writeMirror` for the same reason: a conditional inside
+// `writeMirror` would make the mirror look like something the vault backend has an opinion
+// about. It is not. It is something the SQLITE store does.
+//
+// Throws exactly what `writeMirror` throws (MirrorBlockedError and friends); every caller
+// already catches and reports rather than failing the save (SB-065).
+/** @param {import('../../shared/types.ts').User} user @returns {string | null} the path written, or null */
+export function mirror(user) {
+  if (!activeCapabilities().mirror) {
+    // PLAN-010 task 3 replaces this with retireMirrors(): stopping is only half of DD-011 —
+    // the files already on disk have to stop LOOKING current too.
+    return null;
+  }
+  return writeMirror(user);
+}

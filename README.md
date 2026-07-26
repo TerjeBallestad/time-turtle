@@ -22,6 +22,18 @@ admin only). The setting overrides the `TT_MD_DIR` env var and re-targets on the
 On a shared server, where "admin" is not the machine owner, set `TT_MD_DIR_LOCK=1`: the mirror
 is then frozen at `TT_MD_DIR`, the setting is ignored, and changing it is rejected (403).
 
+**Storage backend (SB-056).** `backend` selects which store holds the timesheet: `sqlite` (the
+default, and what everything above describes) or `vault`, which makes an Obsidian vault the
+source of truth and demotes SQLite to a derived index. `TT_BACKEND` supplies the default,
+**Settings → Vault → Backend** beats it, and `TT_BACKEND_LOCK=1` freezes it at `TT_BACKEND` —
+the stored setting is then ignored and changing it is rejected (403), exactly like the mirror
+lock. The startup banner names the effective backend and which source won.
+
+Selecting `vault` today turns three shipped things off, and the banner says so: the markdown
+mirror stops (and the files already written are retired — see below), committing is off until
+the weekly-note rollup lands, and markdown paste-back is off. Nothing yet syncs the SQLite
+index from vault files; that is SB-057.
+
 **Roles:**
 
 - `admin` — everything: clients, projects, rates, invoicing, users, settings.
@@ -67,6 +79,8 @@ just make a real admin user in Settings → Users and delete the default one.
 | `TT_DATA_DIR`                          | `server/data`                       | DB + secret location                                                                      |
 | `TT_MD_DIR`                            | `<data>/markdown`                   | markdown mirror dir fallback (Settings → Mirror folder wins)                              |
 | `TT_MD_DIR_LOCK`                       | unset                               | `1` freezes the mirror at `TT_MD_DIR` — Settings → Mirror folder is ignored and read-only |
+| `TT_BACKEND`                           | `sqlite`                            | default storage backend, `sqlite` or `vault` (Settings → Vault → Backend wins)            |
+| `TT_BACKEND_LOCK`                      | unset                               | `1` freezes the backend at `TT_BACKEND` — the stored setting is ignored and read-only     |
 | `TT_ADMIN_EMAIL` / `TT_ADMIN_PASSWORD` | `admin@timeturtle.local` / `turtle` | first-run admin                                                                           |
 | `TT_SEED_DEMO`                         | `1`                                 | seed demo clients/projects/entries on first run                                           |
 | `TT_SECRET`                            | generated → `data/.secret`          | session-signing secret                                                                    |

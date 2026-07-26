@@ -144,11 +144,57 @@ export interface Entry {
  */
 export type VaultTimeSeparator = 'unicode' | 'ascii' | 'hyphen';
 
+// ---- storage backend (SB-056 / SDD-003) ----
+/**
+ * Which store holds the timesheet. `sqlite` is the repo default and the company deployment;
+ * `vault` (DD-006) makes an Obsidian vault the source of truth, with SQLite demoted to a
+ * derived index. Resolved server-side by `backendTarget()` — see `AppState.backend`.
+ */
+export type Backend = 'sqlite' | 'vault';
+
+/**
+ * What a backend is ALLOWED to do. Read at call time from `TT.backendCapabilities`, by the
+ * server guards and the client surfaces alike, so a rule is a property of the BACKEND and
+ * never of a path captured at switch time (DD-011).
+ *
+ *   `mirror`    — write the v2 `|`-delimited `timesheet-<user>.md`. Off under `vault`
+ *                 (DD-011): the vault's daily notes are the markdown surface, and two
+ *                 markdown representations of the same hours in one vault is the silent
+ *                 divergence this map exists to kill.
+ *   `committing`— freeze a week's money into the commit ledger. Off under `vault` (DD-008):
+ *                 the ledger belongs in weekly notes, which are phase 3, and a per-machine
+ *                 SQLite ledger under `vault` would diverge silently. Phase 3 restores it.
+ *   `mdImport`  — paste a v2 mirror back INTO the database (Settings → Markdown backend).
+ *                 Off under `vault` (DD-011) because it is a WRITE path into the store from
+ *                 mirror bytes, and those bytes stop being maintained.
+ */
+export interface BackendCapabilities {
+  mirror: boolean;
+  committing: boolean;
+  mdImport: boolean;
+}
+
 export interface Settings {
   currency: string;
   language: string;
   /** markdown mirror directory; only present server-side / for admins */
   mdDir?: string;
+  /**
+   * SB-056: which store holds the timesheet. INSTANCE-LOCAL — it, `mdDir` and `vaultPaths`
+   * stay in SQLite under BOTH backends and must never be serialized into the catalog note
+   * (SB-058), because they are how TT FINDS the catalog: putting them there is a bootstrap
+   * loop.
+   *
+   * Reaches NO MIRROR BYTE. `TT.serializeMd` emits `currency:` / `language:` / `format: 2`
+   * and nothing else — the same reason `mdDir` and `vaultTimeSeparator` have always been
+   * invisible there — so no `format: 3` bump is in play (SB-069 stays intact) and a
+   * paste-back that drops the key is harmless (`putSettings` writes only present keys).
+   *
+   * Absent behaves as `sqlite`. `TT_BACKEND` supplies the default and this stored value
+   * beats it; `TT_BACKEND_LOCK` freezes the env value and rejects a change with 403 (DC-002,
+   * the same shape as `TT_MD_DIR_LOCK`).
+   */
+  backend?: Backend;
   /**
    * SB-063: the vault daily note's Time-column separator; absent behaves as `unicode`.
    * Reaches the bytes ONLY through TT.serializeVaultBlock's `timeSeparator` option — the v2
@@ -234,6 +280,19 @@ export interface AppState extends Catalog {
   mdDirLocked?: boolean;
   /** SB-065: this user's mirror file changed under TT, so TT has stopped writing it. */
   mirrorBlocked?: MirrorBlock | null;
+  /**
+   * SB-056: the EFFECTIVE backend — what `backendTarget()` resolved, not what is stored. Read
+   * by every client capability check (`TT.backendCapabilities(state.backend)`), which is why
+   * it is reported rather than left to the client to re-derive from `settings.backend`: the
+   * env and the lock can both beat the stored value.
+   *
+   * Additive and read-only. It is the one wire change SB-056 makes — "`backend=sqlite` comes
+   * out byte-for-byte unchanged" is a claim about the DB and the mirror bytes, NOT the
+   * envelope. Absent (an older server) behaves as `sqlite`.
+   */
+  backend?: Backend;
+  /** DC-002: TT_BACKEND_LOCK is set, so the backend is env-only and read-only in the UI. */
+  backendLocked?: boolean;
 }
 
 /**
@@ -569,6 +628,11 @@ export interface TTModule {
   timeSeparator(name?: string | null): string;
   /** SB-063: the legal Settings.vaultTimeSeparator values, default first. */
   TIME_SEPARATOR_VALUES: string[];
+  // backend capabilities (SB-056)
+  /** SB-056: the legal Settings.backend values, safe default first. The ONE home of this list. */
+  BACKENDS: Backend[];
+  /** SB-056: what a backend may do. Consulted at CALL TIME by server guards and client surfaces alike. */
+  backendCapabilities(backend?: string | null): BackendCapabilities;
   nowMin(): number;
   isRunning(entry: Entry): boolean;
   entryMinutes(entry: Entry): number;

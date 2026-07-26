@@ -92,6 +92,42 @@ const TIME_SEPARATOR_DEFAULT = TIME_SEPARATORS.unicode;
 TT.timeSeparator = (name) => (name && TIME_SEPARATORS[name]) || TIME_SEPARATOR_DEFAULT;
 /** The legal `Settings.vaultTimeSeparator` values, default first. The ONE home of this list. */
 TT.TIME_SEPARATOR_VALUES = /** @type {string[]} */ (Object.keys(TIME_SEPARATORS));
+
+// ---- SB-056: the storage backends, and what each is allowed to do ----
+//
+// THE CAPABILITY TABLE LIVES HERE, in shared code, because both sides consult it: the server
+// guards that REFUSE the operation (server/src/index.js) and the client surfaces that explain
+// why the verb is missing (WeekView, Settings → Markdown backend). One table read at CALL TIME
+// is what makes DD-011's ruling structural — "the rule is a property of the BACKEND, not of a
+// path captured at switch time" — instead of a convention repeated in six places that drift.
+//
+// ADD A NEW CAPABILITY HERE FIRST, then the guard, then the surface. A capability that exists
+// only at the guard is a rule the UI cannot explain, which is the exact failure DD-008's
+// comment names ("switching backends silently losing a shipped feature reads as a bug months
+// later").
+/** @type {Record<string, import('./types.ts').BackendCapabilities>} */
+const BACKEND_CAPABILITIES = {
+  // The repo default and the company deployment. Everything on; SB-069 froze these bytes.
+  sqlite: { mirror: true, committing: true, mdImport: true },
+  // DD-006/DD-008/DD-011. The vault's daily notes are the markdown surface, so the v2
+  // `|`-mirror stops (and is retired — see retireMirrors in server/src/markdown.js) and
+  // paste-back, a WRITE path into the store from mirror bytes, goes with it. Committing is
+  // off until phase 3 lands the weekly-note rollup that gives the ledger somewhere to live.
+  vault: { mirror: false, committing: false, mdImport: false },
+};
+/** The legal `Settings.backend` values, safe default first. The ONE home of this list. */
+TT.BACKENDS = /** @type {import('./types.ts').Backend[]} */ (
+  /** @type {unknown} */ (Object.keys(BACKEND_CAPABILITIES))
+);
+/**
+ * What this backend may do. An UNKNOWN name resolves to the `sqlite` row rather than throwing:
+ * this is read on every render and in every guard, and a settings value from a newer TT (or a
+ * hand-edited row) must degrade to today's shipped behaviour, never blank the Week view or
+ * 500 a save. The place an unknown value is REJECTED is the write — `putSettings` whitelists
+ * against TT.BACKENDS — so a bad name cannot get in here through the app in the first place.
+ * @param {string | null} [backend] @returns {import('./types.ts').BackendCapabilities}
+ */
+TT.backendCapabilities = (backend) => (backend && BACKEND_CAPABILITIES[backend]) || BACKEND_CAPABILITIES.sqlite;
 /**
  * @param {Entry} entry
  * @param {VaultTimeSeparator} [separator] a `Settings.vaultTimeSeparator` value name. Defaults to
