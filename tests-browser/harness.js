@@ -69,28 +69,26 @@ export async function startApp(opts = {}) {
     await new Promise((r) => setTimeout(r, 100));
   }
 
-  // SB-057: STORE the shape before the browser opens, for the `personal` cases.
+  // SB-133: the `personal` cases run on TT_SHAPE ALONE, with nothing stored — and that used to be
+  // impossible here.
   //
-  // Not a convenience. `TT_SHAPE=personal` with nothing stored leaves `settings.shape` reading its
-  // `team` default, and the client PUTs the WHOLE settings object on every save — so the first
-  // path typed into Settings → Vault stores `shape: 'team'` and flips the install out of the very
-  // shape it was started in. That is a real defect in the client's whole-object PUT — NOT filed on
-  // the board by this run (PLAN-012 reports adjacent defects rather than filing them), so do not go
-  // looking for a ticket number. It is not what these cases are about; a partial PUT of just
-  // `{ shape }` is the state an install is in once a person has actually chosen Personal.
-  if (opts.shape === 'personal') {
-    const login = await fetch(`http://localhost:${port}/api/auth/login`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ email: ADMIN_EMAIL, password: ADMIN_PASSWORD }),
-    });
-    const cookie = (login.headers.getSetCookie?.() ?? []).map((c) => c.split(';')[0]).join('; ');
-    await fetch(`http://localhost:${port}/api/state`, {
-      method: 'PUT',
-      headers: { 'content-type': 'application/json', cookie },
-      body: JSON.stringify({ settings: { shape: 'personal' } }),
-    });
-  }
+  // SB-057 had to pre-store `{ shape: 'personal' }` over HTTP at this exact point, because
+  // `TT_SHAPE=personal` with nothing stored left `settings.shape` reading its `team` default, the
+  // client PUT the WHOLE settings object on every save, and so the first path typed into
+  // Settings → Vault stored `shape: 'team'` and flipped the install out of the very shape it was
+  // started in. That workaround is GONE rather than merely unnecessary, deliberately: with it in
+  // place these cases could never have caught the defect, and vault-quarantine.test.js types its
+  // vault root into the real Vault folder field — the exact gesture that used to do the flipping.
+  // It is now the browser-rung witness that the flip is over, and it goes red again if the wire
+  // ever starts handing the client a shape nobody chose (see `wireSettings` in server/src/index.js).
+  //
+  // ## Verified red-green: 2026-07-26 (TRANSCRIBED). With this block removed AND `wireSettings`
+  //    put back to `return settings` for an unstored shape — i.e. the defect — 1 of 7 fails, and
+  //    it fails as the SYMPTOM rather than as a flag: typing the vault root flips the install to
+  //    `team`, the sync engine stops, and no quarantine is ever recorded for the note.
+  //      FAIL  is a row in Settings → Vault, naming the note and why it is paused
+  //            AssertionError: the server never recorded a quarantine for the note:
+  //            expected false to be true
 
   const browser = await chromium.launch({ headless: true });
   const page = await browser.newPage({ viewport: { width: 1400, height: 1000 } });

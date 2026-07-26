@@ -85,7 +85,10 @@ describe('the single-user guard — direction 2: switching to personal with user
     // Still team — the setting did not sneak in behind the refusal.
     const after = await admin('GET', '/api/state');
     expect(after.json.shape).toBe('team');
-    expect(after.json.settings.shape).toBe('team');
+    // SB-133: `undefined` is the stronger form of "did not sneak in". The wire now carries the
+    // STORED shape, and nothing is stored here — where the old `toBe('team')` read a default that
+    // a sneaked-in `team` row would have been indistinguishable from.
+    expect(after.json.settings.shape).toBeUndefined();
 
     // And the guard has not broken team: a THIRD user is still fine.
     expect(
