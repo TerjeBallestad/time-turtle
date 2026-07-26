@@ -28,6 +28,15 @@
 // Measured in the real vault: `\<br>` renders as literal text with zero <br> elements in
 // BOTH Live Preview and Reading view; a genuine `<br>` yields exactly one.
 // ## Verified red-green: 2026-07-25
+// SB-059: `Entry.tags` (the vault `Mode` column) and `Project.vaultNote` (the `[[Wikilink]]`
+// Project cell). Both round-trip; a block written before EITHER existed still parses and writes
+// back byte-identically; a `|`, a `<br>` and a space in a tag or a note name are escaped and a
+// newline is refused by the output gate rather than splitting a row; the v2 mirror does not move
+// (SB-069) and carries neither field. 12 mutations of shared/core.js, each red on the tests it
+// should be: tags dropped on write / on read, the wikilink not rendered / not resolved / stripped
+// with no catalog, spaces and `|` unescaped, an empty Mode cell parsed as `[]`, the passthrough
+// re-added as a fallback, a re-canonicalised header set, and a mirror token for `vaultNote`.
+// ## Verified red-green: 2026-07-26
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import TT from '../shared/core.js';
@@ -980,13 +989,17 @@ describe('vault block parse (SB-055)', () => {
     expect(entries.map((e) => e.billable)).toEqual([true, false, false]);
   });
 
-  it('carries a vocabulary column with no model field through verbatim (Mode → passthrough)', () => {
-    // Entry.tags does not exist yet (SB-059); dropping the cell would lose a typed `#deep`
+  it('reads the Mode column into Entry.tags, and leaves the passthrough empty (SB-059)', () => {
+    // SB-059 took `Mode` out of `vaultCells`. The passthrough MECHANISM stays (SB-044 lands on
+    // it), but no vocabulary column routes through it today — so a parse produces none at all.
     const entries = TT.parseVaultBlock(FULL).entries;
-    expect(entries.map((e) => e.vaultCells)).toEqual([{ mode: '#admin' }, { mode: '#deep' }, { mode: '#rest' }]);
+    expect(entries.map((e) => e.tags)).toEqual([['#admin'], ['#deep'], ['#rest']]);
+    expect(entries.map((e) => e.vaultCells)).toEqual([undefined, undefined, undefined]);
   });
 
-  it('carries the Project cell verbatim — `[[Planning]]` and bare `FAG` alike (SB-059 owns the mapping)', () => {
+  it('carries the Project cell verbatim when no catalog is supplied — `[[Planning]]` and bare `FAG` alike', () => {
+    // SB-059 made the wikilink↔code mapping opt-in through `opts.projects`; without it the
+    // pre-SB-059 behaviour is unchanged, which is what keeps every existing caller unmoved
     const entries = TT.parseVaultBlock(FULL).entries;
     expect(entries.map((e) => e.project)).toEqual(['[[Planning]]', 'FAG', '[[Home]]']);
   });
@@ -1132,13 +1145,14 @@ describe('vault block serialize + splice (SB-055)', () => {
     ...o,
   });
 
+  // SB-059: the Mode cell comes from `tags` now, not from the `vaultCells` passthrough
   const DAY = [
     E({
       start: 540,
       end: 555,
       project: '[[Planning]]',
       label: 'Daily planning ritual',
-      vaultCells: { mode: '#admin' },
+      tags: ['#admin'],
     }),
     E({
       start: 660,
@@ -1147,10 +1161,10 @@ describe('vault block serialize + splice (SB-055)', () => {
       label: 'Search & facets',
       note: 'Narrow the facet query',
       billable: true,
-      vaultCells: { mode: '#deep' },
+      tags: ['#deep'],
     }),
-    E({ start: 1054, project: '[[Time Turtle]]', label: 'Block format feel-gate', vaultCells: { mode: '#deep' } }),
-    E({ durMin: 30, project: '[[Home]]', vaultCells: { mode: '#rest' } }),
+    E({ start: 1054, project: '[[Time Turtle]]', label: 'Block format feel-gate', tags: ['#deep'] }),
+    E({ durMin: 30, project: '[[Home]]', tags: ['#rest'] }),
   ];
 
   it('emits SB-045’s exact frozen shape', () => {
@@ -2191,5 +2205,187 @@ describe('vault Time-column separator setting (SB-063)', () => {
     expect(out).toContain('→');
     expect(out).not.toContain('vaultTimeSeparator'); // the mirror serializes no such line
     expect(TT.parseMd(out).settings.vaultTimeSeparator).toBe(undefined);
+  });
+});
+
+describe('vault Mode tags + Project vaultNote (SB-059)', () => {
+  /** A canonical TT-written note: heading, table, digest-carrying revision line (DD-009). */
+  const note = (header, delim, rows) =>
+    ['## Time Log', '', header, delim, ...rows, '', '`revision: 1 · ' + TT.vaultPayloadDigest([header, delim, ...rows]) + '`', ''].join('\n'); // prettier-ignore
+  /** @param {Partial<import('../shared/types.ts').VaultEntry>} o */
+  const E = (o) => ({ id: 'runtime-id', date: '2026-01-05', start: null, end: null, durMin: null, project: null, label: '', note: '', billable: false, ...o }); // prettier-ignore
+  /** the runtime id is ephemeral (DD-008) — it is never part of a round-trip claim */
+  const withoutId = (entries) => entries.map(({ id, ...rest }) => rest);
+  /** @param {Partial<import('../shared/types.ts').Project>} o */
+  const P = (o) => ({ code: 'X', name: 'X', clientId: null, rate: null, billable: true, archived: false, ...o });
+
+  const PROJECTS = [
+    P({ code: 'LT-01', name: 'Lifelines Tycoon', vaultNote: 'Lifelines Tycoon' }),
+    P({ code: 'FAG', name: 'Fagbokforlaget' }), // no vaultNote — the bare-code fallback
+  ];
+
+  // ---- 1. both fields round-trip ----
+  it('tags and vaultNote survive serialize → parse as the same entries', () => {
+    const day = [
+      E({ start: 540, end: 930, project: 'LT-01', label: 'Systems pass', tags: ['#deep'], billable: true }),
+      E({ durMin: 30, project: 'FAG', label: 'Invoicing', tags: ['#admin', '#rest'] }),
+    ];
+    const region = TT.serializeVaultBlock(day, { revision: 4, projects: PROJECTS });
+    // the bytes first — a round-trip that agrees with itself about the wrong shape is no proof
+    expect(region).toContain('| 09:00→15:30 | #deep | [[Lifelines Tycoon]] | Systems pass | ✓ |');
+    expect(region).toContain('| 30m | #admin #rest | FAG | Invoicing | |');
+    const parsed = TT.parseVaultBlock(region, { date: '2026-01-05', projects: PROJECTS });
+    expect(parsed.quarantine).toBe(false);
+    expect(withoutId(parsed.entries)).toEqual(withoutId(day));
+    // the model holds the CODE; the wikilink is a rendering of it
+    expect(parsed.entries.map((e) => e.project)).toEqual(['LT-01', 'FAG']);
+  });
+
+  it('a note TT wrote with both fields is byte-identical after a full write cycle', () => {
+    const md = note('| Time | Mode | Project | Task | Bill |', '|---|---|---|---|---|', [
+      '| 09:00→15:30 | #deep | [[Lifelines Tycoon]] | Systems pass | ✓ |',
+      '| 30m | #admin #rest | FAG | Invoicing<br>- monthly | |',
+      '| **7h** | | | | **6.5h billable** |',
+    ]);
+    const opts = { date: '2026-01-05', projects: PROJECTS };
+    const parsed = TT.parseVaultBlock(md, opts);
+    expect(parsed.quarantine).toBe(false);
+    const res = TT.writeVaultBlock(md, parsed.entries, opts);
+    expect(res.quarantine).toBe(false);
+    expect(res.md).toBe(md);
+  });
+
+  // ---- 2. the absent-field case: the migration-free property, exercised ----
+  // A block written before EITHER field existed, read and written by the code that has them.
+  // This is the whole reason the header row is the schema; assuming it would be assuming away
+  // the one property the design exists to provide.
+  it('a pre-SB-059 block — no Mode column, no vaultNote — parses and writes back byte-identically', () => {
+    const md = note('| Time | Project | Task | Bill |', '|---|---|---|---|', [
+      '| 08:30→12:00 | FAG | Checkout flow<br>- wireframes | ✓ |',
+      '| 45m | INT-ADM | Invoicing | |',
+      '| **4.25h** | | | **3.5h billable** |',
+    ]);
+    // the catalog IS supplied — the new machinery is fully wired, the block simply predates it
+    const opts = { date: '2026-01-05', projects: PROJECTS };
+    const parsed = TT.parseVaultBlock(md, opts);
+    expect(parsed.quarantine).toBe(false);
+    expect(parsed.headers).toEqual(['Time', 'Project', 'Task', 'Bill']); // its own four, kept
+    expect(parsed.entries.map((e) => e.tags)).toEqual([undefined, undefined]); // no column ⇒ absent
+    // FAG is in the catalog with no vaultNote; INT-ADM is not in the catalog at all
+    expect(parsed.entries.map((e) => e.project)).toEqual(['FAG', 'INT-ADM']);
+    const res = TT.writeVaultBlock(md, parsed.entries, opts);
+    expect(res.quarantine).toBe(false);
+    expect(res.md).toBe(md);
+    expect(res.md).not.toContain('Mode'); // no column was invented on the way through
+  });
+
+  it('an empty Mode cell round-trips as empty, and parses to absent rather than []', () => {
+    const md = note('| Time | Mode | Task |', '|---|---|---|', ['| 30m | | Tidying |', '| **0.5h** | | **0.5h billable** |']); // prettier-ignore
+    const parsed = TT.parseVaultBlock(md, { date: '2026-01-05' });
+    expect(parsed.entries[0].tags).toBe(undefined);
+    expect(TT.writeVaultBlock(md, parsed.entries, { date: '2026-01-05' }).md).toBe(md);
+  });
+
+  // ---- 3. hostile content: the cell primitives, not a bare join ----
+  // SB-082 and SB-070 are what happens when a value reaches a cell without them.
+  it('a `|` and a `<br>` in a tag or a vaultNote are escaped, and the row does not split', () => {
+    const projects = [P({ code: 'ODD', name: 'Odd', vaultNote: 'Pipe | Note<br>Here' })];
+    const day = [E({ durMin: 30, project: 'ODD', label: 'Tidying', tags: ['#a|b', '#c<br>d'] })];
+    const region = TT.serializeVaultBlock(day, { headers: ['Time', 'Mode', 'Project', 'Task'], projects });
+    // THE BYTES: one `|` per column boundary, every content pipe backslash-escaped
+    expect(region).toContain('| 30m | #a\\|b #c<br>d | [[Pipe \\| Note<br>Here]] | Tidying |');
+    // and the table still has exactly header + delimiter + 1 entry + totals rows
+    expect(region.split('\n').filter((line) => line.startsWith('|'))).toHaveLength(4);
+    const parsed = TT.parseVaultBlock(region, { date: '2026-01-05', projects });
+    expect(parsed.quarantine).toBe(false);
+    expect(parsed.entries[0].tags).toEqual(['#a|b', '#c<br>d']);
+    expect(parsed.entries[0].project).toBe('ODD'); // the escaped wikilink still resolves
+  });
+
+  it('a space inside a tag is escaped, so one tag never becomes two', () => {
+    const day = [E({ durMin: 30, tags: ['#deep work', '#admin'] })];
+    const region = TT.serializeVaultBlock(day, { headers: ['Time', 'Mode'] });
+    expect(region).toContain('| 30m | #deep\\ work #admin |');
+    expect(TT.parseVaultBlock(region).entries[0].tags).toEqual(['#deep work', '#admin']);
+  });
+
+  // A newline cannot be escaped INTO a table cell — the row ends at the newline, whatever
+  // precedes it. So the honest guarantee is the same one a newline in a label already gets
+  // (SB-055's output gate): the write is REFUSED and the note comes back untouched. The row
+  // never splits, which is the property SB-082/SB-070 are about.
+  it('a newline in a tag or a vaultNote is refused by the output gate, not written as a split row', () => {
+    const host = note('| Time | Mode | Project | Task | Bill |', '|---|---|---|---|---|', ['| **0h** | | | | **0h billable** |']); // prettier-ignore
+    const tagged = TT.writeVaultBlock(host, [E({ durMin: 30, label: 'Tidying', tags: ['#a\nb'] })]);
+    expect(tagged.quarantine).toBe(true);
+    expect(tagged.reason).toBe('write-would-corrupt');
+    expect(tagged.md).toBe(host);
+    const projects = [P({ code: 'NL', name: 'NL', vaultNote: 'Two\nLines' })];
+    const linked = TT.writeVaultBlock(host, [E({ durMin: 30, label: 'Tidying', project: 'NL' })], { projects });
+    expect(linked.quarantine).toBe(true);
+    expect(linked.reason).toBe('write-would-corrupt');
+    expect(linked.md).toBe(host);
+  });
+
+  // ---- 4. the [[Wikilink]] fallback ----
+  it('renders the wikilink when vaultNote is set and the bare code when it is not', () => {
+    const day = [E({ durMin: 30, project: 'LT-01' }), E({ durMin: 45, project: 'FAG' })];
+    const region = TT.serializeVaultBlock(day, { headers: ['Time', 'Project'], projects: PROJECTS });
+    expect(region).toContain('| 30m | [[Lifelines Tycoon]] |'); // vaultNote set
+    expect(region).toContain('| 45m | FAG |'); // vaultNote absent → the bare code
+  });
+
+  it('the mapping is opt-in: with no catalog both directions are verbatim, exactly as before SB-059', () => {
+    const day = [E({ durMin: 30, project: 'LT-01' })];
+    expect(TT.serializeVaultBlock(day, { headers: ['Time', 'Project'] })).toContain('| 30m | LT-01 |');
+    const md = note('| Time | Project |', '|---|---|', ['| 30m | [[Lifelines Tycoon]] |', '| **0.5h** | **0.5h billable** |']); // prettier-ignore
+    expect(TT.parseVaultBlock(md).entries[0].project).toBe('[[Lifelines Tycoon]]');
+  });
+
+  it('a wikilink no project claims is carried verbatim — TT never invents a code', () => {
+    const md = note('| Time | Project |', '|---|---|', ['| 30m | [[Planning]] |', '| **0.5h** | **0.5h billable** |']); // prettier-ignore
+    const opts = { date: '2026-01-05', projects: PROJECTS };
+    expect(TT.parseVaultBlock(md, opts).entries[0].project).toBe('[[Planning]]');
+    // and being unable to resolve it does not stop the note round-tripping
+    expect(TT.writeVaultBlock(md, TT.parseVaultBlock(md, opts).entries, opts).md).toBe(md);
+  });
+
+  // ---- the read chain and the emit chain stay in step for Mode ----
+  it('the Mode cell has ONE source: a stale vaultCells.mode can no longer reach the bytes', () => {
+    // the drift this guards is a passthrough FALLBACK — `tags` when set, the old raw cell when
+    // not. The second entry is the one that catches it: no tags, a stale cell, and an empty
+    // Mode column is still the right answer, because `Mode` is not a passthrough column any more
+    const day = [E({ durMin: 30, tags: ['#deep'] }), E({ durMin: 15, vaultCells: { mode: '#stale' } })];
+    const region = TT.serializeVaultBlock(day, { headers: ['Time', 'Mode'] });
+    expect(region).toContain('| 30m | #deep |');
+    expect(region).toContain('| 15m | |');
+    expect(region).not.toContain('#stale');
+  });
+
+  // ---- the Mode cell codec ----
+  it('encodeTagsCell / decodeTagsCell are inverse, and normalise only what a cell cannot carry', () => {
+    expect(TT.encodeTagsCell(['#deep', '#admin'])).toBe('#deep #admin');
+    expect(TT.encodeTagsCell([])).toBe('');
+    expect(TT.encodeTagsCell(undefined)).toBe('');
+    expect(TT.encodeTagsCell(['  #deep  ', '', '   '])).toBe('#deep'); // trimmed, empties dropped
+    expect(TT.decodeTagsCell('')).toEqual([]);
+    expect(TT.decodeTagsCell('#deep   #admin')).toEqual(['#deep', '#admin']); // runs collapse
+    expect(TT.decodeTagsCell('#a\\|b')).toEqual(['#a|b']);
+    expect(TT.decodeTagsCell(TT.encodeTagsCell(['#a b', '#c\\d']))).toEqual(['#a b', '#c\\d']);
+    expect(TT.decodeTagsCell('deep')).toEqual(['deep']); // a bare token stays bare — no `#` invented
+  });
+
+  // ---- 5. the v2 mirror does not move (SB-069) ----
+  // `backend=sqlite` must come out of the vault effort byte-for-byte identical, so neither
+  // field may reach a mirror byte. The consequence — recorded, not hidden — is that neither
+  // field SURVIVES the mirror either; today the vault block is their only serialization.
+  it('the v2 mirror is byte-identical with tags and vaultNote set, and carries neither back', () => {
+    expect(TT.serializeMd(TT.parseMd(V2_FIXTURE))).toBe(V2_FIXTURE); // the golden, restated
+    const state = TT.parseMd(V2_FIXTURE);
+    state.projects[0].vaultNote = 'Lifelines Tycoon';
+    state.entries[0].tags = ['#deep'];
+    expect(TT.serializeMd(state)).toBe(V2_FIXTURE);
+    const back = TT.parseMd(TT.serializeMd(state));
+    expect(back.projects[0].vaultNote).toBe(undefined);
+    expect(back.entries[0].tags).toBe(undefined);
   });
 });

@@ -309,10 +309,15 @@ export function putTasks(userId, tasks) {
 }
 
 // ---- entries (per user) ----
+// SB-059: `tags` joins `billable`/`editedByAdmin` in the Omit. Not a workaround — the SELECT
+// below really does not return it: there is no tags column, because the vault block is that
+// field's only serialization today. Naming it here is what keeps the cast a true statement
+// about this query, and is why the compiler will flag the day a tags column lands and this
+// Omit is left behind.
 /** @param {number} userId @returns {Entry[]} */
 export function getEntries(userId) {
   const rows =
-    /** @type {(Omit<Entry, 'billable' | 'editedByAdmin'> & { billable: number, editedByAdmin: number })[]} */ (
+    /** @type {(Omit<Entry, 'billable' | 'editedByAdmin' | 'tags'> & { billable: number, editedByAdmin: number })[]} */ (
       db
         .prepare(
           'SELECT id, date, start, end, dur_min AS durMin, project, label, note, billable, edited_by_admin AS editedByAdmin FROM entries WHERE user_id = ? ORDER BY date, id',
@@ -349,7 +354,7 @@ export function getAllEntries(from, to) {
     (where.length ? ' WHERE ' + where.join(' AND ') : '') +
     ' ORDER BY user_id, date, id';
   const rows =
-    /** @type {(Omit<Entry & { userId: number }, 'billable' | 'editedByAdmin'> & { billable: number })[]} */ (
+    /** @type {(Omit<Entry & { userId: number }, 'billable' | 'editedByAdmin' | 'tags'> & { billable: number })[]} */ (
       db.prepare(sql).all(...params)
     );
   return rows.map((entry) => ({ ...entry, billable: !!entry.billable }));

@@ -494,6 +494,100 @@ TT.decodeTaskCell = function (cell) {
   return { label: TT.decodeCell(only), note: '' };
 };
 
+// ---- vault `Mode` cell codec (SB-059) ----
+// `Entry.tags` ⇄ one `Mode` cell. Built the same way encodeTaskCell is — escape the fields
+// with TT.encodeCell FIRST, then escape this cell's own structural delimiter — because the
+// alternative is a second, hand-maintained copy of the escape rule, which is the drift
+// PLAN-008 unified away.
+//
+// THE DELIMITER IS THE SPACE, because that is how a human writes two tags in one cell
+// (`#deep #admin`) and SB-045 froze the shape Terje already writes. So a tag containing a
+// space has to escape it, exactly as a note mentioning `<br>` escapes that. Skipping this is
+// SB-082/SB-070's failure mode one layer down: not a split ROW, but a split TAG — `#deep work`
+// silently becoming two tags, and the next write emitting bytes Terje never typed.
+//
+// `<br>` NEEDS NO ESCAPE HERE, and must not get one. It is structural only in the Task cell;
+// in a Mode cell it is ordinary content, and the row-level `|` escaping already keeps it from
+// touching the table. Escaping it anyway would emit `\<br>` for a value that had no problem.
+//
+// ENCODE NORMALISES, DECODE IS FAITHFUL. Each tag is trimmed and the empties dropped on the
+// way out, because a table cell is trimmed on the way in (vaultRowCells → splitCells) — an
+// edge space could not survive the round-trip whatever we did, so it is removed at the one
+// place that can do it losslessly instead of silently mangled at the other. Interior spaces
+// are untouched.
+const TAG_DELIM = ' ';
+/** @param {string} s already \-escaped for `\` and `|` @returns {string} */
+const escapeTagSpaces = (s) => (s.indexOf(TAG_DELIM) < 0 ? s : s.split(TAG_DELIM).join('\\' + TAG_DELIM));
+/**
+ * Encode tags into one vault `Mode` cell. No tags ⇒ the empty cell.
+ * @param {string[] | null} [tags] @returns {string}
+ */
+TT.encodeTagsCell = function (tags) {
+  if (!tags || !tags.length) return '';
+  /** @type {string[]} */
+  const out = [];
+  for (const tag of tags) {
+    const trimmed = String(tag == null ? '' : tag).trim();
+    if (trimmed) out.push(escapeTagSpaces(TT.encodeCell(trimmed)));
+  }
+  return out.join(TAG_DELIM);
+};
+/**
+ * Reverse of encodeTagsCell. Splits on UNESCAPED spaces only; runs of them collapse (an
+ * empty piece is not a tag), so a hand-typed `#deep   #admin` reads as two tags and
+ * converges on one space on the next write.
+ * @param {string} cell @returns {string[]}
+ */
+TT.decodeTagsCell = function (cell) {
+  /** @type {string[]} */
+  const out = [];
+  for (const part of TT.splitUnescaped(cell == null ? '' : String(cell), TAG_DELIM)) {
+    if (part !== '') out.push(TT.decodeCell(part));
+  }
+  return out;
+};
+
+// ---- vault `Project` cell: the `[[Wikilink]]` fallback (SB-059) ----
+// `Project.vaultNote` set ⇒ the cell renders `[[Lifelines Tycoon]]`; absent ⇒ the bare code
+// (`LT-01`). The MODEL always holds the code — the wikilink is a rendering of it, produced on
+// write and undone on read — so nothing downstream has to know which spelling a note used.
+//
+// It is a per-PROJECT field, not a column config: two projects in one block render
+// differently, which a per-column switch cannot express.
+//
+// BOTH DIRECTIONS ARE OPT-IN, through the `projects` option. Without it TT has no catalog to
+// resolve against, and the cell is carried verbatim — which is precisely the pre-SB-059
+// behaviour, so every existing caller and golden is unmoved. A wikilink no project claims is
+// also carried verbatim (a hand-written `[[Planning]]` for a project TT does not know is
+// still Terje's bytes, and inventing a code for it would be a guess).
+//
+// The brackets are composed here and stripped here, so `Project.vaultNote` holds the note
+// NAME. Escaping composes on top: the cell is `[[` + note + `]]` and THEN TT.encodeCell'd, so
+// a `|` in a note name escapes like any other content and cannot split the row.
+const WIKILINK_RE = /^\[\[(.+)\]\]$/;
+/**
+ * How a project code is written in a `Project` cell (still UNescaped).
+ * @param {string} code @param {Project[]} [projects] @returns {string}
+ */
+function vaultProjectCell(code, projects) {
+  if (!projects) return code;
+  const project = projects.find((candidate) => candidate.code === code);
+  return project && project.vaultNote ? '[[' + project.vaultNote + ']]' : code;
+}
+/**
+ * The inverse: a decoded `Project` cell back to a project code. First match wins — two
+ * projects claiming one note is a catalog the UI has to prevent, not something the parser
+ * can arbitrate.
+ * @param {string} value decoded cell @param {Project[]} [projects] @returns {string}
+ */
+function vaultProjectCode(value, projects) {
+  if (!projects) return value;
+  const m = WIKILINK_RE.exec(value);
+  if (!m) return value;
+  const project = projects.find((candidate) => candidate.vaultNote === m[1]);
+  return project ? project.code : value;
+}
+
 // ---- vault block region (SB-055) ----
 // This is the thing standing between a malformed daily note and TT overwriting Terje's
 // Intentions, Habits, Captures and Reflection. It locates the block or REFUSES; it never
@@ -831,15 +925,20 @@ TT.locateVaultBlock = function (md, opts) {
 // because the key IS the lowercased label — that is a definition, not a guess — and the
 // block's own label spelling is preserved for re-emission, so bytes still round-trip.
 //
-// THE PASSTHROUGH. `Entry.tags` does not exist yet (SB-059 adds it and is blockedBy
-// SB-055), so the `Mode` cell has no field to map to. Any vocabulary column TT has no
-// model mapping for is carried RAW (still escaped) on `entry.vaultCells` and re-emitted
-// verbatim — re-emitting exactly the bytes it read is the only lossless option for a
-// value TT cannot interpret. SB-059's seam: adding `Entry.tags` removes `mode` from here.
+// THE PASSTHROUGH. Any vocabulary column TT has no model mapping for is carried RAW (still
+// escaped) on `entry.vaultCells` and re-emitted verbatim — re-emitting exactly the bytes it
+// read is the only lossless option for a value TT cannot interpret.
 //
-// PROJECT IS VERBATIM IN PHASE 1. `Project.vaultNote` is SB-059's, so `[[Planning]]` and
-// bare `FAG` are both carried literally into `entry.project`. Nothing consumes a
-// vault-parsed project before SB-056/SB-057 wire it, so the literal value is inert.
+// SB-059 EMPTIED IT. `Mode` was its only occupant; it is `Entry.tags` now, so as of today
+// every vocabulary column has a model field and a parse never produces `vaultCells` at all.
+// The mechanism stays because SB-044's settings-extended vocabulary lands on it — a column
+// TT is told about but has no field for is exactly what it is for. Do not delete it for
+// being unused; that is the state it is supposed to be in.
+//
+// PROJECT RESOLVES ONLY WITH A CATALOG (SB-059). `opts.projects` present ⇒ a `[[Wikilink]]`
+// cell whose note some project claims via `Project.vaultNote` parses to that project's CODE,
+// which is what the model holds. Absent, or claimed by nobody, the cell is carried literally
+// into `entry.project` — the pre-SB-059 behaviour, unchanged. See `vaultProjectCode`.
 //
 // ROW-LEVEL QUARANTINE. A row that parses as neither an entry nor the generated totals
 // row quarantines the whole block. It is not dropped and not guessed — that is what
@@ -853,7 +952,7 @@ const BILL_YES = '✓'; // U+2713. SB-045: `✓` or blank — never `—`, and n
  * carries it), so SB-056/SB-057 supply it here. It defaults to '' rather than today, so
  * a caller that forgets it produces a visibly dateless entry instead of a silently
  * misdated one.
- * @param {string} md @param {{ heading?: string, date?: string }} [opts]
+ * @param {string} md @param {{ heading?: string, date?: string, projects?: Project[] }} [opts]
  * @returns {import('./types.ts').VaultBlockParseResult}
  */
 TT.parseVaultBlock = function (md, opts) {
@@ -861,6 +960,7 @@ TT.parseVaultBlock = function (md, opts) {
   if (loc.quarantine) return loc; // propagated UNCHANGED — the locator owns its reasons
   const lines = String(md == null ? '' : md).split('\n');
   const date = (opts && opts.date) || '';
+  const projects = (opts && opts.projects) || undefined; // absent ⇒ Project cells stay verbatim
 
   // the header row IS the schema
   const headers = vaultRowCells(lines[loc.headerLine]);
@@ -910,8 +1010,14 @@ TT.parseVaultBlock = function (md, opts) {
           if (!parsed) return vaultQuarantine('unparseable-time');
           applyParsed(entry, parsed);
         }
+      } else if (keys[c] === 'mode') {
+        // SB-059: an empty cell leaves `tags` ABSENT rather than `[]` — the emit-when-set
+        // discipline `editedByAdmin` already follows, and it keeps a blank Mode cell and a
+        // block with no Mode column reading the same way (DD-008 rule 8 keys them identically)
+        const tags = TT.decodeTagsCell(raw);
+        if (tags.length) entry.tags = tags;
       } else if (keys[c] === 'project') {
-        entry.project = raw === '' ? null : TT.decodeCell(raw);
+        entry.project = raw === '' ? null : vaultProjectCode(TT.decodeCell(raw), projects);
       } else if (keys[c] === 'task') {
         const { label, note } = TT.decodeTaskCell(raw);
         entry.label = label;
@@ -1009,8 +1115,12 @@ function vaultTotals(entries) {
  * `opts.timeSeparator` (SB-063) is `Settings.vaultTimeSeparator` — and this is the ONLY door
  * it comes through. The v2 mirror shares TT.fmtTimeCell but does not share this option, so
  * the setting cannot move a mirror byte (SB-069).
+ *
+ * `opts.projects` (SB-059) is the catalog the `Project` column renders through — the same
+ * opt-in shape, and for the same reason: absent, the entry's project code is written bare,
+ * which is byte-for-byte what TT wrote before SB-059.
  * @param {VaultEntry[]} entries
- * @param {{ heading?: string, headers?: string[], revision?: number, timeSeparator?: VaultTimeSeparator }} [opts]
+ * @param {{ heading?: string, headers?: string[], revision?: number, timeSeparator?: VaultTimeSeparator, projects?: Project[] }} [opts]
  * @returns {string}
  */
 TT.serializeVaultBlock = function (entries, opts) {
@@ -1019,6 +1129,7 @@ TT.serializeVaultBlock = function (entries, opts) {
   const headers = (opts && opts.headers && opts.headers.length ? opts.headers : VAULT_COLUMNS).slice();
   const revision = opts && opts.revision != null ? opts.revision : 1; // a first write starts at 1
   const timeSeparator = (opts && opts.timeSeparator) || undefined; // absent ⇒ `unicode`, today's bytes
+  const projects = (opts && opts.projects) || undefined; // absent ⇒ the bare project code
   const keys = headers.map((label) => label.toLowerCase());
 
   const lines = ['## ' + heading, '', vaultRow(headers), '|' + headers.map(() => '---').join('|') + '|'];
@@ -1027,11 +1138,13 @@ TT.serializeVaultBlock = function (entries, opts) {
       vaultRow(
         keys.map((key) => {
           if (key === 'time') return TT.fmtTimeCell(entry, timeSeparator);
-          if (key === 'project') return entry.project ? TT.encodeCell(entry.project) : '';
+          if (key === 'mode') return TT.encodeTagsCell(entry.tags);
+          if (key === 'project') return entry.project ? TT.encodeCell(vaultProjectCell(entry.project, projects)) : '';
           if (key === 'task') return TT.encodeTaskCell({ label: entry.label, note: entry.note });
           if (key === 'bill') return entry.billable ? BILL_YES : '';
-          // a vocabulary column TT has no model field for — re-emitted verbatim from the
-          // raw cell the parser carried, so `Mode` survives until SB-059 gives it a home
+          // a vocabulary column TT has no model field for — re-emitted verbatim from the raw
+          // cell the parser carried. Empty today (SB-059 gave `Mode` a home); SB-044's
+          // settings-extended vocabulary is what refills it
           return (entry.vaultCells && entry.vaultCells[key]) || '';
         }),
       ),
@@ -1080,7 +1193,7 @@ TT.serializeVaultBlock = function (entries, opts) {
  * re-emitted unchanged. When a write bumps the counter is SB-057's arbitration to rule on,
  * not this function's to assume.
  * @param {string} md @param {VaultEntry[]} entries
- * @param {{ heading?: string, date?: string, headers?: string[], revision?: number, timeSeparator?: VaultTimeSeparator }} [opts]
+ * @param {{ heading?: string, date?: string, headers?: string[], revision?: number, timeSeparator?: VaultTimeSeparator, projects?: Project[] }} [opts]
  * @returns {{ md: string, quarantine: boolean, reason: import('./types.ts').VaultQuarantineReason | null }}
  */
 TT.writeVaultBlock = function (md, entries, opts) {
@@ -1101,6 +1214,9 @@ TT.writeVaultBlock = function (md, entries, opts) {
     // SB-063: absent ⇒ `unicode`. The write-would-corrupt gate below re-parses the result,
     // so a bad value can never leave a note TT's own parser refuses.
     timeSeparator: opts && opts.timeSeparator,
+    // SB-059: the SAME catalog the parse above used, so the two directions cannot disagree
+    // about which spelling a project has — and the gate below re-parses with it too.
+    projects: opts && opts.projects,
   });
   const out = lines
     .slice(0, loc.start)
@@ -1199,6 +1315,11 @@ TT.writeVaultBlock = function (md, entries, opts) {
 // field 3 whether it arrives from the passthrough (phase 1) or from `Entry.tags` (SB-059). Pinning the
 // slot today is the whole point: SB-059 giving `Mode` a model field must not move it in the string.
 //
+// SB-059 HAS SINCE LANDED, and the slot held: field 3 is `TT.encodeTagsCell(entry.tags)` DECODED —
+// i.e. the tags space-joined, `#` included, which is the same string the passthrough produced for the
+// same cell. `#deep` keyed as `#deep` before and keys as `#deep` now. That is not an accident of
+// storing the `#`; it is why the tokens are stored verbatim (see `Entry.tags` in types.ts).
+//
 // A column the block does not declare contributes the empty string, so a pre-`Mode` 4-column block and a
 // 5-column block with a blank `Mode` key identically. Any column SB-044 adds beyond the frozen five
 // appends at field 8+ in vocabulary order as `<key>=<value>`, so adding a column never re-keys the rows
@@ -1234,8 +1355,11 @@ TT.writeVaultBlock = function (md, entries, opts) {
 // Each of these would change the digest of rows already on disk, so each is a migration if it lands after
 // notes exist:
 //
-// - SB-059 gives `Project` a wikilink↔code mapping. Field 4 currently holds `[[Planning]]` verbatim
-//   and would later hold a resolved code.
+// - SB-059's `Project` wikilink↔code mapping — LANDED, and still a live hazard, because it is
+//   OPT-IN. Field 4 holds the resolved CODE when a caller passes `projects` and some project claims
+//   the note, and the verbatim `[[Planning]]` otherwise. So the day SB-056/SB-057 starts passing the
+//   catalog, every row whose project has a `vaultNote` re-keys. Turning the option on is the
+//   migration, not merging this ticket.
 // - SB-076, if ruled "normalise `<br>` lookalikes", changes note values.
 // - Rule 4's consequence — editing a row changes its key, so a committed entry that is later edited
 //   loses its `commitSnapshot` link. Filed as SB-079 rather than decided here, because whether

@@ -57,6 +57,21 @@ export interface Project {
    * (emit-when-true ` | archived` token, the ` | nb` discipline).
    */
   archived: boolean;
+  /**
+   * SB-059: the vault note this project is written as in the daily-note table. Set, the
+   * `Project` cell renders `[[Lifelines Tycoon]]`; absent, it renders the bare code
+   * (`LT-01`). A per-project field, deliberately NOT a column config — two projects in
+   * one block can render differently, which a per-column switch cannot express.
+   *
+   * The value is the note NAME, without the brackets: TT composes `[[` … `]]` on write
+   * and strips them on read, so a stored `[[X]]` would emit `[[[[X]]]]`.
+   *
+   * Reaches the bytes ONLY through the `projects` option of TT.serializeVaultBlock /
+   * TT.parseVaultBlock / TT.writeVaultBlock. The v2 mirror serializes no token for it
+   * (SB-069 froze those bytes), which also means it does not survive a mirror round-trip
+   * yet — nothing produces one before SB-047/SB-056 wire a writer.
+   */
+  vaultNote?: string;
 }
 
 /**
@@ -94,6 +109,27 @@ export interface Entry {
    * additively (emit-when-true `[ea]` token, the ` [nb]` discipline).
    */
   editedByAdmin?: boolean;
+  /**
+   * SB-059: the vault table's `Mode` column, as a real model field — `['#deep']`,
+   * `['#admin']`. Before this it was carried raw on `VaultEntry.vaultCells.mode`, which
+   * meant TT could re-emit a hand-typed `#deep` but could never read, filter or render it.
+   *
+   * VALUES ARE THE TOKENS AS WRITTEN, `#` INCLUDED. The alternative (store `deep`,
+   * re-add the `#` on write) would force a normalisation ruling this ticket has no
+   * mandate for — SB-045's own dataview regex accepts `#?(\w+)`, so a hand-written bare
+   * `deep` is legal, and re-emitting it as `#deep` would rewrite Terje's bytes. Storing
+   * the token verbatim keeps the round-trip byte-exact for every shape (`#deep`,
+   * `deep`, `#work/deep`) and leaves the `#`-stripping question to the renderer (SB-047).
+   *
+   * OPTIONAL, and absent means "none" — the same discipline as `editedByAdmin`. An empty
+   * `Mode` cell and a block with no `Mode` column both parse to absent, so a SQLite row
+   * (which carries no tags today) is still an honest `Entry` and the db.js cast stays true.
+   *
+   * Multiple tags share one cell, space-separated (`#deep #admin`); a space INSIDE a tag
+   * is escaped, which is why the cell has its own codec pair (TT.encodeTagsCell /
+   * TT.decodeTagsCell) rather than a bare `join(' ')`.
+   */
+  tags?: string[];
 }
 
 /**
@@ -222,9 +258,12 @@ export interface MirrorBlock {
  * An entry as it comes out of (or goes into) a vault block. Identical to `Entry` plus the
  * phase-1 passthrough: vocabulary columns TT parsed but has no model field for, keyed by
  * the lowercased header label and holding the RAW (still-escaped) cell, so they are
- * re-emitted verbatim. Today that is `Mode` — `Entry.tags` does not exist yet (SB-059 adds
- * it and is blockedBy SB-055), and dropping the cell would lose a hand-typed `#deep` on the
- * next write. SB-059's seam: adding `tags` removes `mode` from here.
+ * re-emitted verbatim.
+ *
+ * SB-059 TOOK `Mode` OUT OF HERE — it is `Entry.tags` now, read and written like any other
+ * modelled column. The passthrough itself stays: it is the mechanism SB-044's
+ * settings-extended vocabulary lands on, and every column it adds arrives here first.
+ * As of today NO column routes through it, so a parse never produces `vaultCells` at all.
  *
  * It is a SEPARATE type rather than an optional field on `Entry` deliberately. The sqlite
  * path casts query rows to `Entry` (server/src/db.js), and this field can never come out of
@@ -536,6 +575,15 @@ export interface TTModule {
   encodeTaskCell(v: { label?: string; note?: string }): string;
   decodeTaskCell(cell: string): { label: string; note: string };
   /**
+   * SB-059: the vault `Mode` column's codec — `Entry.tags` ⇄ one cell. Composes on top of
+   * encodeCell exactly as encodeTaskCell does, with the space as its structural delimiter
+   * instead of `<br>`: a tag containing a space is escaped, so it cannot become two tags.
+   * Encode trims each tag and drops the empties (a cell is trimmed on read, so a leading
+   * or trailing space could never survive anyway).
+   */
+  encodeTagsCell(tags?: string[] | null): string;
+  decodeTagsCell(cell: string): string[];
+  /**
    * SB-055: locate the vault block between its two anchors — the `## <heading>` line
    * (name from `opts.heading`, default `Time Log`) and the `` `revision: N` `` line —
    * or return a quarantine verdict. Never throws, and never returns a region it is
@@ -552,17 +600,31 @@ export interface TTModule {
    * SUBSET of the canonical-English vocabulary (`Time`, `Mode`, `Project`, `Task`,
    * `Bill`) in any ORDER parses, anything outside it quarantines. `opts.date` supplies
    * the note's date — SB-045's format has no date column.
+   *
+   * SB-059: `opts.projects` is the catalog used to resolve a `[[Wikilink]]` Project cell
+   * back to its project CODE (matched on `Project.vaultNote`). Absent — or no project
+   * claiming that note — the cell is carried verbatim, exactly as before SB-059.
    */
-  parseVaultBlock(md: string, opts?: { heading?: string; date?: string }): VaultBlockParseResult;
+  parseVaultBlock(md: string, opts?: { heading?: string; date?: string; projects?: Project[] }): VaultBlockParseResult;
   /**
    * SB-055: the block's region bytes — the `## <heading>` line through the
    * `` `revision: N` `` line, no trailing newline. Header row always, totals row always
    * (generated, never round-tripped as an entry), `opts.headers` defaulting to the
    * canonical five.
+   *
+   * SB-059: `opts.projects` turns an entry's project CODE into the `[[vaultNote]]` the
+   * `Project` column renders. Absent — or the code has no project, or that project has no
+   * `vaultNote` — the code is written bare, exactly as before SB-059.
    */
   serializeVaultBlock(
     entries: VaultEntry[],
-    opts?: { heading?: string; headers?: string[]; revision?: number; timeSeparator?: VaultTimeSeparator },
+    opts?: {
+      heading?: string;
+      headers?: string[];
+      revision?: number;
+      timeSeparator?: VaultTimeSeparator;
+      projects?: Project[];
+    },
   ): string;
   /**
    * SB-055: splice the serialized block back into its host note. Every byte outside the
@@ -579,6 +641,7 @@ export interface TTModule {
       headers?: string[];
       revision?: number;
       timeSeparator?: VaultTimeSeparator;
+      projects?: Project[];
     },
   ): { md: string; quarantine: boolean; reason: VaultQuarantineReason | null };
   serializeMd(state: Catalog): string;
