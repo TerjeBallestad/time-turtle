@@ -217,7 +217,22 @@ export function retireMirrors() {
       touched = true;
     }
   }
-  if (retired.length || touched) saveGuard(guard);
+  // The ONE remaining way out of this function that is not a return. `saveGuard` does mkdirSync
+  // + writeFileSync + renameSync, all of which throw on EACCES/ENOSPC/EROFS — and the boot call
+  // site (server/src/index.js) is a bare top-level call, so an unguarded throw here would kill
+  // the server at import with a stack trace instead of a sentence. The renames already happened
+  // and are what matters; a stale stamp only costs one extra refusal on a later sqlite write.
+  if (retired.length || touched) {
+    try {
+      saveGuard(guard);
+    } catch (err) {
+      console.error(
+        `[time-turtle] retired ${retired.length} mirror file(s) but could not update the guard ledger: ${
+          /** @type {Error} */ (err).message
+        }`,
+      );
+    }
+  }
   return retired;
 }
 

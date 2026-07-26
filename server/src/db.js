@@ -168,14 +168,10 @@ migrateToSdd002();
 // the vault is — and reading it back as a partial (root set, daily missing) would be a shape
 // no caller wants to handle. Defaulted on read, validated on write; SB-057/SB-058 may extend
 // the shape additively, and an older row missing a newer key simply takes that key's default.
-/** @type {import('../../shared/types.ts').VaultPaths} */
-const VAULT_PATHS_DEFAULT = {
-  root: '',
-  daily: 'Calendar/Daily',
-  weekly: 'Calendar/Weekly',
-  catalog: 'Time Turtle/Catalog.md',
-  timeLogHeading: 'Time Log',
-};
+// The defaults live in shared/core.js, next to TT.BACKENDS and TT.TIME_SEPARATOR_VALUES — this
+// is model vocabulary, and SB-057/SB-058 will extend the shape, so a second copy here would
+// quietly start producing a VaultPaths missing their new key.
+const VAULT_PATHS_DEFAULT = TT.VAULT_PATHS_DEFAULT;
 /** @param {string} raw @returns {import('../../shared/types.ts').VaultPaths} */
 function parseVaultPaths(raw) {
   try {

@@ -71,13 +71,9 @@ export function VaultSection({ state, ui }: SettingsProps) {
   // setting, and the toggle has to show what is actually in force.
   const backend: Backend = state.backend ?? 'sqlite';
   const locked = !!state.backendLocked;
-  const paths: VaultPaths = state.settings.vaultPaths ?? {
-    root: '',
-    daily: 'Calendar/Daily',
-    weekly: 'Calendar/Weekly',
-    catalog: 'Time Turtle/Catalog.md',
-    timeLogHeading: 'Time Log',
-  };
+  // TT.VAULT_PATHS_DEFAULT, not a local literal: SB-057/SB-058 extend this shape additively, and
+  // a copy here would go on producing a VaultPaths missing whatever key they add.
+  const paths: VaultPaths = state.settings.vaultPaths ?? TT.VAULT_PATHS_DEFAULT;
   const separator: VaultTimeSeparator = state.settings.vaultTimeSeparator ?? 'unicode';
   return (
     <div className={st.section}>
@@ -148,21 +144,22 @@ export function VaultSection({ state, ui }: SettingsProps) {
               <Select
                 value={separator}
                 onChange={(e) => ui.setVaultTimeSeparator(e.target.value as VaultTimeSeparator)}
-                options={[
-                  // The sample is in the label, because the choice is about how it LOOKS and a
-                  // list of bare value names would hide the only thing being decided.
-                  //
-                  // THE NAME IS THERE TOO, and it is not decoration. Measured in the browser:
-                  // JetBrains Mono composes `->` into a long-arrow ligature, so `ascii` and
-                  // `unicode` rendered as PIXEL-IDENTICAL rows and the control could not tell
-                  // you which one you had picked. That is SB-063's own warning ("if it's
-                  // dependant on a ligature, revert to the short arrow") landing on the control
-                  // built to expose it. `.vaultSeparator` turns ligatures off so the samples
-                  // differ again; the name is the half that cannot lie whatever font loads.
-                  { value: 'unicode', label: '09:00 → 10:00   unicode' },
-                  { value: 'ascii', label: '09:00 -> 10:00   ascii' },
-                  { value: 'hyphen', label: '09:00 - 10:00   hyphen' },
-                ]}
+                // DERIVED from core.js, never a hand-typed list: TT.TIME_SEPARATOR_VALUES owns
+                // the vocabulary and TT.timeSeparator owns the glyph each name emits, so a
+                // fourth value or a changed glyph shows up here without an edit — and the
+                // sample shown is provably the one that would be written.
+                //
+                // The sample is in the label because the choice is about how it LOOKS. THE NAME
+                // IS THERE TOO, and that is not decoration: measured in the browser, JetBrains
+                // Mono composes `->` into a long-arrow ligature, so `ascii` and `unicode`
+                // rendered PIXEL-IDENTICAL and the control could not tell you which you had
+                // picked — SB-063's own warning landing on the control built to expose it.
+                // `.vaultSeparator` turns ligatures off; the name is the half that cannot lie
+                // whatever font loads.
+                options={TT.TIME_SEPARATOR_VALUES.map((name) => ({
+                  value: name,
+                  label: `09:00 ${TT.timeSeparator(name)} 10:00   ${name}`,
+                }))}
                 className={[st.small, st.vaultSeparator].join(' ')}
               />
             </div>

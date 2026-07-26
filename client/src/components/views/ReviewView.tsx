@@ -31,6 +31,16 @@ function segLabel(dates: string[]): string {
 }
 
 export function ReviewView({ state, ui, onReviewChanged }: ViewProps) {
+  // SB-056 / DD-008: null under sqlite, the reason sentence under vault. Same source as the
+  // server's 403 body and as WeekView's employee-facing line, so the three cannot drift.
+  //
+  // DEFENCE IN DEPTH, not a live bug fixed — say so rather than let the next reader assume the
+  // stronger claim. This view lists OTHER users (the filter below drops the acting admin), and
+  // under `vault` the single-user guard means there are none, so the rail is empty and these
+  // verbs are unreachable with content. It is here because the composition can change without
+  // this file being reopened: the server already 403s approve/release under `vault`, and a
+  // surface offering a verb that can only fail is precisely what DD-008's comment forbids.
+  const committingOff = TT.backendOffReason('committing', state.backend);
   const [users, setUsers] = React.useState<User[] | null>(null);
   const [selId, setSelId] = React.useState<number | null>(null);
   const [sheet, setSheet] = React.useState<UserTimesheet | null>(null);
@@ -234,18 +244,24 @@ export function ReviewView({ state, ui, onReviewChanged }: ViewProps) {
                       <Button variant="secondary" size="sm" onClick={save} disabled={busy || !dirty}>
                         {TT.t('Save corrections')}
                       </Button>
-                      {openSeg.committed && !openSeg.approved && (
+                      {/* SB-056 / DD-008: approve and release are ledger WRITES, so the server
+                          403s them under `vault` (segmentLockHandler). This is the admin half of
+                          the same capability WeekView explains to the employee — leaving the
+                          buttons here would offer a verb that can only fail, which is the
+                          "reads as a bug months later" failure the ruling names. */}
+                      {committingOff ? null : openSeg.committed && !openSeg.approved ? (
                         <Button variant="primary" size="sm" onClick={() => lockVerb('approve', segKey)} disabled={busy}>
                           {TT.t('Approve week')}
                         </Button>
-                      )}
-                      {openSeg.approved && (
+                      ) : null}
+                      {!committingOff && openSeg.approved && (
                         <Button variant="ghost" size="sm" onClick={() => lockVerb('release', segKey)} disabled={busy}>
                           {TT.t('Release for edits')}
                         </Button>
                       )}
                     </span>
                   </div>
+                  {committingOff && <div className={vs.capabilityOff}>{TT.t(committingOff)}</div>}
                   <div className={rv.editTable}>
                     <div className={[rv.editRow, rv.editHead].join(' ')}>
                       <span>{TT.t('date')}</span>

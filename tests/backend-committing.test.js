@@ -160,6 +160,38 @@ describe('committing under the vault backend', () => {
     expect(bare.status).toBe(200);
   });
 
+  it('the admin cross-user edit corrects the entry but leaves the frozen ledger alone', async () => {
+    // END-GATE REVIEW FINDING: the THIRD ledger-write site. `PUT /api/users/:id/entries`
+    // RE-FREEZES the money snapshot of any committed segment it touches, and the first pass
+    // gated only PUT /api/state and the lock verbs — so under `vault` an admin correcting an
+    // hour inside a pre-switch committed week still rewrote a ledger the backend is declared
+    // unable to hold. Reachable today: under `vault` the single user IS an admin, and the
+    // Review surface is not otherwise gated.
+    //
+    // The ENTRY edit still lands. Refusing it would wedge an admin out of correcting any week
+    // that was ever committed — the same failure the ride-along exists to prevent. It is the
+    // ledger that is frozen, not the timesheet.
+    const before = await ADMIN('GET', '/api/state');
+    const frozen = before.json.commits.find((c) => c.key === KEY);
+    const target = before.json.entries.find((e) => e.id === 'e1-vault');
+    expect(frozen.snapshot[target.id]).toBeTruthy();
+
+    const edited = { ...target, label: 'corrected by admin', end: 660 };
+    const put = await ADMIN('PUT', `/api/users/${USER_ID}/entries`, {
+      entries: before.json.entries.map((e) => (e.id === target.id ? edited : e)),
+    });
+    expect(put.status).toBe(200);
+
+    const after = await ADMIN('GET', '/api/state');
+    // the correction really landed…
+    const corrected = after.json.entries.find((e) => e.id === target.id);
+    expect(corrected.label).toBe('corrected by admin');
+    expect(corrected.end).toBe(660);
+    // …and the frozen money did NOT move. Asserting only the 200 would pass against the bug.
+    const stillFrozen = after.json.commits.find((c) => c.key === KEY);
+    expect(stillFrozen.snapshot).toEqual(frozen.snapshot);
+  });
+
   it('refuses UN-committing too — dropping a key is a change to the ledger', async () => {
     const put = await ADMIN('PUT', '/api/state', { commits: [] });
     expect(put.status).toBe(403);

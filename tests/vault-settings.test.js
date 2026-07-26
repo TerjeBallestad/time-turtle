@@ -18,6 +18,7 @@ import { describe, it, expect, afterAll } from 'vitest';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import TT from '../shared/core.js';
 import { startServer, stopServer, stopAllServers, adminOn } from './util.js';
 
 afterAll(stopAllServers);
@@ -27,13 +28,9 @@ function dataDir(label) {
   return { data, md: join(data, 'mirror') };
 }
 
-const DEFAULTS = {
-  root: '',
-  daily: 'Calendar/Daily',
-  weekly: 'Calendar/Weekly',
-  catalog: 'Time Turtle/Catalog.md',
-  timeLogHeading: 'Time Log',
-};
+// Read from core.js rather than restated: a hand-copied expectation would keep passing after
+// SB-057/SB-058 add a key, which is exactly the drift this test should be catching.
+const DEFAULTS = TT.VAULT_PATHS_DEFAULT;
 
 describe('Settings.vaultPaths', () => {
   it('defaults on a fresh install, round-trips, and survives a restart', async () => {

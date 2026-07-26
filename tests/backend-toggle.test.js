@@ -10,15 +10,31 @@
 // DATABASE took the write — otherwise a PUT failing for an unrelated reason would leave no
 // mirror file either, and pass this suite while proving nothing.
 //
-// ## Verified red-green: 2026-07-26
-//   Forcing `activeBackend()` (server/src/backend.js) to `return 'sqlite'` unconditionally:
+// ## Verified red-green: 2026-07-26 (output TRANSCRIBED from the run, not reconstructed — an
+//    end-gate reviewer re-ran this mutation and caught quoted lines the mutation cannot
+//    produce. Each test stops at its FIRST failing assertion, which is what these are.)
+//   Forcing `activeBackend()` (server/src/backend.js) to `return 'sqlite'` unconditionally —
+//   4 of 8 fail:
+//     FAIL  the vault server writes NO mirror file, while the sqlite server writes one
+//           AssertionError: expected '/var/folders/…/timesheet-admin.md' to be null
+//     FAIL  reports the effective backend on /api/state
+//           AssertionError: expected 'sqlite' to be 'vault'
+//     FAIL  a stored backend setting beats TT_BACKEND, and survives a restart
+//           AssertionError: expected 'sqlite' to be 'vault'
+//     FAIL  TT_BACKEND_LOCK beats a `vault` already stored — the documented recovery
+//           AssertionError: expected 'sqlite' to be 'vault'
+//   The first of those is the load-bearing one: the response really does hand back a mirror
+//   path, i.e. the mirror keeps writing when the backend is not consulted.
+//
+//   Its ON-DISK companion (`mirrorFiles(VAULT.md)` empty) sits one line later, so no mutation
+//   above reaches it — each stops at the response. The mutation that DOES is a store that lies
+//   about itself: `store.mirror` under vault doing `writeMirror(user); return null;`. That is
+//   the case the plan's fake_evidence note is really about — a null in the response proves the
+//   response, not the disk — and it fails on the disk:
 //     FAIL  the vault server writes NO mirror file, while the sqlite server writes one
 //           AssertionError: expected [ 'timesheet-admin.md' ] to deeply equal []
 //     FAIL  a stored backend setting beats TT_BACKEND, and survives a restart
-//           AssertionError: expected 'sqlite' to be 'vault'
-//     FAIL  TT_BACKEND_LOCK beats a stored `vault` setting — the documented recovery
-//           AssertionError: expected [] to have a length above 0
-//   i.e. the mirror really does keep writing into the folder when the backend is not consulted.
+//           AssertionError: expected [ 'timesheet-admin.md', …(1) ] to deeply equal []
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { mkdtempSync, existsSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';

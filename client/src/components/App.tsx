@@ -351,7 +351,13 @@ export function App() {
     // derived from the EFFECTIVE backend the server reports, which the env and the lock can
     // both decide, so guessing it locally is guessing.
     setBackend: (backend) => {
-      if (backend === state.settings.backend) return;
+      // Compare against the EFFECTIVE backend — the one the toggle is showing — not the stored
+      // one. They differ exactly when `TT_BACKEND` supplied the backend and nothing is stored,
+      // which is the configuration this plan names most often ("an install switched by
+      // TT_BACKEND alone never fires a settings write"): `state.backend` reads `vault` while
+      // `settings.backend` reads its `sqlite` default, so guarding on the stored value made
+      // clicking SQLite a no-op — no request, no toast, no way out of `vault` from the UI.
+      if (backend === (state.backend ?? 'sqlite')) return;
       void api
         .putState({ settings: { ...state.settings, backend } })
         .then(() => {

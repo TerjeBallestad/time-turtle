@@ -129,6 +129,21 @@ TT.BACKENDS = /** @type {import('./types.ts').Backend[]} */ (
  */
 TT.backendCapabilities = (backend) => (backend && BACKEND_CAPABILITIES[backend]) || BACKEND_CAPABILITIES.sqlite;
 
+/**
+ * Where inside the vault TT reads and writes, when nothing has been chosen. HERE, not in
+ * server/src/db.js and not in the client's fallback, because SB-057/SB-058 extend this shape
+ * ADDITIVELY: the moment they add a key, a second copy silently produces a `VaultPaths` missing
+ * it. `timeLogHeading` is a setting with a default and never a constant (SB-057).
+ * @type {import('./types.ts').VaultPaths}
+ */
+TT.VAULT_PATHS_DEFAULT = {
+  root: '',
+  daily: 'Calendar/Daily',
+  weekly: 'Calendar/Weekly',
+  catalog: 'Time Turtle/Catalog.md',
+  timeLogHeading: 'Time Log',
+};
+
 // WHY a capability is off, worded ONCE. The server puts this in the 403 body and the client
 // puts it on screen where the verb used to be, so the two cannot drift in what they claim —
 // and drift here is not cosmetic. SB-056's ruling is that this must not be a hidden disabled

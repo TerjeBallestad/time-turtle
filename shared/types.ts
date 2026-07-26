@@ -660,6 +660,8 @@ export interface TTModule {
   // backend capabilities (SB-056)
   /** SB-056: the legal Settings.backend values, safe default first. The ONE home of this list. */
   BACKENDS: Backend[];
+  /** SB-056: the default vault paths. The ONE home — SB-057/SB-058 extend the shape additively. */
+  VAULT_PATHS_DEFAULT: VaultPaths;
   /** SB-056: what a backend may do. Consulted at CALL TIME by server guards and client surfaces alike. */
   backendCapabilities(backend?: string | null): BackendCapabilities;
   /**

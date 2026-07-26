@@ -30,7 +30,7 @@
 //       FAIL  a server booted into vault against a multi-user data dir refuses to start
 //             Error: server did not exit within 15000ms — it started instead.
 import { describe, it, expect, afterAll } from 'vitest';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, existsSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { startServer, stopServer, stopAllServers, adminOn, runServerUntilExit, session } from './util.js';
@@ -157,6 +157,34 @@ describe('the single-user guard — direction 3: booting into the combination', 
     const stillRefused = await runServerUntilExit({ TT_DATA_DIR: data, TT_MD_DIR: md, TT_BACKEND: 'sqlite' });
     expect(stillRefused.code).not.toBe(0);
     expect(stillRefused.output).toMatch(/refusing to start/);
+  }, 60000);
+
+  // End-gate review finding. A process whose whole contract is "I refuse to start" must not
+  // mutate the vault on its way out — and it did: the DD-011 boot sweep sat above the refusal,
+  // so a copied data dir booted into `vault` renamed every mirror file it could find and THEN
+  // exited 1. Rename-only means no bytes were lost, but the file the operator was looking at
+  // had moved for a boot that never happened.
+  it('touches no mirror file on the way out — the refusal runs before the retirement sweep', async () => {
+    const { data, md } = dataDir('single-boot-nosweep');
+    const sqlite = await startServer({ TT_DATA_DIR: data, TT_MD_DIR: md });
+    const admin = await adminOn(sqlite.port);
+    // A real mirror on disk, and a second user, so the boot refusal will fire.
+    //
+    // Only `currency` in the settings patch, deliberately: spreading the whole settings object
+    // would store `backend: 'sqlite'`, and a STORED value beats TT_BACKEND — so the restart
+    // below would come up on sqlite and the refusal would never fire. (That is the precedence
+    // working; it just makes this a different test.)
+    expect((await admin('PUT', '/api/state', { settings: { currency: 'kr' } })).status).toBe(200);
+    expect(readdirSync(md).filter((f) => f.endsWith('.md'))).toEqual(['timesheet-admin.md']);
+    expect((await admin('POST', '/api/users', EMPLOYEE)).status).toBe(200);
+    await stopServer(sqlite.child);
+
+    const refused = await runServerUntilExit({ TT_DATA_DIR: data, TT_MD_DIR: md, TT_BACKEND: 'vault' });
+    expect(refused.code).not.toBe(0);
+    // THE POINT: the file is still there under its own name. Asserting only the exit code would
+    // have passed against the ordering bug this test exists to pin.
+    expect(readdirSync(md).filter((f) => f.endsWith('.md'))).toEqual(['timesheet-admin.md']);
+    expect(existsSync(join(md, 'timesheet-admin.md'))).toBe(true);
   }, 60000);
 });
 

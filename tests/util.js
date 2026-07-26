@@ -116,6 +116,10 @@ export async function runServerUntilExit(env, timeoutMs = 15000) {
     env: { ...process.env, PORT: String(port), TT_SEED_DEMO: '1', TT_ADMIN_PASSWORD: 'testpw', ...env },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
+  // Registered like any other child. The timeout path SIGKILLs, so the normal case is bounded —
+  // but if the vitest worker is torn down before the timer fires (a sibling test failing the
+  // file, a pool force-exit) an unregistered child orphans holding its port.
+  children.push(child);
   let output = '';
   child.stdout.on('data', (d) => (output += d));
   child.stderr.on('data', (d) => (output += d));

@@ -13,17 +13,35 @@
 // The case SB-065 makes dangerous and this file exists to pin: retiring a file TT is REFUSING
 // to write. Retirement is rename-only, so an unstamped foreign file comes through byte-identical.
 //
-// ## Verified red-green: 2026-07-26
-//   Making `retireMirrors()` (server/src/markdown.js) `return []` immediately:
+// ## Verified red-green: 2026-07-26 (output TRANSCRIBED from the run, not reconstructed —
+//    an end-gate reviewer re-ran this mutation and caught three quoted lines that the named
+//    mutation cannot produce. Each test stops at its FIRST failing assertion, which is what
+//    these are.)
+//   Making `retireMirrors()` (server/src/markdown.js) `return []` immediately — all 7 fail:
 //     FAIL  switching to vault retires the mirror, and the bytes survive under the new name
-//           AssertionError: expected [ 'timesheet-admin.md' ] to deeply equal [ 'timesheet-admin.retired-2026-07-26.md' ]
-//     FAIL  a hand-written file at a user's mirror path is renamed, never opened
-//           AssertionError: expected undefined to be 'a human wrote this…'
+//           AssertionError: expected [ 'timesheet-admin.md' ] to deeply equal [ Array(1) ]
+//     FAIL  a second save under vault retires nothing further …            (same assertion)
+//     FAIL  a hand-written file at a user's mirror path is renamed …       (same assertion)
 //     FAIL  a sticky block is cleared with its path, so a switch back to sqlite is not wedged
-//           AssertionError: expected 400 to be 200
-//     FAIL  a server booted straight into vault sweeps files an earlier sqlite run left
-//           AssertionError: expected [ 'timesheet-admin.md' ] to have a length of 0
+//           AssertionError: expected { …(4) } to be falsy
+//     FAIL  a server booted straight into vault sweeps files …             (same assertion)
+//     FAIL  retires a file TT wrote under an mdDir that has since moved …  (same assertion)
+//     FAIL  a second retirement on the same day does not clobber the first (same assertion)
 //   i.e. without it the files really do sit there under their current-looking names.
+//
+//   That mutation stops at the FILENAME assertions, so it does not exercise the byte
+//   comparisons — which are the load-bearing half. The mutation that reaches them is the
+//   TOMBSTONE, the other shape DD-011 permits and this plan rejected: replace the rename with
+//   `writeFileSync(to, '<!-- retired -->'); unlinkSync(path)`. 6 of 7 fail, on content:
+//     FAIL  switching to vault retires the mirror, and the bytes survive under the new name
+//           AssertionError: expected '<!-- retired by Time Turtle -->\n' to be '# timesheet\n\ncurrency: kr\nlanguage…'
+//     FAIL  a hand-written file at a user's mirror path is renamed, never opened
+//           AssertionError: expected '<!-- retired by Time Turtle -->\n' to be '# a human wrote this\n\nnothing here …'
+//     FAIL  a sticky block is cleared with its path …
+//           AssertionError: expected '<!-- retired by Time Turtle -->\n' to be '# edited by another machine\n'
+//     (plus the boot-sweep, moved-mdDir and -2-suffix cases, same shape)
+//   The one that survives it is the idempotence test, which asserts filenames only — correctly,
+//   since that is all it claims.
 import { describe, it, expect, afterAll } from 'vitest';
 import { mkdtempSync, existsSync, readdirSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';

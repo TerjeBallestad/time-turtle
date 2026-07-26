@@ -90,10 +90,13 @@ export function WeekView({ state, ui }: ViewProps) {
               <Chip tone={isLocked ? 'accent' : isCommitted ? 'green' : 'neutral'} mono={true}>
                 {isLocked ? TT.t('locked') : isCommitted ? TT.t('committed') : TT.t('open')}
               </Chip>
-              {committingOff ? null : isLocked ? (
+              {isLocked ? (
                 // Approved by an admin: no reopen verb — the segment is theirs to release now.
+                // This note survives under `vault` even though the VERB does not: the capability
+                // gate removes what you cannot do, never the explanation of the state you are
+                // in, and "locked, and here is who locked it" is the second kind.
                 <span className={vs.segLockedNote}>{TT.t('approved by admin')}</span>
-              ) : (
+              ) : committingOff ? null : (
                 <Button
                   variant="ghost"
                   size="sm"

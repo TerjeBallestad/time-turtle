@@ -22,6 +22,14 @@ const NO: Record<string, string> = {
     'innsending er av under hvelv-backenden: innsendingsloggen hører hjemme i ukenotatene, som kommer i fase 3 — en SQLite-logg per maskin ville sprikt i stillhet (DD-008). Bytt tilbake til SQLite-backenden for å sende inn.',
   'applying markdown edits is off under the vault backend: the vault’s daily notes are the markdown surface now, and the v2 mirror files this would restore from are no longer maintained (DD-011). Copy and download still work.':
     'å ta i bruk markdown-endringer er av under hvelv-backenden: dagsnotatene i hvelvet er markdown-flaten nå, og v2-speilfilene dette ville gjenopprettet fra vedlikeholdes ikke lenger (DD-011). Kopier og last ned virker fortsatt.',
+  // SB-056 / DD-006: the single-user refusals. These reach the user as a TOAST — setBackend
+  // surfaces the server's error verbatim — so without these keys a Norwegian admin got an
+  // English sentence at the one moment the app is telling them no. English side is
+  // server/src/index.js's SECOND_USER_REFUSAL / backendSwitchRefusal verbatim; the count in
+  // the second one is interpolated server-side, so only the fixed prefix can be translated
+  // here — see the note in the review commit.
+  'a vault belongs to one person, so the vault backend allows exactly one user (DD-006): there is no answer to whose daily note a second person’s hours would land in. Switch to the sqlite backend to add users.':
+    'et hvelv tilhører én person, så hvelv-backenden tillater nøyaktig én bruker (DD-006): det finnes ikke noe svar på hvilket dagsnotat en person nummer to sine timer skulle havne i. Bytt til SQLite-backenden for å legge til brukere.',
   Vault: 'Hvelv',
   'Storage backend': 'Lagringsbackend',
   SQLite: 'SQLite',
