@@ -296,3 +296,181 @@ describe('catalog note — Clients and Projects (SB-058 task 1)', () => {
     });
   });
 });
+
+// ## Verified red-green: 2026-07-26
+// Task 2 (TASK-043): task templates, and the settings the note owns — plus the exclusion.
+describe('catalog note — Task templates and Settings (SB-058 task 2)', () => {
+  const TEMPLATES = [
+    { id: 'checkout', label: 'Checkout flow', project: 'FJH-NETT' },
+    { id: 'standup', label: 'Standup', project: null },
+    { id: 'br-note', label: '- a label starting with a dash, mentioning <br>', project: 'INT-ADM' },
+  ];
+  const SETTINGS = [
+    { key: 'currency', value: 'kr' },
+    { key: 'language', value: 'en' },
+    { key: 'vaultTimeSeparator', value: 'unicode' },
+  ];
+
+  describe('Task templates', () => {
+    it('emits Template, Label and Project, and an unassigned template as an empty cell', () => {
+      expect(region('tasks', TEMPLATES, 3).split('\n').slice(0, 6)).toEqual([
+        '## Task templates',
+        '',
+        '| Template | Label | Project |',
+        '|---|---|---|',
+        '| checkout | Checkout flow | FJH-NETT |',
+        '| standup | Standup | |',
+      ]);
+    });
+
+    it('round-trips, including a label that would be structural in a daily-note Task cell', () => {
+      const md = region('tasks', TEMPLATES, 3);
+      const parsed = parse('tasks', md);
+      expect(parsed.rows).toEqual(TEMPLATES);
+      expect(region('tasks', parsed.rows, parsed.revision)).toBe(md);
+    });
+
+    it('does NOT import the daily block’s Task-cell machinery', () => {
+      // `<br>` and the `- ` prefix are structural ONLY where a label and a note share one cell
+      // (SB-045/DD-010). A template has no note, so neither is escaped here — importing that
+      // codec by reflex would put a backslash in front of a legitimate label.
+      const md = region('tasks', [TEMPLATES[2]]);
+      expect(md).toContain('| br-note | - a label starting with a dash, mentioning <br> | INT-ADM |');
+      expect(md).not.toContain('\\<br>');
+      expect(md).not.toContain('\\- ');
+    });
+
+    it('a template naming a project that does not exist is CARRIED, not refused', () => {
+      // Deliberately unlike a project's dangling clientId. A template is a stamp — logging an hour
+      // COPIES its label and project onto the entry — and no resolver reads money through it, so a
+      // stale template costs one bad autofill, where a dangling clientId costs a rate of 0.
+      const parsed = parse('tasks', region('tasks', [{ id: 'x', label: 'Gone', project: 'DELETED-01' }]));
+      expect(parsed.quarantine).toBe(false);
+      expect(parsed.rows[0].project).toBe('DELETED-01');
+    });
+  });
+
+  describe('Settings', () => {
+    it('is a two-column key/value table', () => {
+      expect(region('settings', SETTINGS, 3).split('\n').slice(0, 7)).toEqual([
+        '## Settings',
+        '',
+        '| Setting | Value |',
+        '|---|---|',
+        '| currency | kr |',
+        '| language | en |',
+        '| vaultTimeSeparator | unicode |',
+      ]);
+    });
+
+    it('round-trips, and projects only the keys this TT understands', () => {
+      const md = region('settings', SETTINGS, 3);
+      const parsed = parse('settings', md);
+      expect(parsed.rows).toEqual(SETTINGS);
+      expect(region('settings', parsed.rows, parsed.revision)).toBe(md);
+      expect(TT.vaultCatalogSettings(parsed.rows)).toEqual({ currency: 'kr', language: 'en', vaultTimeSeparator: 'unicode' }); // prettier-ignore
+    });
+
+    it('an UNKNOWN key is carried verbatim and re-emitted — never applied, never quarantined', () => {
+      // The deliberate opposite of the unknown-COLUMN rule: a row is extensible by construction,
+      // and a key from a newer TT must survive a read-write cycle by an older one rather than
+      // freezing the file that holds the rates.
+      const rows = [...SETTINGS, { key: 'vaultColumns', value: 'Time,Project,Task' }];
+      const parsed = parse('settings', region('settings', rows, 3));
+      expect(parsed.quarantine).toBe(false);
+      expect(parsed.rows).toEqual(rows);
+      expect('vaultColumns' in TT.vaultCatalogSettings(parsed.rows)).toBe(false);
+      // and it survives a full read-write cycle, in its original position relative to the rest
+      expect(TT.vaultCatalogSettingRows(TT.vaultCatalogSettings(parsed.rows), parsed.rows)).toEqual(rows);
+    });
+
+    it('an unrecognised value for the enum key is DROPPED, exactly as putSettings drops it', () => {
+      // `putSettings` writes `vaultTimeSeparator` only when it is in TT.TIME_SEPARATOR_VALUES and
+      // silently ignores anything else. One rule, in both directions — and the ROW still survives,
+      // so an older TT reading a newer TT's value never rewrites it away.
+      const rows = [{ key: 'vaultTimeSeparator', value: 'emdash' }];
+      const parsed = parse('settings', region('settings', rows, 3));
+      expect(parsed.rows).toEqual(rows);
+      expect(TT.vaultCatalogSettings(parsed.rows)).toEqual({});
+      expect(TT.vaultCatalogSettingRows({}, parsed.rows)).toEqual([]);
+    });
+
+    it('every legal vaultTimeSeparator value is accepted, from the one home of that vocabulary', () => {
+      for (const value of TT.TIME_SEPARATOR_VALUES)
+        expect(TT.vaultCatalogSettings([{ key: 'vaultTimeSeparator', value }])).toEqual({ vaultTimeSeparator: value });
+      expect(TT.TIME_SEPARATOR_VALUES.length).toBeGreaterThan(1);
+    });
+
+    it('an unset key emits no row at all, rather than an empty one', () => {
+      expect(TT.vaultCatalogSettingRows({ currency: 'kr' })).toEqual([{ key: 'currency', value: 'kr' }]);
+      expect(TT.vaultCatalogSettingRows({ currency: 'kr', language: '' })).toEqual([{ key: 'currency', value: 'kr' }]);
+    });
+
+    it('a `|` in a setting value is escaped and comes back intact', () => {
+      const md = region('settings', [{ key: 'currency', value: 'a|b' }]);
+      expect(md).toContain('| currency | a\\|b |');
+      expect(parse('settings', md).rows[0].value).toBe('a|b');
+    });
+
+    it('two rows with the same key quarantine — the id rule holds for settings too', () => {
+      const res = TT.parseVaultCatalogSection(
+        noteWith(sign(region('settings', [{ key: 'currency', value: 'kr' }, { key: 'currency', value: 'NOK' }]))), // prettier-ignore
+        'settings',
+      );
+      expect(res.quarantine).toBe(true);
+      expect(res.reason).toBe('catalog-duplicate-id');
+    });
+  });
+
+  // ---- the exclusion, which is a correctness rule and not a preference ----
+  describe('the settings the note must NEVER carry', () => {
+    // Written out here rather than read from core.js on purpose: a list shared with the
+    // implementation would let both go wrong together, and this assertion is only worth anything
+    // if it is stated independently.
+    //
+    // `backend` is `shape`'s pre-SB-100 spelling and is on the list for the same reason SB-100's
+    // rename window needs it: a note written before the rename must not be able to smuggle it in
+    // either, and asserting on both spellings is what stops this test going quietly green.
+    const FORBIDDEN = ['shape', 'backend', 'vaultPaths', 'mdDir', 'vaultCutover'];
+
+    it('none of them is a key the note owns', () => {
+      for (const key of FORBIDDEN) expect(TT.VAULT_CATALOG_SETTING_KEYS).not.toContain(key);
+      // the allowlist is exactly the three the note DOES own
+      expect(TT.VAULT_CATALOG_SETTING_KEYS).toEqual(['currency', 'language', 'vaultTimeSeparator']);
+    });
+
+    it('none of them can reach the note’s bytes, however it is passed in', () => {
+      // The bootstrap loop, stated as bytes: `shape`, `vaultPaths` and `mdDir` are how TT FINDS
+      // this note, and `vaultCutover` is per-instance by DD-017 — "the date THIS instance's vault
+      // history begins". All four stay in SQLite under BOTH shapes.
+      const settings = {
+        currency: 'kr',
+        language: 'en',
+        shape: 'personal',
+        backend: 'vault',
+        mdDir: '/Users/x/Inbox',
+        vaultCutover: '2026-07-26T00:00:00.000Z',
+        vaultPaths: { root: '/Users/x/Vault', daily: 'Calendar/Daily', catalog: 'Time Turtle/Catalog.md' },
+      };
+      const rows = TT.vaultCatalogSettingRows(settings);
+      expect(rows).toEqual([
+        { key: 'currency', value: 'kr' },
+        { key: 'language', value: 'en' },
+      ]);
+      const md = region('settings', rows, 1);
+      for (const key of FORBIDDEN) expect(md).not.toContain(key);
+      for (const value of ['personal', 'vault', '/Users/x/Inbox', '2026-07-26', 'Calendar/Daily'])
+        expect(md).not.toContain(value);
+    });
+
+    it('one of them arriving as a CARRIED unknown row is not laundered into settings', () => {
+      // The other direction: a hand-edited note that names an instance-local key. The row is
+      // carried verbatim like any unknown row — TT does not rewrite Terje's bytes — but it must
+      // never be projected into a Settings object, which is where it would take effect.
+      const rows = [{ key: 'shape', value: 'personal' }, { key: 'vaultPaths', value: '{}' }]; // prettier-ignore
+      const parsed = parse('settings', region('settings', rows, 1));
+      expect(parsed.rows).toEqual(rows);
+      expect(TT.vaultCatalogSettings(parsed.rows)).toEqual({});
+    });
+  });
+});

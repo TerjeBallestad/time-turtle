@@ -7,6 +7,7 @@
 /** @typedef {import('./types.ts').Project} Project */
 /** @typedef {import('./types.ts').Client} Client */
 /** @typedef {import('./types.ts').Rounding} Rounding */
+/** @typedef {import('./types.ts').Settings} Settings */
 /** @typedef {import('./types.ts').Catalog} Catalog */
 /** @typedef {import('./types.ts').ParsedTime} ParsedTime */
 /** @typedef {import('./types.ts').VaultTimeSeparator} VaultTimeSeparator */
@@ -1833,6 +1834,130 @@ const CATALOG_SECTIONS = {
       },
     ],
   },
+  // Per-user templates (SDD-002) in a note that is a PERSONAL-shape artifact — and personal
+  // implies exactly one user (SDD-003's single-user guard, DD-015), so one templates table is
+  // well defined here in a way it would not be under the team shape.
+  //
+  // STRAIGHT `TT.encodeCell` CELLS, and nothing else. `<br>` and the `- ` prefix are structural
+  // ONLY in the daily block's `Task` cell (SB-045, DD-010), where a label and a note share one
+  // cell; a template has a label and no note, so importing `encodeTaskCell` here by reflex would
+  // put a backslash in front of a label that legitimately starts with `- ` and escape a `<br>`
+  // that has no delimiter to collide with.
+  tasks: {
+    section: CATALOG_SECTION_NAMES.tasks,
+    heading: 'Task templates',
+    blank: () => /** @type {Task} */ ({ id: '', label: '', project: null }),
+    columns: [
+      { label: 'Template', id: true, read: (cell, row) => ((row.id = TT.decodeCell(cell)), null), write: (row) => TT.encodeCell(row.id) }, // prettier-ignore
+      { label: 'Label', read: (cell, row) => ((row.label = TT.decodeCell(cell)), null), write: (row) => TT.encodeCell(row.label) }, // prettier-ignore
+      // A template's project is a CODE, not a wikilink: `Task.project` holds the code and the
+      // daily block's wikilink rendering is a property of an ENTRY's cell (SB-059), not of every
+      // column that happens to name a project.
+      //
+      // A code naming no project is CARRIED, not refused — deliberately unlike a project's
+      // dangling clientId. A template is a stamp: logging an hour COPIES its label and project
+      // onto the entry (SDD-002), and no resolver reads money through it, so a stale template
+      // costs one bad autofill rather than a rate of 0. Refusing would also make deleting a
+      // project quarantine the file that holds the rates.
+      { label: 'Project', read: (cell, row) => ((row.project = cell === '' ? null : TT.decodeCell(cell)), null), write: (row) => (row.project ? TT.encodeCell(row.project) : '') }, // prettier-ignore
+    ],
+  },
+  // THE SETTINGS THE NOTE ACTUALLY OWNS — and the exclusion that is a correctness rule rather
+  // than a preference.
+  //
+  // FOUR SETTINGS STAY IN SQLITE UNDER BOTH SHAPES and must never be serialized here. Three of
+  // them — `shape` (`backend` before SB-100), `vaultPaths` and `mdDir` — are how TT FINDS this
+  // note, so putting them in it is a bootstrap loop. `vaultCutover` joins them under DD-017: it
+  // means "the date THIS instance's vault history begins", which is per-instance by definition.
+  // The exclusion is proved by a test asserting on BOTH spellings of the renamed axis, so it
+  // cannot go quietly green.
+  //
+  // AN UNKNOWN KEY IS CARRIED VERBATIM AND RE-EMITTED — not applied, and not quarantined. That
+  // is the exact opposite of the unknown-COLUMN rule above, and deliberately so. A row is
+  // extensible by construction and a column is not: a settings key written by a NEWER TT must
+  // survive a read-write cycle by an OLDER one, and quarantining on it would freeze the file
+  // that holds the rates over a cosmetic setting. It is also what makes SB-044's `vaultColumns`
+  // purely additive whenever it lands — no format change, no migration.
+  //
+  // The rows are therefore the single source of truth for the bytes, IN NOTE ORDER, and
+  // `TT.vaultCatalogSettings` is the typed projection of the keys this TT understands. One
+  // source, one order, no second copy that can drift.
+  settings: {
+    section: CATALOG_SECTION_NAMES.settings,
+    heading: 'Settings',
+    blank: () => /** @type {import('./types.ts').VaultCatalogSettingRow} */ ({ key: '', value: '' }),
+    columns: [
+      { label: 'Setting', id: true, read: (cell, row) => ((row.key = TT.decodeCell(cell)), null), write: (row) => TT.encodeCell(row.key) }, // prettier-ignore
+      { label: 'Value', read: (cell, row) => ((row.value = TT.decodeCell(cell)), null), write: (row) => TT.encodeCell(row.value) }, // prettier-ignore
+    ],
+  },
+};
+
+/**
+ * The settings keys the catalog note carries, and the ONLY ones it may.
+ *
+ * `currency` and `language` are free text (`putSettings` writes them as given).
+ * `vaultTimeSeparator` is an ENUM, validated against `TT.TIME_SEPARATOR_VALUES` — the one home
+ * of that vocabulary — because an unrecognised value would read back as junk even though
+ * `TT.timeSeparator` would safely emit the default for it.
+ * @type {Record<string, (value: string) => boolean>}
+ */
+const CATALOG_SETTING_KEYS = {
+  currency: () => true,
+  language: () => true,
+  vaultTimeSeparator: (value) => TT.TIME_SEPARATOR_VALUES.includes(value),
+};
+/**
+ * The settings keys the catalog note carries, as a list. The ONE home of that vocabulary, the way
+ * `TT.SHAPES` and `TT.TIME_SEPARATOR_VALUES` are the one home of theirs.
+ *
+ * What is NOT on it is the load-bearing half, and it is an allowlist rather than a denylist on
+ * purpose: `shape` (`backend` before SB-100), `vaultPaths`, `mdDir` and `vaultCutover` stay in
+ * SQLite under both shapes, and an allowlist means a settings key invented later is excluded by
+ * default instead of included by omission.
+ */
+TT.VAULT_CATALOG_SETTING_KEYS = Object.keys(CATALOG_SETTING_KEYS);
+/**
+ * The typed projection of a catalog's settings rows — the keys this TT understands, with a value
+ * it is willing to apply. Everything else stays on the rows and is re-emitted untouched.
+ *
+ * An unrecognised value for a known ENUM key is DROPPED here rather than refused, which is
+ * exactly what `putSettings` does with the same value (`server/src/db.js`): it writes only what
+ * it recognises and silently ignores the rest. One rule, in both directions — and the row itself
+ * survives, so an older TT reading a newer TT's value never rewrites it away.
+ * @param {import('./types.ts').VaultCatalogSettingRow[]} rows @returns {Partial<Settings>}
+ */
+TT.vaultCatalogSettings = function (rows) {
+  /** @type {Record<string, string>} */
+  const out = {};
+  for (const row of rows || []) {
+    const validate = CATALOG_SETTING_KEYS[row.key];
+    if (validate && validate(row.value)) out[row.key] = row.value;
+  }
+  return /** @type {Partial<Settings>} */ (out);
+};
+/**
+ * The settings rows a catalog note should carry for a given settings object — every key the note
+ * OWNS that is actually set, in the registry's canonical order, followed by the rows this TT did
+ * not recognise, in the order the note carried them.
+ *
+ * This is the one place the note's settings bytes are decided, and it is where the instance-local
+ * exclusion is ENFORCED rather than merely documented: the keys come from
+ * `CATALOG_SETTING_KEYS`, so a setting that is not on that list cannot reach the note however it
+ * is passed in.
+ * @param {Partial<Settings>} settings
+ * @param {import('./types.ts').VaultCatalogSettingRow[]} [carried] rows from a previous parse
+ * @returns {import('./types.ts').VaultCatalogSettingRow[]}
+ */
+TT.vaultCatalogSettingRows = function (settings, carried) {
+  /** @type {import('./types.ts').VaultCatalogSettingRow[]} */
+  const rows = [];
+  for (const key of Object.keys(CATALOG_SETTING_KEYS)) {
+    const value = settings ? /** @type {Record<string, unknown>} */ (settings)[key] : undefined;
+    if (value != null && value !== '') rows.push({ key, value: String(value) });
+  }
+  for (const row of carried || []) if (!CATALOG_SETTING_KEYS[row.key]) rows.push({ ...row });
+  return rows;
 };
 
 /**

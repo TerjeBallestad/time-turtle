@@ -969,6 +969,26 @@ export interface TTModule {
    * whole-catalog atomicity — is `TT.parseVaultCatalog`.
    */
   parseVaultCatalogSection(md: string, section: VaultCatalogSectionName): VaultCatalogSectionResult;
+  /**
+   * SB-058: the settings keys the catalog note carries. An ALLOWLIST, so a key invented later is
+   * excluded by default — `shape`, `vaultPaths`, `mdDir` and `vaultCutover` are instance-local
+   * and must never reach the note, because the first three are how TT FINDS it.
+   */
+  VAULT_CATALOG_SETTING_KEYS: string[];
+  /**
+   * SB-058: the typed projection of a catalog's settings rows — the keys this TT understands,
+   * with a value it will apply. An unknown key, or an unrecognised value for a known enum key, is
+   * left on the rows and re-emitted untouched rather than applied, exactly as `putSettings`
+   * ignores what it does not recognise.
+   */
+  vaultCatalogSettings(rows: VaultCatalogSettingRow[]): Partial<Settings>;
+  /**
+   * SB-058: the settings rows a catalog note should carry — every key the note OWNS that is set,
+   * in canonical order, followed by the rows a previous parse carried that this TT did not
+   * recognise, in the order the note had them. The one place the note's settings bytes are
+   * decided, and where the instance-local exclusion is enforced rather than merely documented.
+   */
+  vaultCatalogSettingRows(settings: Partial<Settings>, carried?: VaultCatalogSettingRow[]): VaultCatalogSettingRow[];
   serializeMd(state: Catalog): string;
   newId(): string;
   parseMd(md: string): Catalog;
