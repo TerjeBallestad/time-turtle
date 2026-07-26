@@ -217,6 +217,25 @@ app.post('/api/users/:id/password', requireUser, requireAdmin, (req, res) => {
 });
 
 // ---- state ----
+/**
+ * SB-057: the daily notes TT has stopped writing to. Derived from `vault_index`, so it is sticky
+ * across restarts by construction and needs no ledger of its own.
+ *
+ * The REASON CODE is carried raw and the wording is resolved on the surface
+ * (`TT.vaultQuarantineText`), which is what lets SB-090 move a reason without touching the wire.
+ * @returns {import('../../shared/types.ts').VaultQuarantinedNote[]}
+ */
+function vaultQuarantinedNotes() {
+  return store
+    .listVaultIndex()
+    .filter((row) => row.state === 'quarantined')
+    .map((row) => ({
+      path: row.path,
+      date: row.date,
+      reason: String(row.quarantineReason || ''),
+      detectedAt: row.quarantinedAt ?? null,
+    }));
+}
 // Employees never see hourly rates: stripped server-side, not just hidden in the UI.
 /** @param {User} user */
 function stateFor(user) {
@@ -244,6 +263,11 @@ function stateFor(user) {
     // SB-065: a standing mirror refusal is STATE, not a log line — a mirror that has
     // quietly stopped updating still looks current, which is the failure this guards.
     mirrorBlocked: mirrorBlockFor(user),
+    // SB-057: the same argument, one shape over. Under `personal` the vault IS the storage, so a
+    // silently quarantined day is a day whose hours stop syncing with no signal anywhere. Read-only
+    // and additive; empty under `team`, which has no vault. No resolution ACTION — SB-103 rules
+    // what a human may do about one, and every option there is additive on top of this.
+    vaultQuarantined: vaultQuarantinedNotes(),
     settings: store.getSettings(),
     clients: store.getClients().map(strip),
     projects: store.getProjects().map(strip),
@@ -793,6 +817,9 @@ app.put('/api/state', requireUser, (req, res) => {
     mirror,
     mirrorError,
     mirrorBlocked: mirrorBlockFor(req.user),
+    // SB-085's lesson, one shape over: the save that TRIPS a quarantine is the moment the client
+    // should learn about it, not the next reload.
+    vaultQuarantined: vaultQuarantinedNotes(),
   });
 });
 

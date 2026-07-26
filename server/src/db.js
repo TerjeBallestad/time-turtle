@@ -108,6 +108,7 @@ CREATE TABLE IF NOT EXISTS vault_index (
   file_sha TEXT,
   verified INTEGER,
   quarantine_reason TEXT,
+  quarantined_at TEXT,
   seen_at TEXT,
   written_at TEXT
 );
@@ -142,6 +143,11 @@ addColumnIfMissing('entries', 'edited_by_admin', 'INTEGER NOT NULL DEFAULT 0');
 // on-disk rows stay active and the markdown mirror stays byte-identical.
 addColumnIfMissing('clients', 'archived', 'INTEGER NOT NULL DEFAULT 0');
 addColumnIfMissing('projects', 'archived', 'INTEGER NOT NULL DEFAULT 0');
+// SB-057 task 8: when a path FIRST quarantined, as opposed to when it was last looked at. The
+// surface says "detected <when>" and that has to be sticky — `seen_at` moves on every scan pass,
+// including the cheap skip, so it answers a different question. Guarded, because a DB created
+// between this plan's task 2 and task 8 already has the table without the column.
+addColumnIfMissing('vault_index', 'quarantined_at', 'TEXT');
 
 // One-shot v1→v2 data migration (idempotent — guarded by a schema version marker).
 // For every entry: resolve its old task_id against the (old, shared) tasks table and
@@ -664,12 +670,13 @@ function vaultIndexRow(row) {
     fileSha: row.file_sha,
     verified: row.verified == null ? null : !!row.verified,
     quarantineReason: row.quarantine_reason,
+    quarantinedAt: row.quarantined_at,
     seenAt: row.seen_at,
     writtenAt: row.written_at,
   };
 }
 const VAULT_INDEX_SELECT =
-  'SELECT path, date, state, rev, payload_digest, prev_rev, prev_payload_digest, file_sha, verified, quarantine_reason, seen_at, written_at FROM vault_index';
+  'SELECT path, date, state, rev, payload_digest, prev_rev, prev_payload_digest, file_sha, verified, quarantine_reason, quarantined_at, seen_at, written_at FROM vault_index';
 
 /** @param {string} path @returns {VaultIndexRow | null} */
 export function getVaultIndex(path) {
@@ -725,15 +732,36 @@ export function putVaultIndex(row) {
   const prevRev = current ? (changed ? current.rev : current.prevRev) : null;
   const prevDigest = current ? (changed ? current.payloadDigest : current.prevPayloadDigest) : null;
   const state = VAULT_INDEX_STATES.includes(String(row.state)) ? String(row.state) : 'unknown';
+  // `quarantinedAt` is OWNED here for the same reason the previous pair is: it is the moment the
+  // refusal STARTED, and a caller that could set it could make a standing quarantine look new on
+  // every scan pass. Stamped on the transition INTO `quarantined`, preserved while it stays there,
+  // and cleared when the note recovers.
+  const quarantinedAt =
+    state !== 'quarantined' ? null : current && current.state === 'quarantined' && current.quarantinedAt ? current.quarantinedAt : new Date().toISOString(); // prettier-ignore
+  // …and the REASON is tied to the state for the same reason, in the same place. A scan pass that
+  // takes the cheap `file_sha` exit re-puts the row without re-deriving why it was refused — and a
+  // quarantine with no reason renders as the generic "did not say why" line, which is a surface
+  // that has stopped telling the truth about a note that has stopped syncing. Caught by looking at
+  // the screen, not by a test. Absent + still quarantined ⇒ keep what was there; not quarantined ⇒
+  // always null, so a recovered note cannot carry a stale reason.
+  const quarantineReason =
+    state !== 'quarantined'
+      ? null
+      : row.quarantineReason != null
+        ? String(row.quarantineReason)
+        : current && current.quarantineReason
+          ? current.quarantineReason
+          : null;
   db.prepare(
-    `INSERT INTO vault_index (path, date, state, rev, payload_digest, prev_rev, prev_payload_digest, file_sha, verified, quarantine_reason, seen_at, written_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `INSERT INTO vault_index (path, date, state, rev, payload_digest, prev_rev, prev_payload_digest, file_sha, verified, quarantine_reason, quarantined_at, seen_at, written_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(path) DO UPDATE SET
        date = excluded.date, state = excluded.state, rev = excluded.rev,
        payload_digest = excluded.payload_digest, prev_rev = excluded.prev_rev,
        prev_payload_digest = excluded.prev_payload_digest, file_sha = excluded.file_sha,
        verified = excluded.verified, quarantine_reason = excluded.quarantine_reason,
-       seen_at = excluded.seen_at, written_at = excluded.written_at`,
+       quarantined_at = excluded.quarantined_at, seen_at = excluded.seen_at,
+       written_at = excluded.written_at`,
   ).run(
     path,
     String(row.date ?? ''),
@@ -744,7 +772,8 @@ export function putVaultIndex(row) {
     prevDigest,
     row.fileSha == null ? null : String(row.fileSha),
     row.verified == null ? null : row.verified ? 1 : 0,
-    row.quarantineReason == null ? null : String(row.quarantineReason),
+    quarantineReason,
+    quarantinedAt,
     row.seenAt == null ? null : String(row.seenAt),
     row.writtenAt == null ? null : String(row.writtenAt),
   );

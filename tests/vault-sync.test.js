@@ -234,9 +234,23 @@ describe('the vault sync engine', () => {
     expect(row.quarantineReason).toBe('digest-mismatch');
     expect(readFileSync(notePath(), 'utf8')).toBe(damaged); // not one byte moved
     expect(db.getEntries(userId)).toEqual([]); // and nothing was imported out of it
-    // sticky: the next pass takes the cheap exit and the row stays exactly as it was
+    // STICKY, and that means the REASON too. The cheap `file_sha` exit re-puts the row without
+    // re-deriving why it was refused, so a reason that is not preserved here renders on screen as
+    // the generic "did not say why" line — a surface that has stopped telling the truth about a
+    // note that has stopped syncing. Found by looking at it; pinned here.
+    const first = db.getVaultIndex(notePath());
     expect((await sync.scanVault()).skip).toBe(1);
-    expect(db.getVaultIndex(notePath()).state).toBe('quarantined');
+    const second = db.getVaultIndex(notePath());
+    expect(second.state).toBe('quarantined');
+    expect(second.quarantineReason).toBe('digest-mismatch');
+    expect(second.quarantinedAt).toBe(first.quarantinedAt); // and it does not look newly broken
+    // a note that RECOVERS carries no stale reason
+    writeFileSync(notePath(), note([entry('e1', 540, 600, 'repaired')], 5));
+    expect((await sync.scanVault()).import).toBe(1);
+    const third = db.getVaultIndex(notePath());
+    expect(third.state).toBe('known');
+    expect(third.quarantineReason).toBe(null);
+    expect(third.quarantinedAt ?? null).toBe(null);
   });
 
   it('a rev regression TT cannot vouch for quarantines and never calls the rewriter', async () => {

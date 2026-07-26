@@ -354,6 +354,12 @@ export interface AppState extends Catalog {
   shape?: Shape;
   /** DC-002: TT_SHAPE_LOCK is set, so the shape is env-only and read-only in the UI. */
   shapeLocked?: boolean;
+  /**
+   * SB-057: the daily notes TT has stopped writing to. Additive and read-only, the same shape
+   * `mirrorBlocked` takes and for the identical reason — a note that silently stops syncing still
+   * looks current. Always present (an empty array under `team`, which has no vault).
+   */
+  vaultQuarantined?: VaultQuarantinedNote[];
 }
 
 /**
@@ -371,6 +377,29 @@ export interface MirrorBlock {
   reason: string;
   /** when TT last wrote this path, if it ever did */
   lastWrittenAt: string | null;
+}
+
+/**
+ * SB-057 task 8: a daily note Time Turtle has stopped writing to, carried on `GET /api/state` and
+ * on every save response — modelled on `MirrorBlock`, which is the shape this repo already proved.
+ *
+ * STICKY SERVER STATE, NOT A TOAST, and for the reason SB-065 already paid for once: a writer that
+ * quietly ceases to write leaves the file drifting while it still LOOKS current. Under `personal`
+ * it is worse, because the vault IS the storage — a silently quarantined day is a day whose hours
+ * stop syncing with no signal anywhere.
+ *
+ * There is deliberately NO resolution action. SB-103 (`[grill]`) owns what a human can DO about a
+ * quarantine, and all three of its options are additive on top of this.
+ */
+export interface VaultQuarantinedNote {
+  /** absolute path of the note TT declined to write */
+  path: string;
+  /** the note's calendar date, `YYYY-MM-DD` */
+  date: string;
+  /** a `VaultQuarantineReason` or `VaultArbitrationReason` — rendered through `TT.vaultQuarantineText` */
+  reason: string;
+  /** when this note FIRST quarantined; sticky, so it does not look new on every scan pass */
+  detectedAt: string | null;
 }
 
 // ---- vault block (SB-055 / SB-045) ----
@@ -703,6 +732,12 @@ export interface VaultIndexRow {
   /** the block's DD-009 digest was present and matched; null when TT has not parsed the file */
   verified: boolean | null;
   quarantineReason: VaultQuarantineReason | VaultArbitrationReason | null;
+  /**
+   * When this path FIRST quarantined — sticky, and set only by `putVaultIndex`. `seenAt` moves on
+   * every scan pass including the cheap skip, so it answers "when did TT last look", which is a
+   * different question from the one the surface asks ("since when has this note been stuck").
+   */
+  quarantinedAt?: string | null;
   /** when TT last looked at this path */
   seenAt: string | null;
   /** when TT last WROTE this path — the echo guard's other half */
@@ -827,6 +862,11 @@ export interface PutStateResponse {
    * still succeeded; only the mirror declined.
    */
   mirrorBlocked?: MirrorBlock | null;
+  /**
+   * SB-057: on the PUT response too, so the save that TRIPS a quarantine is the moment the client
+   * learns about it — exactly what SB-085 established for `mirrorBlocked`, for the same reason.
+   */
+  vaultQuarantined?: VaultQuarantinedNote[];
 }
 
 /**
@@ -977,6 +1017,12 @@ export interface TTModule {
    * SQLite and never reaches a daily note — and never triggers DD-012 adoption on its behalf.
    * The one home of the predicate; SB-102 consumes this rather than adding a second copy.
    */
+  /** SB-057: the headline every quarantine opens with. One home, so server and screen agree. */
+  VAULT_QUARANTINE_HEADLINE: string;
+  /** SB-057: the line for a reason this build does not know — rendered instead of a blank. */
+  VAULT_QUARANTINE_FALLBACK: string;
+  /** SB-057: why a note stopped syncing, as a sentence. Unknown reasons take the fallback. */
+  vaultQuarantineText(reason: string | null | undefined): string;
   vaultBound(
     entry: Entry,
     context: { shape?: string | null; vaultCutover?: string | null; commits?: CommitSegment[] },

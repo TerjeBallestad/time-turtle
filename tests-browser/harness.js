@@ -28,12 +28,16 @@ export const ADMIN_PASSWORD = 'browserpw';
  * Spawn a server with its own data + mirror directories on a free port, wait until it answers,
  * and open a headless chromium page already logged in and sitting on Settings.
  */
-export async function startApp() {
+export async function startApp(opts = {}) {
   if (!existsSync(CLIENT_DIST)) {
     throw new Error(`no built client at ${CLIENT_DIST} — run \`npm run build\` (test:browser does this for you)`);
   }
   const dataDir = mkdtempSync(join(tmpdir(), 'tt-browser-data-'));
   const mdDir = mkdtempSync(join(tmpdir(), 'tt-browser-md-'));
+  // SB-057: a throwaway VAULT too, for the `personal` cases. Always created, never pointed at by
+  // default — the shape decides whether anything looks at it, and no test may ever point this at
+  // a real vault.
+  const vaultDir = mkdtempSync(join(tmpdir(), 'tt-browser-vault-'));
   const port = await freePort();
   const child = spawn('node', [SERVER], {
     env: {
@@ -41,8 +45,9 @@ export async function startApp() {
       PORT: String(port),
       TT_DATA_DIR: dataDir,
       TT_MD_DIR: mdDir,
-      TT_SEED_DEMO: '1',
+      TT_SEED_DEMO: opts.shape === 'personal' ? '0' : '1',
       TT_ADMIN_PASSWORD: ADMIN_PASSWORD,
+      ...(opts.shape ? { TT_SHAPE: opts.shape } : {}),
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -64,6 +69,28 @@ export async function startApp() {
     await new Promise((r) => setTimeout(r, 100));
   }
 
+  // SB-057: STORE the shape before the browser opens, for the `personal` cases.
+  //
+  // Not a convenience. `TT_SHAPE=personal` with nothing stored leaves `settings.shape` reading its
+  // `team` default, and the client PUTs the WHOLE settings object on every save — so the first
+  // path typed into Settings → Vault stores `shape: 'team'` and flips the install out of the very
+  // shape it was started in. That is a real defect in the client's whole-object PUT (reported
+  // separately, SB-100's wiring), and it is not what these cases are about. A partial PUT of just
+  // `{ shape }` is the state an install is in once a person has actually chosen Personal.
+  if (opts.shape === 'personal') {
+    const login = await fetch(`http://localhost:${port}/api/auth/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email: ADMIN_EMAIL, password: ADMIN_PASSWORD }),
+    });
+    const cookie = (login.headers.getSetCookie?.() ?? []).map((c) => c.split(';')[0]).join('; ');
+    await fetch(`http://localhost:${port}/api/state`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json', cookie },
+      body: JSON.stringify({ settings: { shape: 'personal' } }),
+    });
+  }
+
   const browser = await chromium.launch({ headless: true });
   const page = await browser.newPage({ viewport: { width: 1400, height: 1000 } });
   const pageErrors = [];
@@ -77,7 +104,7 @@ export async function startApp() {
   await page.locator('text=Settings').first().click();
   await page.locator('button:has-text("+ client")').first().waitFor({ timeout: 15000 });
 
-  return { port, child, dataDir, mdDir, browser, page, pageErrors };
+  return { port, child, dataDir, mdDir, vaultDir, browser, page, pageErrors };
 }
 
 /** Tear down page, browser and server. The server dies by explicit pid, never by pattern. */

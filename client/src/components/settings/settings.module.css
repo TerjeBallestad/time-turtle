@@ -283,3 +283,12 @@
   line-height: 1.55;
   color: var(--text-2);
 }
+
+/* SB-057: one paused note inside the .mirrorBlock panel. A hairline between rows rather than a
+   box each — several paused notes is a list, and a stack of nested boxes reads as several
+   unrelated alarms instead of one situation. */
+.vaultQuarantineRow {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(240, 136, 62, 0.25);
+}
