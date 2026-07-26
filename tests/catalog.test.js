@@ -345,9 +345,19 @@ describe('catalog note — Clients and Projects (SB-058 task 1)', () => {
         const goldened = produced.has(reason) || self.includes(`toBe('${reason}')`);
         expect(goldened, `no refusal golden for reason: ${reason}`).toBe(true);
       }
-      // and the block half must not have quietly acquired a catalog reason
-      const block = /export type VaultBlockQuarantineReason =([\s\S]*?);/.exec(types.replace(/\/\*[\s\S]*?\*\//g, ''));
-      expect([...block[1].matchAll(/\|\s*'([a-z-]+)'/g)].some((m) => m[1].startsWith('catalog-'))).toBe(false);
+      // "the block half must not have quietly acquired a catalog reason" USED TO BE ASSERTED HERE,
+      // by scraping `| '…'` members out of the VaultBlockQuarantineReason declaration. SB-109 moved
+      // that vocabulary into a runtime array (`VAULT_BLOCK_QUARANTINE_REASONS` in shared/core.js)
+      // and DERIVED the type from it, so the declaration now reads
+      // `= (typeof import('./core.js').VAULT_BLOCK_QUARANTINE_REASONS)[number];` and holds no
+      // members at all. The scrape captured zero, `.some(…)` on an empty array is false, and the
+      // assertion went on passing — green, dead, and claiming a guarantee nothing was checking.
+      // Exactly the failure SB-109 was filed about, reintroduced by SB-109's own fix.
+      //
+      // It is asserted in tests/roundtrip.test.js instead, against the imported array, where an
+      // empty or broken vocabulary is loud (`toBe(16)`) rather than vacuous. Deleted here rather
+      // than repaired: two guards over one invariant is how they drift, and only one of them can
+      // still go quiet.
     });
   });
 });
