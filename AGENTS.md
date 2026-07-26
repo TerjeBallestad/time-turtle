@@ -2,7 +2,17 @@
 
 ## PM is the store
 
-All work state lives on the PM board (`pm` CLI, dashboard on localhost:3335) — issues, designs, plans, decisions. Never edit `.pm/data/` directly, and never keep a shadow markdown copy of something PM already holds.
+All work state lives on the PM board (`pm` CLI, dashboard on localhost:3335) — issues, designs, plans, decisions, and the glossary. Never edit `.pm/data/` directly, and never keep a shadow markdown copy of something PM already holds.
+
+## Run `pm glossary` before using domain language
+
+```
+pm glossary
+```
+
+Every term, one line each — read it once and hold it. **One word, one meaning:** a word that means two things is not one term, it is two, and each has its own word. A term with no definition is a **signpost** — an ambiguous word redirecting to the words that do have one — and using it means you're being vague. `pm get <id>` footnotes the terms in whatever it just printed, and the dashboard links the first mention of each term in any body.
+
+Terms are created and refined in `/grill-with-docs` sessions. Fix a wrong definition with `pm patch TERM-NNN --body "…"` rather than working around it.
 
 ## Claim before you occupy a ticket
 
