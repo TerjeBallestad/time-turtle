@@ -723,30 +723,56 @@ TT.decodeTagsCell = function (cell) {
 // still Terje's bytes, and inventing a code for it would be a guess).
 //
 // The brackets are composed here and stripped here, so `Project.vaultNote` holds the note
-// NAME. Escaping composes on top: the cell is `[[` + note + `]]` and THEN TT.encodeCell'd, so
-// a `|` in a note name escapes like any other content and cannot split the row.
+// NAME. `encodeWikilink` / `readWikilink` below are THE composition — every site that writes
+// or reads a `[[…]]` cell goes through them, in both the daily block and the catalog note.
+//
+// THE ORDER IS DELIBERATE AND IS THE WHOLE POINT OF SB-122 (ruled 2026-07-26). The brackets are
+// STRUCTURE, exactly like the `|` that delimits the cell: they are added AFTER the note name is
+// escaped, and read off BEFORE the inner text is decoded. So the write is
+// `'[[' + encodeCell(note) + ']]'` and the read runs `WIKILINK_RE` on the STILL-ESCAPED cell.
+//
+// It was previously composed twice in OPPOSITE orders — the daily block bracketed first and
+// escaped the brackets along with the name, the catalog escaped first and bracketed after. Both
+// halves round-tripped, but only because `encodeCell` happens not to escape `[`; the two sites
+// emitted the same bytes by coincidence, not by rule. Widening `encodeCell` — a change SB-041
+// has already made once for other characters — would have split them silently, and a wikilink is
+// a join key here, so a mangled one is a rate that resolves to 0, not a cosmetic defect.
+// `tests/core.test.js` pins this by widening `encodeCell` to escape `[`/`]` and asserting both
+// sites still agree; do not restore a second composition.
 const WIKILINK_RE = /^\[\[(.+)\]\]$/;
 /**
- * How a project code is written in a `Project` cell (still UNescaped).
+ * A note name as a finished, ESCAPED `[[…]]` cell. Escape first, bracket after.
+ * @param {string} note @returns {string}
+ */
+const encodeWikilink = (note) => '[[' + TT.encodeCell(note) + ']]';
+/**
+ * The inverse: a still-escaped cell to the DECODED note name, or `null` when the cell is not a
+ * wikilink at all. Brackets off first, decode after.
+ * @param {string} cell still escaped @returns {string | null}
+ */
+function readWikilink(cell) {
+  const m = WIKILINK_RE.exec(cell);
+  return m ? TT.decodeCell(m[1]) : null;
+}
+/**
+ * How a project code is written in a `Project` cell — the finished, ESCAPED cell.
  * @param {string} code @param {Project[]} [projects] @returns {string}
  */
 function vaultProjectCell(code, projects) {
-  if (!projects) return code;
-  const project = projects.find((candidate) => candidate.code === code);
-  return project && project.vaultNote ? '[[' + project.vaultNote + ']]' : code;
+  const project = projects && projects.find((candidate) => candidate.code === code);
+  return project && project.vaultNote ? encodeWikilink(project.vaultNote) : TT.encodeCell(code);
 }
 /**
- * The inverse: a decoded `Project` cell back to a project code. First match wins — two
+ * The inverse: a still-escaped `Project` cell back to a project code. First match wins — two
  * projects claiming one note is a catalog the UI has to prevent, not something the parser
- * can arbitrate.
- * @param {string} value decoded cell @param {Project[]} [projects] @returns {string}
+ * can arbitrate. A wikilink no project claims is carried verbatim (decoded), as is a bare code.
+ * @param {string} cell still escaped @param {Project[]} [projects] @returns {string}
  */
-function vaultProjectCode(value, projects) {
-  if (!projects) return value;
-  const m = WIKILINK_RE.exec(value);
-  if (!m) return value;
-  const project = projects.find((candidate) => candidate.vaultNote === m[1]);
-  return project ? project.code : value;
+function vaultProjectCode(cell, projects) {
+  const note = projects ? readWikilink(cell) : null;
+  if (note === null) return TT.decodeCell(cell);
+  const project = projects.find((candidate) => candidate.vaultNote === note);
+  return project ? project.code : TT.decodeCell(cell);
 }
 
 // ---- vault block region (SB-055) ----
@@ -1296,7 +1322,7 @@ function parseAnchoredBlock(md, opts) {
         const tags = TT.decodeTagsCell(raw);
         if (tags.length) entry.tags = tags;
       } else if (keys[c] === 'project') {
-        entry.project = raw === '' ? null : vaultProjectCode(TT.decodeCell(raw), projects);
+        entry.project = raw === '' ? null : vaultProjectCode(raw, projects);
       } else if (keys[c] === 'task') {
         const { label, note } = TT.decodeTaskCell(raw);
         entry.label = label;
@@ -1470,7 +1496,7 @@ TT.serializeVaultBlock = function (entries, opts) {
         keys.map((key) => {
           if (key === 'time') return TT.fmtTimeCell(entry, timeSeparator);
           if (key === 'mode') return TT.encodeTagsCell(entry.tags);
-          if (key === 'project') return entry.project ? TT.encodeCell(vaultProjectCell(entry.project, projects)) : '';
+          if (key === 'project') return entry.project ? vaultProjectCell(entry.project, projects) : '';
           if (key === 'task') return TT.encodeTaskCell({ label: entry.label, note: entry.note });
           if (key === 'bill') return entry.billable ? BILL_YES : '';
           // a vocabulary column TT has no model field for — re-emitted verbatim from the raw
@@ -1701,8 +1727,9 @@ function readCatalogFlag(cell) {
 const writeCatalogFlag = (on) => (on ? CATALOG_CHECK : '');
 /**
  * The Projects table's `Note` column — `Project.vaultNote`, the note this project is written as
- * in a daily-note `Project` cell (SB-059). The brackets are composed and stripped HERE, the same
- * way `vaultProjectCell` does it, because the field holds the note NAME without them.
+ * in a daily-note `Project` cell (SB-059). It goes through `encodeWikilink` / `readWikilink`, the
+ * SAME composition the daily-note `Project` cell uses (SB-122), because the field holds the note
+ * NAME without them and the two sides must emit identical bytes for identical names.
  *
  * A BARE value (no brackets) is honoured as the note name rather than refused, and re-emitted in
  * canonical `[[…]]` form. Refusing would freeze the whole catalog — and with it every rate — over
@@ -1712,11 +1739,11 @@ const writeCatalogFlag = (on) => (on ? CATALOG_CHECK : '');
  */
 function readCatalogNote(cell) {
   if (cell === '') return undefined;
-  const m = WIKILINK_RE.exec(cell);
-  return TT.decodeCell(m ? m[1] : cell);
+  const note = readWikilink(cell);
+  return note === null ? TT.decodeCell(cell) : note;
 }
 /** @param {string | undefined} note @returns {string} */
-const writeCatalogNote = (note) => (note ? '[[' + TT.encodeCell(note) + ']]' : '');
+const writeCatalogNote = (note) => (note ? encodeWikilink(note) : '');
 
 /** @type {Record<string, import('./types.ts').VaultCatalogSectionName>} */
 const CATALOG_SECTION_NAMES = { clients: 'clients', projects: 'projects', tasks: 'tasks', settings: 'settings' };

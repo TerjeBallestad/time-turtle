@@ -576,3 +576,111 @@ describe('TT.projectCode transliterates rather than dropping (SB-088)', () => {
     expect(TT.projectCode('!!!')).toBe('PROJ');
   });
 });
+
+// ## Verified red-green: 2026-07-26
+// SB-122: the `[[Wikilink]]` rule was composed TWICE, in opposite orders — the daily-note
+// `Project` cell bracketed first and escaped the brackets along with the name, the catalog note's
+// `Note` column escaped first and bracketed after. Both halves round-tripped, but only because
+// `TT.encodeCell` happens not to escape `[`. That is a coincidence of today's cell codec, not a
+// property either site asserted, and a wikilink is a JOIN KEY here: the catalog says which note a
+// project is written as, the daily block writes that note, and the parser resolves it back to a
+// code. A mangled one is `rateOf()` returning 0, not a cosmetic defect.
+//
+// So the suite below runs every claim TWICE: once under the real `encodeCell`, and once under a
+// WIDENED one that also escapes `[` and `]` — the future change this ticket exists to survive.
+// A test that only passed under today's escape set would be green for the wrong reason.
+describe('the wikilink composition is one rule, independent of encodeCell (SB-122)', () => {
+  /** @param {Partial<import('../shared/types.ts').Project>} o */
+  const P = (o) => ({ code: 'LT-01', name: 'Lifelines Tycoon', clientId: null, rate: null, billable: true, archived: false, ...o }); // prettier-ignore
+  /** @param {Partial<import('../shared/types.ts').VaultEntry>} o */
+  const E = (o) => ({ id: 'ephemeral', date: '2026-01-05', start: null, end: null, durMin: 30, project: null, label: '', note: '', billable: false, ...o }); // prettier-ignore
+  /** The nth line's cells, trimmed and STILL escaped — `| a | b |` → ['a', 'b']. */
+  const cells = (region, line) => TT.splitCells(region.split('\n')[line]).slice(1, -1);
+
+  /**
+   * Run `fn` with `TT.encodeCell` widened to escape `[` and `]` as well. `decodeCell` is already
+   * unconditional (`\X` → `X` for any X), so widening the write half alone is a faithful
+   * simulation of the change — nothing else in the codec needs to move.
+   */
+  const withBracketsEscaped = (fn) => {
+    const real = TT.encodeCell;
+    TT.encodeCell = (s) => (s == null ? '' : String(s)).replace(/[\\|[\]]/g, (c) => '\\' + c);
+    try {
+      expect(TT.encodeCell('a[b')).toBe('a\\[b'); // the premise of this whole block
+      return fn();
+    } finally {
+      TT.encodeCell = real;
+    }
+  };
+
+  // Note names that carry the characters the two orders disagree about, plus the ones the escape
+  // set already covers, so a regression in either half shows up here.
+  const NAMES = [
+    'Nettbutikk rebuild', // the ordinary case — the control
+    'Arkiv | 2025', // the delimiter: an unescaped one splits the row
+    'Back\\slash', // the escape character itself
+    'Notes [draft] 2026', // a bracket INSIDE the name — the coincidence, stated
+    '[[Nested]]', // the whole wikilink syntax as a name
+    'Trailing ]', // the name that collides with the closing bracket pair
+  ];
+
+  /**
+   * The property, stated once: for one note name, the daily block and the catalog note emit the
+   * SAME bytes, and both sides read the model back. Byte equality is what a second composition
+   * breaks; the two round-trips are what a broken read side breaks.
+   */
+  const bothSidesAgree = (note) => {
+    const projects = [P({ vaultNote: note })];
+    const catalog = TT.serializeVaultCatalogSection('projects', projects, { revision: 1 });
+    const parsedCatalog = TT.parseVaultCatalogSection(['# Time Turtle', '', catalog, ''].join('\n'), 'projects');
+    expect(parsedCatalog.quarantine).toBe(false);
+    expect(parsedCatalog.rows[0].vaultNote).toBe(note);
+
+    // the daily block is resolved against the catalog TT just READ BACK, not the one it holds in
+    // memory — that is the join this ticket is about
+    const opts = { headers: ['Time', 'Project'], projects: parsedCatalog.rows };
+    const day = TT.serializeVaultBlock([E({ project: 'LT-01' })], opts);
+    const parsedDay = TT.parseVaultBlock(day, { date: '2026-01-05', projects: parsedCatalog.rows });
+    expect(parsedDay.quarantine).toBe(false);
+    expect(parsedDay.entries[0].project).toBe('LT-01');
+
+    // ONE composition ⇒ one set of bytes. `Note` is the last catalog column, `Project` the second
+    // daily one; both rows are line 4 of their region.
+    const noteCell = cells(catalog, 4).pop();
+    const projectCell = cells(day, 4)[1];
+    expect(projectCell).toBe(noteCell);
+    return projectCell;
+  };
+
+  it.each(NAMES)('%s: the catalog Note cell and the daily Project cell are the same bytes', (note) => {
+    bothSidesAgree(note);
+  });
+
+  it.each(NAMES)('%s: still the same bytes once encodeCell escapes `[` and `]`', (note) => {
+    withBracketsEscaped(() => bothSidesAgree(note));
+  });
+
+  it('the widened escape set really does change the bytes — the guard is not a no-op', () => {
+    // Without this, both blocks above could be passing on identical output and the second one
+    // would prove nothing. A bracket in the NAME is escaped under the wider set and not under the
+    // narrow one, while the structural brackets stay literal in both.
+    const narrow = bothSidesAgree('Notes [draft] 2026');
+    const wide = withBracketsEscaped(() => bothSidesAgree('Notes [draft] 2026'));
+    expect(narrow).toBe('[[Notes [draft] 2026]]');
+    expect(wide).toBe('[[Notes \\[draft\\] 2026]]');
+    expect(wide).not.toBe(narrow);
+  });
+
+  it('a wikilink no project claims is still carried verbatim under the wider escape set', () => {
+    // The pre-SB-122 read side ran WIKILINK_RE on the DECODED cell. Under the wider set the
+    // unclaimed-link fallback is where that difference surfaces: TT must hand back the note text,
+    // never the still-escaped bytes.
+    withBracketsEscaped(() => {
+      const projects = [P({ vaultNote: 'Lifelines Tycoon' })];
+      const day = TT.serializeVaultBlock([E({ project: '[[Planning [2026]]]' })], { headers: ['Time', 'Project'] });
+      const parsed = TT.parseVaultBlock(day, { date: '2026-01-05', projects });
+      expect(parsed.quarantine).toBe(false);
+      expect(parsed.entries[0].project).toBe('[[Planning [2026]]]');
+    });
+  });
+});
