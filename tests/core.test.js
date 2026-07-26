@@ -575,6 +575,38 @@ describe('TT.projectCode transliterates rather than dropping (SB-088)', () => {
     expect(TT.projectCode('')).toBe('PROJ');
     expect(TT.projectCode('!!!')).toBe('PROJ');
   });
+
+  // ## Verified red-green: 2026-07-26
+  // SB-110, folded into the same table: the hyphen was DELETED with every other non-alphanumeric,
+  // so "Sør-Norge" collapsed into the single word SORNORGE while "Sør Norge" segmented to
+  // SOR-NORG. Same name, different shape of answer, for a reason the user cannot see.
+  it.each([
+    ['Sør-Norge', 'Sør Norge', 'SOR-NORG'],
+    ['Nord-Trøndelag', 'Nord Trøndelag', 'NORD-TRON'],
+    ['Vest-Agder', 'Vest Agder', 'VEST-AGDE'],
+    ['Ops-maintenance', 'Ops maintenance', 'OPS-MAIN'],
+  ])('%s segments exactly like %s → %s', (hyphenated, spaced, expected) => {
+    expect(TT.projectCode(hyphenated)).toBe(TT.projectCode(spaced));
+    expect(TT.projectCode(hyphenated)).toBe(expected);
+  });
+
+  it('a hyphen is a separator even where it produces nothing to separate', () => {
+    expect(TT.projectCode('Foo-')).toBe('FOO'); // no trailing dash left behind
+    expect(TT.projectCode('-Foo')).toBe('FOO');
+    expect(TT.projectCode('Sør--Norge')).toBe('SOR-NORG'); // a run collapses like a run of spaces
+    expect(TT.projectCode('A-B-C')).toBe('A-B'); // still only the first two words
+    expect(TT.projectCode('-')).toBe('PROJ'); // nothing left ⇒ the fallback, not an empty code
+  });
+
+  it('the length cap: a hyphenated name inherits the two-word shape, and nothing longer', () => {
+    // The ticket asked for this to be checked rather than assumed. A hyphenated name now takes
+    // the same path as its space-separated twin, so 9 (4 + dash + 4) is its maximum — one more
+    // than the single-word cap of 8, and exactly what the spaced form already produced.
+    expect(TT.projectCode('Nord-Trøndelag')).toHaveLength(9);
+    expect(TT.projectCode('Nord Trøndelag')).toHaveLength(9);
+    expect(TT.projectCode('Abcdefgh-Ijklmnop-Qrstuv').length).toBeLessThanOrEqual(9);
+    expect(TT.projectCode('Abcdefghijklmnop')).toHaveLength(8); // one word is still capped at 8
+  });
 });
 
 // ## Verified red-green: 2026-07-26

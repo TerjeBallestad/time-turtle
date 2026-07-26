@@ -364,11 +364,24 @@ TT.slug = (s, fallback = 'task') =>
 // NOT A MIGRATION: this is what a NEWLY created project is called. Every stored code
 // keeps its exact bytes — no code, client id or task id is re-derived anywhere, and a
 // rename stays the deliberate, server-reconciled act PLAN-006 made it (DC-005).
+// SB-110: a HYPHEN SEPARATES WORDS, exactly like a space. It used to be deleted along with
+// every other non-alphanumeric, so "Sør-Norge" collapsed into the single word SORNORGE while
+// "Sør Norge" segmented to SOR-NORG — the same name, a different shape of answer, for a reason
+// the user cannot see. Hyphenated proper nouns are ordinary in Norwegian company names
+// (Sør-Norge, Nord-Trøndelag, Vest-Agder), so this is not an edge case in this catalog.
+//
+// The cap interaction, checked rather than assumed: a hyphenated name now takes the SAME path
+// as its space-separated twin, so it inherits that path's shape — two words of at most four
+// letters joined by a dash, at most 9 characters. That is one more than the single-word cap of
+// 8 (Nord-Trøndelag: NORDTRON → NORD-TRON), and it is exactly what "Nord Trøndelag" already
+// produced before this change. No new maximum is introduced, and nothing downstream constrains
+// a code's length — `createProject` is the only caller.
 TT.projectCode = (name) => {
   const words = asciiFold(name)
-    .trim()
     .toUpperCase()
+    .replace(/-/g, ' ')
     .replace(/[^A-Z0-9 ]/g, '')
+    .trim()
     .split(/\s+/);
   const code =
     words.length > 1
