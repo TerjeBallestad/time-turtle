@@ -1207,6 +1207,21 @@ export interface TTModule {
    * LINES — header row, delimiter row, data rows — not a note and not a region. 4 lowercase hex.
    */
   vaultPayloadDigest(payloadLines: string[]): string;
+  /**
+   * One payload line in canonical (compact) form — the shape `vaultPayloadDigest` hashes
+   * (DD-023). Collapses the framing whitespace an aligned table adds and the separator row's dash
+   * run, and NOTHING else: no interior runs, no case folding, no Unicode normalisation, no
+   * escaping. Exposed for the writer's diff-before-write, which compares whole note text and so
+   * cannot reach the digest — two call sites, one definition. A line that is not a table row
+   * comes back untouched.
+   */
+  normaliseVaultPayloadLine(line: string): string;
+  /**
+   * A table's lines in Obsidian's ALIGNED form (DD-023 half 1) — header, delimiter, data rows.
+   * Takes cell ARRAYS, header row first, because a column's width is not known until every row is
+   * in hand. Width is `str.length`: UTF-16 code units, not code points and not display width.
+   */
+  vaultAlignedTable(rows: string[][]): string[];
   locateVaultBlock(md: string, opts?: { heading?: string }): VaultBlockLocation;
   /**
    * SB-055: parse the located block into entries. The header row is the schema; any

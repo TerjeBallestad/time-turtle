@@ -10,6 +10,7 @@ import { spawn } from 'node:child_process';
 import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { expect } from 'vitest';
+import TT from '../shared/core.js';
 
 export function freePort() {
   return new Promise((ok, fail) => {
@@ -190,3 +191,35 @@ export function unfrozenDay(state) {
     expect(cutoverDay, 'a personal install reported no vault cutover').toMatch(/^\d{4}-\d{2}-\d{2}$/);
   return cutoverDay || new Date().toISOString().slice(0, 10);
 }
+
+// ---- SB-165 / DD-023: comparing table rows without comparing their padding ----
+//
+// Since DD-023 TT writes Obsidian's ALIGNED form, so a cell is as wide as the widest cell in its
+// column. That makes a byte-literal like `'| 30m | Tidying |'` couple a test to every other row of
+// its fixture's table: add one longer label and an assertion about backslash-escaping fails for a
+// reason that has nothing to do with escaping. These compare CELL BY CELL instead, for the many
+// assertions whose subject is a cell's CONTENT rather than the column widths.
+//
+// Built on `TT.splitCells` — the parser's own primitive, pinned by its own tests — and
+// deliberately NOT on `TT.normaliseVaultPayloadLine` or `TT.vaultAlignedTable`. Those two are what
+// DD-023 introduced and must not be the instrument that checks themselves. The alignment itself is
+// pinned by the hand-written anchor golden and the recorded real-Obsidian tables in
+// roundtrip.test.js, which is where a claim about Obsidian's formatter belongs.
+//
+// One home rather than a copy per file — SB-161's ruling, and the same failure it was fixing.
+
+/** A table line's trimmed, still-escaped cells. @param {string} line @returns {string[]} */
+export const rowCellsOf = (line) => TT.splitCells(line.trim().slice(1, -1)).map((cell) => cell.trim());
+
+/**
+ * Does `block` contain this table row, ignoring DD-023's alignment padding?
+ * @param {string} block @param {string} row written compactly, as `| a | b |`
+ * @returns {boolean}
+ */
+export const containsRow = (block, row) => {
+  const want = JSON.stringify(rowCellsOf(row));
+  return block
+    .split('\n')
+    .filter((line) => line.trim().startsWith('|'))
+    .some((line) => JSON.stringify(rowCellsOf(line)) === want);
+};

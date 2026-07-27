@@ -240,6 +240,47 @@ function keepRow(path, date, row, over) {
 }
 
 /**
+ * Are these two notes the same note, ignoring table framing whitespace? THE SECOND CALL SITE of
+ * `TT.normaliseVaultPayloadLine` (DD-023 half 2, SB-165) — the digest is the first.
+ *
+ * The skip test compares WHOLE NOTE TEXT rather than payload lines, so it cannot go through
+ * `TT.vaultPayloadDigest`; it has to reach the same normaliser directly. TWO CALL SITES, ONE
+ * DEFINITION. Normalise the digest and leave this comparing raw strings and TT rewrites the note
+ * on every save just to restore its own padding — the per-keystroke iCloud write storm named at
+ * the head of this file as the single thing most likely to make SB-046 come back "no". Trading a
+ * quarantine for a write storm is not a fix.
+ *
+ * ONLY THE BLOCK REGION IS NORMALISED. Everything outside it is Terje's, and a table in his
+ * `## Captures` is not TT's to have opinions about — normalising the whole note would let a
+ * genuine change out there compare equal. The two sides are byte-identical outside the block by
+ * construction today (the splice only replaces `start..end`), which is exactly the kind of
+ * assumption that rots, so this does not rest on it.
+ *
+ * A side whose block will not locate falls back to raw equality: with no region there is nothing
+ * to normalise, and answering "same" about a note TT cannot read would skip a write it owes.
+ * @param {string} a @param {string} b
+ * @param {{ heading?: string, date?: string, projects?: import('../../shared/types.ts').Project[] }} opts
+ * @returns {boolean}
+ */
+function sameIgnoringTableFraming(a, b, opts) {
+  // the note's LINES with the block region's normalised in place — an array, compared
+  // element-wise, because joining the three slices back into one string would let a line break
+  // land where a region boundary was and make two differently-split notes compare equal
+  /** @param {string} text @returns {string[] | null} */
+  const normalisedLines = (text) => {
+    const loc = TT.locateVaultBlock(text, opts);
+    if (loc.quarantine) return null;
+    const lines = text.split('\n');
+    for (let i = loc.start; i <= loc.end; i++) lines[i] = TT.normaliseVaultPayloadLine(lines[i]);
+    return lines;
+  };
+  const left = normalisedLines(a);
+  const right = normalisedLines(b);
+  if (left == null || right == null) return a === b;
+  return left.length === right.length && left.every((/** @type {string} */ line, /** @type {number} */ i) => line === right[i]); // prettier-ignore
+}
+
+/**
  * One date. Read the note, splice TT's block into it, and write only if that changed anything.
  *
  * `revisionOverride` is what makes this the ONLY write path in this module. The arbitration's
@@ -313,7 +354,7 @@ function writeOneDate(date, entries, path, config, report, revisionOverride) {
   if (current != null && located && !located.quarantine) {
     const wouldBe = revisionOverride != null ? revisionOverride : located.revision;
     const unchanged = TT.writeVaultBlock(current, entries, { ...opts, revision: wouldBe });
-    if (!unchanged.quarantine && unchanged.md === current) {
+    if (!unchanged.quarantine && sameIgnoringTableFraming(unchanged.md, current, opts)) {
       report.skipped.push(date);
       return;
     }
@@ -349,6 +390,12 @@ function writeOneDate(date, entries, path, config, report, revisionOverride) {
   // what is there (a note whose block TT authored before the index existed), and that is not a
   // write either. Compared against the BYTES ON DISK, not against the index's sha, so a note whose
   // other sections changed externally is still recognised as needing no block write.
+  //
+  // RAW, not `sameIgnoringTableFraming` — deliberately, and it is not an oversight. The diff above
+  // returns whenever the block located, so the only paths that reach here are ADOPTION and a note
+  // with no block at all, where TT is inserting an anchor and a write is the point. A normalised
+  // comparison here would only ever answer "same" for a block TT could not locate, which the
+  // helper refuses to do anyway.
   if (current != null && out === current) {
     report.skipped.push(date);
     return;

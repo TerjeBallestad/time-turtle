@@ -183,8 +183,12 @@ describe('invariant 2 — an unparseable block is quarantined, surfaced, and LEF
   // DD-014's rider: quarantine rather than write a DEGRADED cell. The block is a lossless carrier
   // because `personal → team` is the upgrade path.
   const DAMAGED = [
-    ['unknown-header', (md) => md.replace('| Time |', '| Cat |')],
-    ['bad-bill-cell', (md) => md.replace(/\| ✓ \|$/m, '| yes |')],
+    // Both matched on cell CONTENT rather than on compact bytes: DD-023 pads a cell out to its
+    // column width, so `'| Time |'` and `/\| ✓ \|$/` each stopped matching and the "damaged"
+    // fixture went to the scanner undamaged — a quarantine test asserting a quarantine that could
+    // no longer happen.
+    ['unknown-header', (md) => md.replace(/^\| Time\b/m, '| Cat')],
+    ['bad-bill-cell', (md) => md.replace(/\| ✓ *\|$/m, '| yes |')],
     ['unexpected-content-in-block', (md) => md.replace('\n\n`revision:', '\na note to self\n\n`revision:')],
     ['unparseable-time', (md) => md.replace('| 08:00→09:00 |', '| half past |')],
   ];

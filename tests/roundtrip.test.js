@@ -50,6 +50,7 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import TT, { VAULT_BLOCK_QUARANTINE_REASONS } from '../shared/core.js';
+import { containsRow } from './util.js';
 
 // ---- V1 fixture (byte-identical to the pre-SDD-002 golden) ----
 const V1_FIXTURE = [
@@ -1214,23 +1215,36 @@ describe('vault block serialize + splice (SB-055)', () => {
     E({ durMin: 30, project: '[[Home]]', tags: ['#rest'] }),
   ];
 
-  it('emits SB-045’s exact frozen shape', () => {
+  it('emits SB-045’s exact frozen shape, in Obsidian’s aligned form (DD-023)', () => {
+    // THE HAND-WRITTEN ANCHOR GOLDEN. Every other byte fixture in this file is anchored through
+    // this one and through the real-Obsidian byte-identity test below; these columns were widened
+    // by applying DD-023's rule by hand (width = the longest trimmed cell in the column, header
+    // and totals row included; the delimiter is derived and framed like any other cell), NOT by
+    // pasting what the emitter happened to print. A golden generated from its own subject asserts
+    // only that the function is deterministic.
     expect(TT.serializeVaultBlock(DAY, { revision: 8 })).toBe(
       [
         '## Time Log',
         '',
-        '| Time | Mode | Project | Task | Bill |',
-        '|---|---|---|---|---|',
-        '| 09:00→09:15 | #admin | [[Planning]] | Daily planning ritual | |',
-        '| 11:00→12:45 | #deep | FAG | Search & facets<br>- Narrow the facet query | ✓ |',
-        '| 17:34→ | #deep | [[Time Turtle]] | Block format feel-gate | |',
-        '| 30m | #rest | [[Home]] | | |',
-        '| **2.5h** | | | | **1.75h billable** |',
+        '| Time        | Mode   | Project         | Task                                        | Bill               |',
+        '| ----------- | ------ | --------------- | ------------------------------------------- | ------------------ |',
+        '| 09:00→09:15 | #admin | [[Planning]]    | Daily planning ritual                       |                    |',
+        '| 11:00→12:45 | #deep  | FAG             | Search & facets<br>- Narrow the facet query | ✓                  |',
+        '| 17:34→      | #deep  | [[Time Turtle]] | Block format feel-gate                      |                    |',
+        '| 30m         | #rest  | [[Home]]        |                                             |                    |',
+        '| **2.5h**    |        |                 |                                             | **1.75h billable** |',
         '',
         // The digest is BAKED IN, not computed by the test (DD-009). Computing it here with the
         // same helper the emitter uses would assert only that the function is deterministic —
         // this literal is what pins the hash itself, so changing FNV or the fold breaks loudly
         // instead of silently re-keying every block in the vault.
+        //
+        // IT IS ALSO DD-023's COMPAT PROOF, and that is why it is unchanged from the compact
+        // golden it replaced. The bytes above are aligned; the digest is taken over the NORMALISED
+        // (compact) form, which is what this block used to be — so `115d` is the same hash the
+        // pre-DD-023 emitter produced for the same rows. If normalisation is ever pointed at the
+        // aligned form instead, this literal moves and every note in Terje's vault quarantines on
+        // first read. Do not re-bake it to make it pass.
         '`revision: 8 · 115d`',
       ].join('\n'),
     );
@@ -1241,18 +1255,20 @@ describe('vault block serialize + splice (SB-055)', () => {
       [
         '## Time Log',
         '',
-        '| Time | Mode | Project | Task | Bill |',
-        '|---|---|---|---|---|',
-        '| **0h** | | | | **0h billable** |',
+        // `Bill` is the widest column here because the totals row's `**0h billable**` is in it —
+        // the totals row is a data row for width purposes like any other
+        '| Time   | Mode | Project | Task | Bill            |',
+        '| ------ | ---- | ------- | ---- | --------------- |',
+        '| **0h** |      |         |      | **0h billable** |',
         '',
-        '`revision: 1 · 6ff8`',
+        '`revision: 1 · 6ff8`', // unchanged across DD-023 — see the anchor golden above
       ].join('\n'),
     );
   });
 
   it('emits a bare `- note` with no leading <br> when there is no label', () => {
     const region = TT.serializeVaultBlock([E({ durMin: 30, note: 'freeform hour' })], { headers: ['Time', 'Task'] });
-    expect(region).toContain('| 30m | - freeform hour |');
+    expect(region).toContain('| 30m      | - freeform hour |');
   });
 
   it('a note ending in [nb] emits with NO backslash (encodeNoteCell was not used)', () => {
@@ -1261,7 +1277,7 @@ describe('vault block serialize + splice (SB-055)', () => {
     const region = TT.serializeVaultBlock([E({ durMin: 45, label: 'Admin', note: 'invoicing [nb]' })], {
       headers: ['Time', 'Task'],
     });
-    expect(region).toContain('| 45m | Admin<br>- invoicing [nb] |');
+    expect(region).toContain('| 45m       | Admin<br>- invoicing [nb] |');
     expect(region).not.toContain('\\[nb]');
   });
 
@@ -1271,13 +1287,68 @@ describe('vault block serialize + splice (SB-055)', () => {
       [E({ date: today, start: 540, billable: true }), E({ date: today, durMin: 60, billable: true })],
       { headers: ['Time', 'Bill'] },
     );
-    expect(region).toContain('| 09:00→ | ✓ |'); // the open range is written as-is…
+    expect(region).toContain('| 09:00→ | ✓               |'); // the open range is written as-is…
     expect(region).toContain('| **1h** | **1h billable** |'); // …and only the finished hour counts
+  });
+
+  // ---- DD-023 half 1: the aligned form, pinned against Obsidian itself ----
+  //
+  // PROVENANCE, stated so the test does not overclaim. These lines are copied byte-for-byte out of
+  // `Calendar/Daily/2026-07-03.md` and `2026-02-09.md` in Terje's vault. They are HIS OWN schema —
+  // `| Time | Cat | Project | Description |`, which is SB-060's `unknown-header` table, not TT's
+  // five columns — and TT did not write them: there is no `padEnd` anywhere in `shared/`,
+  // `server/src/` or `client/src/` outside date formatting. So they are evidence about OBSIDIAN'S
+  // FORMATTER, which is exactly what half 1 needs, and evidence about nothing else. That TT's
+  // table editor is the producer is inferred from the absence of any other candidate, not observed.
+  //
+  // Recorded rather than read from the vault at test time: the suite must not depend on Terje's
+  // iCloud, and a fixture that changes when he edits his notes is not a fixture.
+  const OBSIDIAN_2026_07_03 = [
+    '| Time        | Cat    | Project       | Description                                                                                                     |',
+    '| ----------- | ------ | ------------- | --------------------------------------------------------------------------------------------------------------- |',
+    '| 14:45-15:00 | #admin | [[Planning]]  | Daily planning ritual                                                                                           |',
+    '| 15:00-      | #deep  | [[Lifelines]] | Active: SDD-101 open design questions — workbench player-goal clarity (SB-319 about-map, retire question-chain) |',
+  ];
+  const OBSIDIAN_2026_02_09 = [
+    '| Time        | Cat    | Project                                     | Description                      |',
+    '| ----------- | ------ | ------------------------------------------- | -------------------------------- |',
+    '| 07:30-08:30 | #admin |                                             | Meditation                       |',
+    '| 09:00-13:30 | #deep  | [[Projects/Lifelines/Lifelines\\|Lifelines]] | M3 spec, weekly plan, daily plan |',
+    '| 13:30-15:30 | #admin |                                             | Gym                              |',
+  ];
+  /** The recorded sample's own cells, so the input to the aligner is the file and not a retyping. */
+  const cellsOf = (line) => TT.splitCells(line.trim().slice(1, -1)).map((c) => c.trim());
+
+  it.each([
+    ['2026-07-03.md — the width rule on four columns at once', OBSIDIAN_2026_07_03],
+    ['2026-02-09.md — an EMPTY cell, padded to the column width like any other', OBSIDIAN_2026_02_09],
+  ])('re-emits a real Obsidian table byte-identically: %s', (_name, sample) => {
+    // Feed the aligner the sample's OWN cell content and demand the sample back, byte for byte.
+    // This is what catches the two rules TT would otherwise have got from habit rather than from
+    // Obsidian: the delimiter row is FRAMED with spaces (`| --- |`, not TT's compact `|---|`),
+    // and an empty cell is padded to the full width rather than written as `vaultRow`'s `| |`.
+    const rows = sample.filter((_, i) => i !== 1).map(cellsOf); // the delimiter is derived, never an input
+    expect(TT.vaultAlignedTable(rows)).toEqual(sample);
+  });
+
+  it('column width is UTF-16 CODE UNITS, not code points — the emoji row DD-023 measured', () => {
+    // The one fully-observed data point in DD-023: `11:00→13:00 🕐` is 13 code points and 14 UTF-16
+    // code units, and Obsidian wrote FOURTEEN dashes. An implementation using `[...str].length` is
+    // off by one on exactly this row, which means Obsidian re-aligns the table TT just wrote and
+    // the note wedges again — half 1 passing while still failing. Asserted on the dash run rather
+    // than on the whole table so the failure names the width directly.
+    const emoji = '11:00→13:00 🕐';
+    expect([...emoji].length).toBe(13); // code points — what a wrong implementation would count
+    expect(emoji.length).toBe(14); // UTF-16 code units — what Obsidian counts
+    const [header, delimiter, row] = TT.vaultAlignedTable([['Time'], [emoji]]);
+    expect(delimiter).toBe('| ' + '-'.repeat(14) + ' |');
+    expect(header).toBe('| Time           |');
+    expect(row).toBe('| ' + emoji + ' |');
   });
 
   it('the heading and the header set come from the block, not from a constant', () => {
     expect(TT.serializeVaultBlock([], { heading: 'Timeloggen', headers: ['Time', 'Task'], revision: 2 })).toBe(
-      ['## Timeloggen', '', '| Time | Task |', '|---|---|', '| **0h** | **0h billable** |', '', '`revision: 2 · ce7f`'].join('\n'), // prettier-ignore
+      ['## Timeloggen', '', '| Time   | Task            |', '| ------ | --------------- |', '| **0h** | **0h billable** |', '', '`revision: 2 · ce7f`'].join('\n'), // prettier-ignore
     );
   });
 
@@ -1354,9 +1425,9 @@ describe('vault block serialize + splice (SB-055)', () => {
     );
     const res = TT.writeVaultBlock(preMode, [E({ durMin: 30, project: '[[Home]]', label: 'Tidying' })]);
     expect(res.quarantine).toBe(false);
-    expect(res.md).toContain('| Time | Project | Task | Bill |');
+    expect(res.md).toContain('| Time     | Project  | Task    | Bill            |');
     expect(res.md).not.toContain('Mode');
-    expect(res.md).toContain('| 30m | [[Home]] | Tidying | |');
+    expect(res.md).toContain('| 30m      | [[Home]] | Tidying |                 |');
   });
 
   it('keeps the located revision unless told otherwise (bumping is SB-057’s call)', () => {
@@ -1453,14 +1524,14 @@ describe('vault block round-trip (SB-055)', () => {
       '',
       '## Time Log',
       '',
-      '| Time | Mode | Project | Task | Bill |',
-      '|---|---|---|---|---|',
-      '| 09:00→15:30 | #deep | A\\|B | Pipe \\| work<br>- and a note with a \\| in it | ✓ |',
-      '| 11:00→11:30 | #admin | FAG | Docs<br>- use \\<br> for a line break | |',
-      '| 17:34→ | #deep | [[Time Turtle]] | Block format feel-gate | |',
-      '| 30m | #rest | [[Home]] | | |',
-      '| 45m | #admin | INT-ADM | Invoicing<br>- weekly invoicing [nb] | |',
-      '| **8.25h** | | | | **6.5h billable** |',
+      '| Time        | Mode   | Project         | Task                                         | Bill              |',
+      '| ----------- | ------ | --------------- | -------------------------------------------- | ----------------- |',
+      '| 09:00→15:30 | #deep  | A\\|B            | Pipe \\| work<br>- and a note with a \\| in it | ✓                 |',
+      '| 11:00→11:30 | #admin | FAG             | Docs<br>- use \\<br> for a line break         |                   |',
+      '| 17:34→      | #deep  | [[Time Turtle]] | Block format feel-gate                       |                   |',
+      '| 30m         | #rest  | [[Home]]        |                                              |                   |',
+      '| 45m         | #admin | INT-ADM         | Invoicing<br>- weekly invoicing [nb]         |                   |',
+      '| **8.25h**   |        |                 |                                              | **6.5h billable** |',
       '',
       '`revision: 8 · 9b38`',
       '',
@@ -1479,10 +1550,10 @@ describe('vault block round-trip (SB-055)', () => {
     const PRE_MODE_DAY = [
       '## Time Log',
       '',
-      '| Time | Project | Task | Bill |',
-      '|---|---|---|---|',
-      '| 08:30→12:00 | FJH-NETT | Checkout flow<br>- wireframes | ✓ |',
-      '| **3.5h** | | | **3.5h billable** |',
+      '| Time        | Project  | Task                          | Bill              |',
+      '| ----------- | -------- | ----------------------------- | ----------------- |',
+      '| 08:30→12:00 | FJH-NETT | Checkout flow<br>- wireframes | ✓                 |',
+      '| **3.5h**    |          |                               | **3.5h billable** |',
       '',
       '`revision: 2 · 9854`',
       '',
@@ -1498,10 +1569,10 @@ describe('vault block round-trip (SB-055)', () => {
     const REORDERED_DAY = [
       '## Time Log',
       '',
-      '| Bill | Task | Time |',
-      '|---|---|---|',
-      '| ✓ | Checkout flow | 08:30→12:00 |',
-      '| **3.5h billable** | | **3.5h** |',
+      '| Bill              | Task          | Time        |',
+      '| ----------------- | ------------- | ----------- |',
+      '| ✓                 | Checkout flow | 08:30→12:00 |',
+      '| **3.5h billable** |               | **3.5h**    |',
       '',
       '`revision: 1 · 3fdf`',
       '',
@@ -1513,11 +1584,11 @@ describe('vault block round-trip (SB-055)', () => {
     const TEXT_FIRST_DAY = [
       '## Time Log',
       '',
-      '| Task | Time | Bill |',
-      '|---|---|---|',
-      '| Checkout flow | 08:30→12:00 | ✓ |',
-      '| **urgent** fixes | 1h | |',
-      '| | **4.5h** | **3.5h billable** |',
+      '| Task             | Time        | Bill              |',
+      '| ---------------- | ----------- | ----------------- |',
+      '| Checkout flow    | 08:30→12:00 | ✓                 |',
+      '| **urgent** fixes | 1h          |                   |',
+      '|                  | **4.5h**    | **3.5h billable** |',
       '',
       '`revision: 1 · 007b`',
       '',
@@ -1528,9 +1599,9 @@ describe('vault block round-trip (SB-055)', () => {
       '',
       '## Time Log',
       '',
-      '| Time | Mode | Project | Task | Bill |',
-      '|---|---|---|---|---|',
-      '| **0h** | | | | **0h billable** |',
+      '| Time   | Mode | Project | Task | Bill            |',
+      '| ------ | ---- | ------- | ---- | --------------- |',
+      '| **0h** |      |         |      | **0h billable** |',
       '',
       '`revision: 1 · 6ff8`',
       '',
@@ -1584,8 +1655,8 @@ describe('vault block round-trip (SB-055)', () => {
       const entries = TT.parseVaultBlock(FULL_DAY, { date: TT.todayStr() }).entries;
       expect(entries.filter((e) => TT.isRunning(e))).toHaveLength(1);
       const region = TT.serializeVaultBlock(entries, { revision: 8 });
-      expect(region).toContain('| **8.25h** | | | | **6.5h billable** |');
-      expect(region).toContain('| 17:34→ |'); // the running row is still written, open-ended
+      expect(region).toContain('| **8.25h**   |        |                 |                                              | **6.5h billable** |'); // prettier-ignore
+      expect(region).toContain('| 17:34→      |'); // the running row is still written, open-ended
     });
 
     it('every byte outside the block survives each golden untouched', () => {
@@ -1630,7 +1701,7 @@ describe('vault block round-trip (SB-055)', () => {
       ['a note that itself begins with `- `', withRow('| 30m | Label<br>- - note | |'), '<br>- - note |'],
       ['a note typed without the `- ` prefix', withRow('| 30m | Label<br>note | |'), '<br>- note |'],
       ['a raw <br> a hand edit left in the note', withRow('| 30m | Docs<br>- use <br> here | |'), '\\<br> here |'],
-      ['a totals row someone edited by hand', withRow('| 1h | Label | ✓ |\n| **99h** | | **99h billable** |'), '| **1h** | | **1h billable** |'], // prettier-ignore
+      ['a totals row someone edited by hand', withRow('| 1h | Label | ✓ |\n| **99h** | | **99h billable** |'), '| **1h** |       | **1h billable** |'], // prettier-ignore
     ];
 
     for (const [name, md, canonicalFragment] of HAND_EDITED) {
@@ -1654,7 +1725,7 @@ describe('vault block round-trip (SB-055)', () => {
       // hyphen per write cycle, until the note is unreadable
       let md = withRow('| 30m | Label<br>note | |');
       for (let i = 0; i < 5; i++) md = roundTrip(md);
-      expect(md).toContain('| 30m | Label<br>- note | |');
+      expect(md).toContain('| 30m      | Label<br>- note |                 |');
       expect(md).not.toContain('- - ');
       expect(TT.parseVaultBlock(md).entries[0]).toMatchObject({ label: 'Label', note: 'note' });
     });
@@ -1839,7 +1910,26 @@ describe('vault block — end-gate review regressions (SB-055)', () => {
   // to bake. What that CANNOT prove is that the digest is right — the baked literals in the
   // serializer goldens pin the hash's value, and the chimera golden pins that a wrong one is
   // caught. This call only builds a canonical fixture.
-  const note = (header, delim, rows) =>
+  // The caller gives the header and the data rows as COMPACT markdown, because that is what is
+  // readable in a fixture; this widens them to DD-023's aligned form, which is what "canonical"
+  // means since SB-165. THE DELIMITER ROW IS NOT A PARAMETER — it is derived, in DD-023's own
+  // words, so a fixture spelling one would be spelling bytes the emitter ignores. Alignment being
+  // correct is pinned by the anchor golden and the recorded-Obsidian tests above, not here; what
+  // these fixtures are for is whether CONTENT survives a round trip.
+  const noteCells = (line) => TT.splitCells(line.trim().slice(1, -1)).map((c) => c.trim());
+  const note = (header, rows) => {
+    const table = TT.vaultAlignedTable([header, ...rows].map(noteCells));
+    return ['## Time Log', '', ...table, '', '`revision: 1 · ' + TT.vaultPayloadDigest(table) + '`', ''].join('\n'); // prettier-ignore
+  };
+  /**
+   * `note`, but VERBATIM — the caller's lines reach the fixture unwidened, delimiter included.
+   *
+   * For fixtures whose whole point is to be MALFORMED. `note` aligns to the header's column
+   * count, which silently repairs a row with the wrong number of cells and hands the parser a
+   * well-formed table — a test that then passes by asserting nothing. Anything asserting a
+   * quarantine on table SHAPE builds its note here.
+   */
+  const rawNote = (header, delim, rows) =>
     ['## Time Log', '', header, delim, ...rows, '', '`revision: 1 · ' + TT.vaultPayloadDigest([header, delim, ...rows]) + '`', ''].join('\n'); // prettier-ignore
 
   // ---- an entry is never silently dropped as "the totals row" ----
@@ -1849,17 +1939,17 @@ describe('vault block — end-gate review regressions (SB-055)', () => {
   describe('a last row that is not the generated totals row is never guessed to be one', () => {
     it('a bolded LABEL in the first column is an entry, not the totals row', () => {
       // the reproduction: `| Task | Time |`, last row's label bolded by a hand edit
-      const md = note('| Task | Time |', '|---|---|', ['| Checkout | 30m |', '| **urgent** | 1h |']);
+      const md = note('| Task | Time |', ['| Checkout | 30m |', '| **urgent** | 1h |']);
       const parsed = TT.parseVaultBlock(md);
       expect(parsed.quarantine).toBe(false);
       expect(parsed.entries).toHaveLength(2); // the hour is still here
       expect(parsed.entries[1]).toMatchObject({ label: '**urgent**', durMin: 60 });
       // …and a write does not delete it
-      expect(TT.writeVaultBlock(md, parsed.entries).md).toContain('| **urgent** | 1h |');
+      expect(TT.writeVaultBlock(md, parsed.entries).md).toContain('| **urgent** | 1h       |');
     });
 
     it('a bolded but unparseable Time cell quarantines rather than vanishing', () => {
-      const md = note('| Time | Project | Task | Bill |', '|---|---|---|---|', [
+      const md = note('| Time | Project | Task | Bill |', [
         '| 30m | [[Home]] | Tidying | |',
         '| **30m** | [[Home]] | Emphasised | |',
       ]);
@@ -1870,7 +1960,9 @@ describe('vault block — end-gate review regressions (SB-055)', () => {
     it('a totals row whose cell count does not match the header is not exempt from validation', () => {
       // `continue`-ing on the totals line used to run BEFORE the row-cell-count check, so a
       // mangled totals row was the one row inside TT's region that could be anything at all
-      const md = note('| Time | Project | Task | Bill |', '|---|---|---|---|', [
+      // rawNote, not note: the malformation IS the fixture, and the aligner would pad `| **7h** |`
+      // out to four cells and quietly hand the parser the well-formed table this test denies it
+      const md = rawNote('| Time | Project | Task | Bill |', '|---|---|---|---|', [
         '| 30m | [[Home]] | Tidying | |',
         '| **7h** |',
       ]);
@@ -1878,12 +1970,12 @@ describe('vault block — end-gate review regressions (SB-055)', () => {
     });
 
     it('still recognises the genuine generated totals row, in any column order', () => {
-      for (const [header, delim, row, totals] of [
-        ['| Time | Task | Bill |', '|---|---|---|', '| 30m | Tidying | |', '| **0.5h** | | **0h billable** |'],
-        ['| Bill | Task | Time |', '|---|---|---|', '| | Tidying | 30m |', '| **0h billable** | | **0.5h** |'],
-        ['| Time |', '|---|', '| 30m |', '| **0.5h** |'],
+      for (const [header, row, totals] of [
+        ['| Time | Task | Bill |', '| 30m | Tidying | |', '| **0.5h** | | **0h billable** |'],
+        ['| Bill | Task | Time |', '| | Tidying | 30m |', '| **0h billable** | | **0.5h** |'],
+        ['| Time |', '| 30m |', '| **0.5h** |'],
       ]) {
-        const md = note(header, delim, [row, totals]);
+        const md = note(header, [row, totals]);
         const parsed = TT.parseVaultBlock(md);
         expect(parsed.quarantine, header).toBe(false);
         expect(parsed.entries, header).toHaveLength(1); // the totals row is excluded, the entry is not
@@ -1897,7 +1989,7 @@ describe('vault block — end-gate review regressions (SB-055)', () => {
   // readable. Both cases below reported a successful write and left a note TT could no longer
   // read — frozen until a human repaired it by hand.
   describe('a write that would not parse back is refused, not performed', () => {
-    const OK = note('| Time | Task | Bill |', '|---|---|---|', ['| 30m | Tidying | |', '| **0.5h** | | **0h billable** |']); // prettier-ignore
+    const OK = note('| Time | Task | Bill |', ['| 30m | Tidying | |', '| **0.5h** | | **0h billable** |']); // prettier-ignore
     const E = (o) => ({ id: 'e1', date: '2026-01-05', start: null, end: null, durMin: null, project: null, label: '', note: '', billable: false, ...o }); // prettier-ignore
 
     it('a newline inside a field cannot split the row', () => {
@@ -1918,7 +2010,7 @@ describe('vault block — end-gate review regressions (SB-055)', () => {
     it('an ordinary write is unaffected by the output gate', () => {
       const res = TT.writeVaultBlock(OK, [E({ durMin: 45, label: 'Real work', billable: true })]);
       expect(res.quarantine).toBe(false);
-      expect(res.md).toContain('| 45m | Real work | ✓ |');
+      expect(res.md).toContain('| 45m       | Real work | ✓                  |');
       expect(TT.parseVaultBlock(res.md).quarantine).toBe(false); // and it really does parse back
     });
   });
@@ -1949,13 +2041,13 @@ describe('vault block — end-gate review regressions (SB-055)', () => {
     expect(TT.locateVaultBlock(doc)).toEqual({ quarantine: true, reason: 'no-heading' });
     expect(TT.writeVaultBlock(doc, []).md).toBe(doc); // nothing written into the example
     // the same document with a REAL block after it still locates the real one
-    const withReal = doc + '\n' + note('| Time | Task |', '|---|---|', ['| 30m | Tidying |']);
+    const withReal = doc + '\n' + note('| Time | Task |', ['| 30m | Tidying |']);
     expect(TT.locateVaultBlock(withReal).quarantine).toBe(false);
   });
 
   // ---- diagnosis quality ----
   it('a CRLF note is refused with a reason that names the real cause', () => {
-    const lf = note('| Time | Task |', '|---|---|', ['| 30m | Tidying |', '| **0.5h** | |']);
+    const lf = note('| Time | Task |', ['| 30m | Tidying |', '| **0.5h** | |']);
     expect(TT.locateVaultBlock(lf).quarantine).toBe(false);
     // Refusing stays the behaviour — TT does not rewrite line endings it did not author — but
     // 'no-heading' for a note that plainly has the heading sends a human to the wrong place.
@@ -1973,7 +2065,7 @@ describe('vault block — end-gate review regressions (SB-055)', () => {
   // is "we refuse, but we say why"; this is the case where it did not.
   // ## Verified red-green: 2026-07-26
   describe('a stray \\r is diagnosed as CRLF whichever anchor it broke (SB-084)', () => {
-    const lf = note('| Time | Task |', '|---|---|', ['| 30m | Tidying |', '| **0.5h** | |']);
+    const lf = note('| Time | Task |', ['| 30m | Tidying |', '| **0.5h** | |']);
     // a `\r` parked on the blank line after the heading: enough to make the note CRLF-tainted,
     // but it breaks no anchor by itself, so each case below breaks exactly one thing on purpose
     const taint = (md) => md.replace('\n\n', '\n\r\n');
@@ -1999,8 +2091,11 @@ describe('vault block — end-gate review regressions (SB-055)', () => {
     });
 
     it('a missing delimiter row in a tainted note reports CRLF, not `no-table`', () => {
-      const md = taint(lf.replace('|---|---|\n', ''));
-      expect(md).not.toContain('|---|---|'); // the fixture bites
+      // matched on the delimiter's SHAPE, not on the literal `|---|---|` — that stopped being the
+      // emitted bytes when DD-023 widened the table, and a literal here removed nothing while the
+      // `not.toContain` guard below it went on passing vacuously
+      const md = taint(lf.replace(/^\|(?: *:?-+:? *\|)+\n/m, ''));
+      expect(md.split('\n')).toHaveLength(lf.split('\n').length - 1); // the fixture bites
       expect(TT.locateVaultBlock(md)).toEqual({ quarantine: true, reason: 'crlf-line-endings' });
     });
 
@@ -2046,10 +2141,7 @@ describe('vault block — end-gate review regressions (SB-055)', () => {
     // hold even with normalisation removed — a gate that cannot fail (caught in review).
     const heading = 'Årslogg';
     expect(heading.normalize('NFD')).not.toBe(heading.normalize('NFC')); // the fixture bites
-    const md = note('| Time | Task |', '|---|---|', ['| 30m | Tidying |']).replace(
-      '## Time Log',
-      '## ' + heading.normalize('NFD'),
-    );
+    const md = note('| Time | Task |', ['| 30m | Tidying |']).replace('## Time Log', '## ' + heading.normalize('NFD'));
     // written NFD in the note, asked for NFC from settings — and the other way round
     expect(TT.locateVaultBlock(md, { heading: heading.normalize('NFC') }).quarantine).toBe(false);
     expect(TT.locateVaultBlock(md, { heading: heading.normalize('NFD') }).quarantine).toBe(false);
@@ -2060,10 +2152,10 @@ describe('vault block — end-gate review regressions (SB-055)', () => {
     // of the migration-free property the header set exists to provide
     // no Bill column → billable defaults true → the billable total falls back to the last
     // column, which here is Task. Odd to read, documented as the fallback, and it round-trips.
-    const md = note('| Time | Task |', '|---|---|', ['| 30m | Tidying |', '| **0.5h** | **0.5h billable** |']);
+    const md = note('| Time | Task |', ['| 30m | Tidying |', '| **0.5h** | **0.5h billable** |']);
     const res = TT.writeVaultBlock(md, TT.parseVaultBlock(md).entries, { headers: [] });
     expect(res.quarantine).toBe(false);
-    expect(res.md).toContain('| Time | Task |');
+    expect(res.md).toContain('| Time     | Task              |');
     expect(res.md).not.toContain('Mode');
     expect(res.md).toBe(md);
   });
@@ -2079,10 +2171,9 @@ describe('vault block — end-gate review regressions (SB-055)', () => {
     for (const column of columns) {
       expect(SAMPLES[column], `no sample value for the column ${column} — add one`).toBeTruthy();
       const header = column === 'Time' ? '| Time |' : `| Time | ${column} |`;
-      const delim = column === 'Time' ? '|---|' : '|---|---|';
       const row = column === 'Time' ? '| 30m |' : `| 30m | ${SAMPLES[column]} |`;
       const totals = column === 'Bill' ? '| **0.5h** | **0.5h billable** |' : column === 'Time' ? '| **0.5h** |' : '| **0.5h** | **0.5h billable** |'; // prettier-ignore
-      const md = note(header, delim, [row, totals]);
+      const md = note(header, [row, totals]);
       const parsed = TT.parseVaultBlock(md);
       expect(parsed.quarantine, column).toBe(false);
       expect(TT.writeVaultBlock(md, parsed.entries).md, column).toBe(md);
@@ -2165,10 +2256,31 @@ describe('vault block payload digest (SB-080 / DD-009)', () => {
       expect(md, `${what}: the mutation matched nothing — this case proves nothing`).not.toBe(WRITTEN);
       expect(digestOf(sign(md)), what).not.toBe(base);
     };
-    moved(WRITTEN.replace('| Time | Mode | Project | Task | Bill |', '| Time | Mode | Project | Task |'), 'header row');
-    moved(WRITTEN.replace('|---|---|---|---|---|', '|:---|---|---|---|---|'), 'delimiter row');
+    moved(WRITTEN.replace(/^\| Time .*\| Bill +\|$/m, '| Time | Mode | Project | Task |'), 'header row');
+    // The delimiter case mutates an ALIGNMENT COLON, and that choice is now load-bearing rather
+    // than incidental. Since DD-023 a change to the delimiter's DASH COUNT is deliberately
+    // invisible to the digest — that is half 2 working, and re-padding is exactly what Obsidian
+    // does. A colon is neither framing whitespace nor the dash run, so it is still carried and
+    // still moves the hash. So this case proves the delimiter row is covered AGAINST A COLON, not
+    // against any change at all; the name of the test is wider than what it now demonstrates.
+    moved(WRITTEN.replace(/^\| -+ \|/m, '| :--------- |'), 'delimiter row');
     moved(WRITTEN.replace('Daily planning ritual', 'Daily planning'), 'a data row');
     moved(WRITTEN.replace('**6.5h billable**', '**9.9h billable**'), 'the totals row');
+  });
+
+  it('DD-023: re-padding a cell does NOT move the digest, and changing its content does', () => {
+    // The withdrawal, asserted rather than left implicit — this is the whole point of half 2 and
+    // the reason the case above had to change its mutation. Obsidian re-pads a table the moment a
+    // cell is edited; before DD-023 that mismatched the digest and quarantined Terje's day.
+    const digestOf = (md, opts) => TT.locateVaultBlock(md, opts).digest;
+    const base = digestOf(WRITTEN);
+    const repadded = WRITTEN.split('\n')
+      .map((line) => (/^\|.*\|$/.test(line) && !/^\| -+ \|/.test(line) ? line.replace(/ \|/g, '   |') : line))
+      .join('\n');
+    expect(repadded).not.toBe(WRITTEN); // the fixture bites
+    expect(digestOf(repadded)).toBe(base); // …and the day does not quarantine over it
+    // the guard rail: content is still content. Widening a cell hides nothing that was written in it
+    expect(digestOf(sign(repadded.replace('Daily planning ritual', 'Daily planning  ritual')))).not.toBe(base);
   });
 
   it('the digest is stable across serialize→serialize with a timer running (SB-077)', () => {
@@ -2190,6 +2302,83 @@ describe('vault block payload digest (SB-080 / DD-009)', () => {
     const res = TT.writeVaultBlock(WRITTEN, DAY);
     expect(res.quarantine).toBe(false);
     expect(TT.locateVaultBlock(res.md).verified).toBe(true);
+  });
+});
+
+// ---- DD-023 / SB-165: the digest compares NORMALISED text ----
+//
+// The defect this exists for, in Terje's words on SB-155: he edits a cell in Obsidian, Obsidian
+// re-pads the whole table, the raw-byte digest mismatches, the day quarantines, and TT SILENTLY
+// STOPS WRITING TO IT. SB-127's adopt gesture is unbuilt, so the only way out was editing SQLite
+// by hand.
+//
+// Every fixture below is his ACTUAL note — `Calendar/Daily/2026-07-27.md`, transcribed verbatim,
+// digest and all. That matters more than it looks: the whole compat claim is that the digest
+// already sitting in his vault re-hashes to itself, and a fixture invented for the test could be
+// made to satisfy that by accident. `ed60` is a number this test did not get to choose.
+describe('DD-023 — a re-padded table still verifies (SB-165)', () => {
+  const PAYLOAD_COMPACT = [
+    '| Time | Mode | Project | Task | Bill |',
+    '|---|---|---|---|---|',
+    '| 11:00→15:30 | | TUR | Obsidian backend<br>- Setup new tt instance | ✓ |',
+    '| 17:00→ | | INT | Agentic workflows | |',
+    '| **4.5h** | | | | **4.5h billable** |',
+  ];
+  // What Obsidian's table editor leaves behind after one keystroke inside the table. Widths
+  // computed by DD-023's rule against the rows above; the framing rules — a delimiter framed with
+  // spaces, an empty cell padded to width rather than written `| |` — are the ones pinned against
+  // real Obsidian tables further up this file.
+  const PAYLOAD_REFLOWED = [
+    '| Time        | Mode | Project | Task                                        | Bill              |',
+    '| ----------- | ---- | ------- | ------------------------------------------- | ----------------- |',
+    '| 11:00→15:30 |      | TUR     | Obsidian backend<br>- Setup new tt instance | ✓                 |',
+    '| 17:00→      |      | INT     | Agentic workflows                           |                   |',
+    '| **4.5h**    |      |         |                                             | **4.5h billable** |',
+  ];
+  const noteOf = (payload) =>
+    ['# 2026-07-27', '', '## Time Log', '', ...payload, '', '`revision: 8 · ed60`', '', '## Captures', ''].join('\n');
+
+  it('assertion 1 — an aligned and a compact rendering of identical rows produce ONE digest', () => {
+    expect(PAYLOAD_REFLOWED).not.toEqual(PAYLOAD_COMPACT); // the fixture bites
+    expect(TT.vaultPayloadDigest(PAYLOAD_REFLOWED)).toBe(TT.vaultPayloadDigest(PAYLOAD_COMPACT));
+  });
+
+  it('assertion 3 — a PRE-DD-023 block verifies unchanged, and there is nothing to migrate', () => {
+    // The compat case, on the bytes that were in Terje's vault the night this was built. `ed60`
+    // was computed by the OLD emitter over raw compact bytes; the new reader must arrive at it
+    // too. This is the test that fails loudly if the canonical form is ever flipped to aligned —
+    // at which point every note he has ever logged quarantines on its first read.
+    expect(TT.vaultPayloadDigest(PAYLOAD_COMPACT)).toBe('ed60');
+    const parsed = TT.parseVaultBlock(noteOf(PAYLOAD_COMPACT));
+    expect(parsed.quarantine).toBe(false);
+    expect(parsed.verified).toBe(true);
+    expect(parsed.entries).toHaveLength(2);
+  });
+
+  it('assertion 6 — a day wedged PURELY by Obsidian’s reflow un-wedges, with no adopt gesture', () => {
+    const wedged = noteOf(PAYLOAD_REFLOWED);
+    expect(TT.locateVaultBlock(wedged)).toMatchObject({ quarantine: false, verified: true, digest: 'ed60' });
+    const parsed = TT.parseVaultBlock(wedged);
+    expect(parsed.quarantine).toBe(false);
+    expect(parsed.verified).toBe(true);
+    expect(parsed.adopted).toBe(false); // recovered by VERIFYING, not by adopting someone's rows
+    // and the hours came back intact rather than the block merely not-refusing
+    expect(parsed.entries.map((e) => e.label)).toEqual(['Obsidian backend', 'Agentic workflows']);
+    expect(parsed.entries.map((e) => e.project)).toEqual(['TUR', 'INT']);
+    // TT will write to it again — the thing that had stopped
+    expect(TT.writeVaultBlock(wedged, parsed.entries).quarantine).toBe(false);
+  });
+
+  it('what it is allowed to lose is EXACTLY intra-cell framing, and no more', () => {
+    // DD-023 accepts this loss because SB-075 trims at the write edge, so no stored value differs
+    // from another only by surrounding whitespace. The second half is the bound: interior runs are
+    // content — `a  b` is not `a b` — and collapsing them would start making `entryMatchKey`'s
+    // judgements with none of `entryMatchKey`'s subject.
+    const interior = PAYLOAD_COMPACT.map((line) => line.replace('Agentic workflows', 'Agentic  workflows'));
+    expect(TT.vaultPayloadDigest(interior)).not.toBe('ed60');
+    // …and DD-009's chimera detection is untouched: a diff-merge keeps the buffer's ROWS
+    const chimera = PAYLOAD_COMPACT.map((line) => line.replace('Agentic workflows', 'USER-TYPED-IN-BLOCKROW'));
+    expect(TT.vaultPayloadDigest(chimera)).not.toBe('ed60');
   });
 });
 
@@ -2241,9 +2430,9 @@ describe('vault Time-column separator setting (SB-063)', () => {
   it('emits the chosen separator in BOTH the range form and the running form', () => {
     for (const [value, sep] of Object.entries(SEPARATORS)) {
       const region = TT.serializeVaultBlock(DAY, { headers: ['Time', 'Task'], timeSeparator: value });
-      expect(region, value).toContain('| 11:00' + sep + '12:45 | Search & facets |');
-      expect(region, value).toContain('| 17:34' + sep + ' | Block format feel-gate |');
-      expect(region, value).toContain('| 30m | Tidying |'); // duration-only: no separator to change
+      expect(containsRow(region, '| 11:00' + sep + '12:45 | Search & facets |'), value).toBe(true);
+      expect(containsRow(region, '| 17:34' + sep + ' | Block format feel-gate |'), value).toBe(true);
+      expect(containsRow(region, '| 30m | Tidying |'), value).toBe(true); // duration-only: nothing to change
     }
   });
 
@@ -2251,16 +2440,16 @@ describe('vault Time-column separator setting (SB-063)', () => {
     const today = TT.serializeVaultBlock(DAY, { headers: ['Time', 'Task'] });
     expect(today).toBe(TT.serializeVaultBlock(DAY, { headers: ['Time', 'Task'], timeSeparator: 'unicode' }));
     expect(today).toBe(TT.serializeVaultBlock(DAY, { headers: ['Time', 'Task'], timeSeparator: undefined }));
-    expect(today).toContain('| 11:00→12:45 | Search & facets |');
-    expect(today).toContain('| 17:34→ | Block format feel-gate |');
+    expect(containsRow(today, '| 11:00→12:45 | Search & facets |')).toBe(true);
+    expect(containsRow(today, '| 17:34→ | Block format feel-gate |')).toBe(true);
   });
 
   it('the splice carries the setting through to the note', () => {
     const host = ['# Monday', '', '## Time Log', '', '| Time | Task |', '|---|---|', '| **0h** | **0h billable** |', '', '`revision: 1`', '', '## Captures', '- keep me'].join('\n'); // prettier-ignore
     const res = TT.writeVaultBlock(host, DAY, { headers: ['Time', 'Task'], timeSeparator: 'hyphen' });
     expect(res.quarantine).toBe(false);
-    expect(res.md).toContain('| 11:00-12:45 | Search & facets |');
-    expect(res.md).toContain('| 17:34- | Block format feel-gate |');
+    expect(containsRow(res.md, '| 11:00-12:45 | Search & facets |')).toBe(true);
+    expect(containsRow(res.md, '| 17:34- | Block format feel-gate |')).toBe(true);
     expect(res.md.endsWith('\n## Captures\n- keep me')).toBe(true); // nothing outside the block moved
   });
 
@@ -2314,8 +2503,17 @@ describe('vault Time-column separator setting (SB-063)', () => {
 
 describe('vault Mode tags + Project vaultNote (SB-059)', () => {
   /** A canonical TT-written note: heading, table, digest-carrying revision line (DD-009). */
-  const note = (header, delim, rows) =>
-    ['## Time Log', '', header, delim, ...rows, '', '`revision: 1 · ' + TT.vaultPayloadDigest([header, delim, ...rows]) + '`', ''].join('\n'); // prettier-ignore
+  // The caller gives the header and the data rows as COMPACT markdown, because that is what is
+  // readable in a fixture; this widens them to DD-023's aligned form, which is what "canonical"
+  // means since SB-165. THE DELIMITER ROW IS NOT A PARAMETER — it is derived, in DD-023's own
+  // words, so a fixture spelling one would be spelling bytes the emitter ignores. Alignment being
+  // correct is pinned by the anchor golden and the recorded-Obsidian tests above, not here; what
+  // these fixtures are for is whether CONTENT survives a round trip.
+  const noteCells = (line) => TT.splitCells(line.trim().slice(1, -1)).map((c) => c.trim());
+  const note = (header, rows) => {
+    const table = TT.vaultAlignedTable([header, ...rows].map(noteCells));
+    return ['## Time Log', '', ...table, '', '`revision: 1 · ' + TT.vaultPayloadDigest(table) + '`', ''].join('\n'); // prettier-ignore
+  };
   /** @param {Partial<import('../shared/types.ts').VaultEntry>} o */
   const E = (o) => ({ id: 'runtime-id', date: '2026-01-05', start: null, end: null, durMin: null, project: null, label: '', note: '', billable: false, ...o }); // prettier-ignore
   /** the runtime id is ephemeral (DD-008) — it is never part of a round-trip claim */
@@ -2336,8 +2534,8 @@ describe('vault Mode tags + Project vaultNote (SB-059)', () => {
     ];
     const region = TT.serializeVaultBlock(day, { revision: 4, projects: PROJECTS });
     // the bytes first — a round-trip that agrees with itself about the wrong shape is no proof
-    expect(region).toContain('| 09:00→15:30 | #deep | [[Lifelines Tycoon]] | Systems pass | ✓ |');
-    expect(region).toContain('| 30m | #admin #rest | FAG | Invoicing | |');
+    expect(containsRow(region, '| 09:00→15:30 | #deep | [[Lifelines Tycoon]] | Systems pass | ✓ |')).toBe(true);
+    expect(containsRow(region, '| 30m | #admin #rest | FAG | Invoicing | |')).toBe(true);
     const parsed = TT.parseVaultBlock(region, { date: '2026-01-05', projects: PROJECTS });
     expect(parsed.quarantine).toBe(false);
     expect(withoutId(parsed.entries)).toEqual(withoutId(day));
@@ -2346,7 +2544,7 @@ describe('vault Mode tags + Project vaultNote (SB-059)', () => {
   });
 
   it('a note TT wrote with both fields is byte-identical after a full write cycle', () => {
-    const md = note('| Time | Mode | Project | Task | Bill |', '|---|---|---|---|---|', [
+    const md = note('| Time | Mode | Project | Task | Bill |', [
       '| 09:00→15:30 | #deep | [[Lifelines Tycoon]] | Systems pass | ✓ |',
       '| 30m | #admin #rest | FAG | Invoicing<br>- monthly | |',
       '| **7h** | | | | **6.5h billable** |',
@@ -2364,7 +2562,7 @@ describe('vault Mode tags + Project vaultNote (SB-059)', () => {
   // This is the whole reason the header row is the schema; assuming it would be assuming away
   // the one property the design exists to provide.
   it('a pre-SB-059 block — no Mode column, no vaultNote — parses and writes back byte-identically', () => {
-    const md = note('| Time | Project | Task | Bill |', '|---|---|---|---|', [
+    const md = note('| Time | Project | Task | Bill |', [
       '| 08:30→12:00 | FAG | Checkout flow<br>- wireframes | ✓ |',
       '| 45m | INT-ADM | Invoicing | |',
       '| **4.25h** | | | **3.5h billable** |',
@@ -2384,7 +2582,7 @@ describe('vault Mode tags + Project vaultNote (SB-059)', () => {
   });
 
   it('an empty Mode cell round-trips as empty, and parses to absent rather than []', () => {
-    const md = note('| Time | Mode | Task |', '|---|---|---|', ['| 30m | | Tidying |', '| **0.5h** | | **0.5h billable** |']); // prettier-ignore
+    const md = note('| Time | Mode | Task |', ['| 30m | | Tidying |', '| **0.5h** | | **0.5h billable** |']); // prettier-ignore
     const parsed = TT.parseVaultBlock(md, { date: '2026-01-05' });
     expect(parsed.entries[0].tags).toBe(undefined);
     expect(TT.writeVaultBlock(md, parsed.entries, { date: '2026-01-05' }).md).toBe(md);
@@ -2397,7 +2595,7 @@ describe('vault Mode tags + Project vaultNote (SB-059)', () => {
     const day = [E({ durMin: 30, project: 'ODD', label: 'Tidying', tags: ['#a|b', '#c<br>d'] })];
     const region = TT.serializeVaultBlock(day, { headers: ['Time', 'Mode', 'Project', 'Task'], projects });
     // THE BYTES: one `|` per column boundary, every content pipe backslash-escaped
-    expect(region).toContain('| 30m | #a\\|b #c<br>d | [[Pipe \\| Note<br>Here]] | Tidying |');
+    expect(containsRow(region, '| 30m | #a\\|b #c<br>d | [[Pipe \\| Note<br>Here]] | Tidying |')).toBe(true);
     // and the table still has exactly header + delimiter + 1 entry + totals rows
     expect(region.split('\n').filter((line) => line.startsWith('|'))).toHaveLength(4);
     const parsed = TT.parseVaultBlock(region, { date: '2026-01-05', projects });
@@ -2409,7 +2607,7 @@ describe('vault Mode tags + Project vaultNote (SB-059)', () => {
   it('a space inside a tag is escaped, so one tag never becomes two', () => {
     const day = [E({ durMin: 30, tags: ['#deep work', '#admin'] })];
     const region = TT.serializeVaultBlock(day, { headers: ['Time', 'Mode'] });
-    expect(region).toContain('| 30m | #deep\\ work #admin |');
+    expect(containsRow(region, '| 30m | #deep\\ work #admin |')).toBe(true);
     expect(TT.parseVaultBlock(region).entries[0].tags).toEqual(['#deep work', '#admin']);
   });
 
@@ -2418,7 +2616,7 @@ describe('vault Mode tags + Project vaultNote (SB-059)', () => {
   // (SB-055's output gate): the write is REFUSED and the note comes back untouched. The row
   // never splits, which is the property SB-082/SB-070 are about.
   it('a newline in a tag or a vaultNote is refused by the output gate, not written as a split row', () => {
-    const host = note('| Time | Mode | Project | Task | Bill |', '|---|---|---|---|---|', ['| **0h** | | | | **0h billable** |']); // prettier-ignore
+    const host = note('| Time | Mode | Project | Task | Bill |', ['| **0h** | | | | **0h billable** |']); // prettier-ignore
     const tagged = TT.writeVaultBlock(host, [E({ durMin: 30, label: 'Tidying', tags: ['#a\nb'] })]);
     expect(tagged.quarantine).toBe(true);
     expect(tagged.reason).toBe('write-would-corrupt');
@@ -2434,19 +2632,19 @@ describe('vault Mode tags + Project vaultNote (SB-059)', () => {
   it('renders the wikilink when vaultNote is set and the bare code when it is not', () => {
     const day = [E({ durMin: 30, project: 'LT-01' }), E({ durMin: 45, project: 'FAG' })];
     const region = TT.serializeVaultBlock(day, { headers: ['Time', 'Project'], projects: PROJECTS });
-    expect(region).toContain('| 30m | [[Lifelines Tycoon]] |'); // vaultNote set
-    expect(region).toContain('| 45m | FAG |'); // vaultNote absent → the bare code
+    expect(containsRow(region, '| 30m | [[Lifelines Tycoon]] |')).toBe(true); // vaultNote set
+    expect(containsRow(region, '| 45m | FAG |')).toBe(true); // vaultNote absent → the bare code
   });
 
   it('the mapping is opt-in: with no catalog both directions are verbatim, exactly as before SB-059', () => {
     const day = [E({ durMin: 30, project: 'LT-01' })];
-    expect(TT.serializeVaultBlock(day, { headers: ['Time', 'Project'] })).toContain('| 30m | LT-01 |');
-    const md = note('| Time | Project |', '|---|---|', ['| 30m | [[Lifelines Tycoon]] |', '| **0.5h** | **0.5h billable** |']); // prettier-ignore
+    expect(containsRow(TT.serializeVaultBlock(day, { headers: ['Time', 'Project'] }), '| 30m | LT-01 |')).toBe(true);
+    const md = note('| Time | Project |', ['| 30m | [[Lifelines Tycoon]] |', '| **0.5h** | **0.5h billable** |']); // prettier-ignore
     expect(TT.parseVaultBlock(md).entries[0].project).toBe('[[Lifelines Tycoon]]');
   });
 
   it('a wikilink no project claims is carried verbatim — TT never invents a code', () => {
-    const md = note('| Time | Project |', '|---|---|', ['| 30m | [[Planning]] |', '| **0.5h** | **0.5h billable** |']); // prettier-ignore
+    const md = note('| Time | Project |', ['| 30m | [[Planning]] |', '| **0.5h** | **0.5h billable** |']); // prettier-ignore
     const opts = { date: '2026-01-05', projects: PROJECTS };
     expect(TT.parseVaultBlock(md, opts).entries[0].project).toBe('[[Planning]]');
     // and being unable to resolve it does not stop the note round-tripping
@@ -2460,8 +2658,8 @@ describe('vault Mode tags + Project vaultNote (SB-059)', () => {
     // Mode column is still the right answer, because `Mode` is not a passthrough column any more
     const day = [E({ durMin: 30, tags: ['#deep'] }), E({ durMin: 15, vaultCells: { mode: '#stale' } })];
     const region = TT.serializeVaultBlock(day, { headers: ['Time', 'Mode'] });
-    expect(region).toContain('| 30m | #deep |');
-    expect(region).toContain('| 15m | |');
+    expect(containsRow(region, '| 30m | #deep |')).toBe(true);
+    expect(containsRow(region, '| 15m | |')).toBe(true);
     expect(region).not.toContain('#stale');
   });
 
@@ -2574,7 +2772,7 @@ describe('adopting a hand-made daily note (SB-091 / DD-012)', () => {
     const res = TT.writeVaultBlock(EMPTY_REGION, [E({ durMin: 45, label: 'First hour' })]);
     expect(res.quarantine).toBe(false);
     expect(res.adopted).toBe(true);
-    expect(res.md).toContain('| 45m | | | First hour | |');
+    expect(containsRow(res.md, '| 45m | | | First hour | |')).toBe(true);
   });
 
   it('NEVER reports `verified` on an adopted block, in either shape', () => {
@@ -2612,7 +2810,7 @@ describe('adopting a hand-made daily note (SB-091 / DD-012)', () => {
     expect(loc.revision).toBe(1);
     expect(loc.digest).toMatch(/^[0-9a-f]{4}$/);
     expect(loc.verified).toBe(true);
-    expect(first.md).toContain('| **2h** | | | | **1.5h billable** |'); // TT's totals row now
+    expect(containsRow(first.md, '| **2h** | | | | **1.5h billable** |')).toBe(true); // TT's totals row now
 
     // …and from here it is an ordinary block: no second adoption, and the bytes are a fixed point
     const second = TT.writeVaultBlock(first.md, day, { projects: PROJECTS });

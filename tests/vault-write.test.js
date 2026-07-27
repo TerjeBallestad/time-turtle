@@ -15,7 +15,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, statSy
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import TT from '../shared/core.js';
-import { startServer, stopServer, stopAllServers, adminOn } from './util.js';
+import { startServer, stopServer, stopAllServers, adminOn, containsRow } from './util.js';
 
 const HEADING = 'Time Log';
 /** Dates are relative to today, because `vaultCutover` is stamped at first boot. */
@@ -128,6 +128,37 @@ describe('the vault writer (api)', () => {
     expect(parseNote(TODAY).revision).toBe(1);
   });
 
+  it('(2b) DD-023: a re-padded table is not rewritten, and a real change still is', async () => {
+    // Judge assertion 5, and the half of DD-023 that gets skipped. Normalise the DIGEST and leave
+    // the writer's diff comparing raw strings, and TT stops quarantining Terje's day but rewrites
+    // the note on every save just to restore its own padding — trading a quarantine for the
+    // per-keystroke iCloud storm that test (1) exists to prevent. Both halves, or neither.
+    const entries = [entry('a1', TODAY, 540, 600, 'today’s hour'), entry('b1', TOMORROW, 600, 660, 'tomorrow’s hour')];
+    await save(entries);
+    expect(await until(() => parseNote(TOMORROW).entries.length === 1)).toBe(true);
+
+    // Obsidian re-pads the table. Padded WIDER than TT's own aligned form on purpose: if TT
+    // rewrites, the file comes back narrower and the byte compare below says so — a fixture that
+    // merely re-emitted TT's bytes could pass while TT rewrote the file every time.
+    const padded = readFileSync(notePath(TOMORROW), 'utf8')
+      .split('\n')
+      .map((line) => (line.trim().startsWith('|') ? line.replace(/ \|/g, '    |') : line))
+      .join('\n');
+    writeFileSync(notePath(TOMORROW), padded);
+    expect(parseNote(TOMORROW).quarantine).toBe(false); // it verifies — that is half 2 on the read side
+
+    // an identical save leaves the widened bytes exactly where they are
+    await save(entries);
+    await new Promise((r) => setTimeout(r, 60));
+    expect(readFileSync(notePath(TOMORROW), 'utf8')).toBe(padded);
+
+    // …and the file is not merely frozen: a REAL change still lands. Without this the assertion
+    // above passes just as well if TT had decided the note was ineligible to write at all.
+    await save([entries[0], entry('b1', TOMORROW, 600, 720, 'tomorrow’s longer hour')]);
+    expect(await until(() => parseNote(TOMORROW).entries[0]?.label === 'tomorrow’s longer hour')).toBe(true);
+    expect(readFileSync(notePath(TOMORROW), 'utf8')).not.toBe(padded);
+  });
+
   it('(3) deleting the last entry on a date rewrites that note with an EMPTY block', async () => {
     // Not a deleted file (the note is Terje's, and his other sections are in it) and not an
     // untouched one (the hours really are gone). The block stays, with its header row: no header
@@ -141,7 +172,7 @@ describe('the vault writer (api)', () => {
     const parsed = parseNote(TOMORROW);
     expect(parsed.quarantine).toBe(false);
     expect(parsed.entries).toEqual([]);
-    expect(readFileSync(notePath(TOMORROW), 'utf8')).toContain('| Time | Mode | Project | Task | Bill |');
+    expect(containsRow(readFileSync(notePath(TOMORROW), 'utf8'), '| Time | Mode | Project | Task | Bill |')).toBe(true);
     expect(parsed.revision).toBe(revBefore + 1); // a real write, so the counter moved
   });
 

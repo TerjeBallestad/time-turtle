@@ -134,7 +134,10 @@ describe('the vault arbitration matrix', () => {
       // the locator doing its job and not this row. Stripping the anchor's digest is what lets the
       // parser's own refusal be the one under test.
       name: 'an unknown header → quarantine carrying that reason',
-      file: () => describeVaultFile(unsigned(note(DAY_TWO, 2)).replace('| Time |', '| Cat |'), opts),
+      // matched on the header's first cell, not on the literal `| Time |` — DD-023 widened that
+      // cell to its column, so the literal replaced nothing and the fixture reached the arbiter
+      // as a perfectly good block claiming to be an unknown header
+      file: () => describeVaultFile(unsigned(note(DAY_TWO, 2)).replace(/^\| Time\b/m, '| Cat'), opts),
       index: () => null,
       expect: { verdict: 'quarantine', reason: 'unknown-header' },
     },

@@ -15,6 +15,7 @@
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import TT from '../shared/core.js';
+import { containsRow } from './util.js';
 
 // ---- helpers ----
 /** A one-section note: the section's region bytes with an H1 and some prose of Terje's above. */
@@ -23,10 +24,31 @@ const noteWith = (region) => ['# Time Turtle', '', 'My clients and rates.', '', 
 const region = (section, rows, revision = 1) => TT.serializeVaultCatalogSection(section, rows, { revision });
 /** Parse one section straight out of the region bytes, wrapped in a realistic note. */
 const parse = (section, region) => TT.parseVaultCatalogSection(noteWith(region), section);
-/** Swap one line of a region for another — the hand-edit simulator. */
+/**
+ * Swap one line of a region for another — the hand-edit simulator.
+ *
+ * `from` is matched on CELL CONTENT, tolerating whatever padding sits inside the pipes, so
+ * `'| 1250 |'` finds DD-023's `'| 1250   |'`. Before half 1 these were plain substring matches;
+ * once the emitter started widening its columns every one of them silently matched NOTHING, and
+ * the fixture reached the parser undamaged — a refusal test passing because the thing it was
+ * supposed to refuse was never built. The `expect` below is what turned that into a failure
+ * rather than a hollow pass, and it stays.
+ *
+ * `to` is substituted VERBATIM, unpadded. That is the point rather than an omission: a human
+ * typing into a cell does not re-align the table, and these fixtures stand in for a human.
+ */
+const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const cellPattern = (from) =>
+  new RegExp(
+    from
+      .split('|')
+      .map((part) => escapeRe(part.trim()))
+      .join(' *\\| *'),
+  );
 const edit = (md, from, to) => {
-  expect(md.includes(from), `fixture line not found: ${from}`).toBe(true);
-  return md.replace(from, to);
+  const at = cellPattern(from);
+  expect(at.test(md), `fixture line not found: ${from}`).toBe(true);
+  return md.replace(at, to);
 };
 /**
  * Recompute a region's DD-009 payload digest, so a fixture derived by rewriting rows is one TT
@@ -58,11 +80,16 @@ describe('catalog note — Clients and Projects (SB-058 task 1)', () => {
         [
           '## Clients',
           '',
-          '| Client | Name | Rate | Rounding |',
-          '|---|---|---|---|',
-          '| fjellheim | Fjellheim AS | 1250 | 15 |',
-          '| brygga | Brygga Digital | 990 | exact |',
+          '| Client    | Name           | Rate | Rounding |',
+          '| --------- | -------------- | ---- | -------- |',
+          '| fjellheim | Fjellheim AS   | 1250 | 15       |',
+          '| brygga    | Brygga Digital | 990  | exact    |',
           '',
+          // The digest is computed over the COMPACT lines, and that is the assertion, not an
+          // oversight: DD-023 normalises to the compact form, so an aligned section must hash to
+          // the same value its compact predecessor did. Point normalisation at the aligned form
+          // instead and this line stops matching — which is the catalog's half of the compat
+          // property, on the one file where a silent rewrite costs money.
           '`revision: 3 · ' + TT.vaultPayloadDigest([
             '| Client | Name | Rate | Rounding |',
             '|---|---|---|---|',
@@ -76,11 +103,11 @@ describe('catalog note — Clients and Projects (SB-058 task 1)', () => {
     it('Projects emits an inherited rate and an absent client as EMPTY cells, never a placeholder', () => {
       const out = region('projects', [NETT, DRIFT, ADMIN], 3);
       expect(out.split('\n').slice(2, 7)).toEqual([
-        '| Project | Name | Client | Rate | Billable | Note |',
-        '|---|---|---|---|---|---|',
-        '| FJH-NETT | Nettbutikk rebuild | fjellheim | | ✓ | [[Nettbutikk rebuild]] |',
-        '| FJH-DRIFT | Drift & support | fjellheim | 1400 | ✓ | |',
-        '| INT-ADM | Internal admin | | | | |',
+        '| Project   | Name               | Client    | Rate | Billable | Note                   |',
+        '| --------- | ------------------ | --------- | ---- | -------- | ---------------------- |',
+        '| FJH-NETT  | Nettbutikk rebuild | fjellheim |      | ✓        | [[Nettbutikk rebuild]] |',
+        '| FJH-DRIFT | Drift & support    | fjellheim | 1400 | ✓        |                        |',
+        '| INT-ADM   | Internal admin     |           |      |          |                        |',
       ]);
       // SB-045 ruled the v2 mirror's `—` placeholder out of the vault format; inside a table an
       // empty cell is already unambiguous.
@@ -99,12 +126,12 @@ describe('catalog note — Clients and Projects (SB-058 task 1)', () => {
     });
 
     it('the Archived column appears only when a row is archived — emit-when-set, lifted to the column', () => {
-      expect(region('clients', [FJELLHEIM, BRYGGA])).toContain('| Client | Name | Rate | Rounding |');
+      expect(containsRow(region('clients', [FJELLHEIM, BRYGGA]), '| Client | Name | Rate | Rounding |')).toBe(true);
       expect(region('clients', [FJELLHEIM, BRYGGA])).not.toContain('Archived');
       const withArchived = region('clients', [FJELLHEIM, { ...BRYGGA, archived: true }]);
-      expect(withArchived).toContain('| Client | Name | Rate | Rounding | Archived |');
-      expect(withArchived).toContain('| fjellheim | Fjellheim AS | 1250 | 15 | |');
-      expect(withArchived).toContain('| brygga | Brygga Digital | 990 | exact | ✓ |');
+      expect(containsRow(withArchived, '| Client | Name | Rate | Rounding | Archived |')).toBe(true);
+      expect(containsRow(withArchived, '| fjellheim | Fjellheim AS | 1250 | 15 | |')).toBe(true);
+      expect(containsRow(withArchived, '| brygga | Brygga Digital | 990 | exact | ✓ |')).toBe(true);
     });
   });
 
@@ -183,7 +210,7 @@ describe('catalog note — Clients and Projects (SB-058 task 1)', () => {
 
     it('rounding: 0 and `exact` are one behaviour and normalise to one spelling', () => {
       const md = region('clients', [{ ...BRYGGA, rounding: 0 }]);
-      expect(md).toContain('| exact |');
+      expect(containsRow(md, '| brygga | Brygga Digital | 990 | exact |')).toBe(true);
       expect(parse('clients', md).rows[0].rounding).toBe('exact');
       expect(TT.roundBill(37, 0)).toBe(TT.roundBill(37, 'exact'));
     });
@@ -223,7 +250,9 @@ describe('catalog note — Clients and Projects (SB-058 task 1)', () => {
       // header set would DROP fields with no database behind them to restore from.
       const md = ['## Clients', '', '| Client | Name |', '|---|---|', '| brygga | Brygga Digital |', '', '`revision: 2`'].join('\n'); // prettier-ignore
       const parsed = parse('clients', md);
-      expect(region('clients', [{ ...parsed.rows[0], rate: 990 }], 2)).toContain('| Client | Name | Rate | Rounding |');
+      expect(
+        containsRow(region('clients', [{ ...parsed.rows[0], rate: 990 }], 2), '| Client | Name | Rate | Rounding |'),
+      ).toBe(true);
     });
   });
 
@@ -381,10 +410,13 @@ describe('catalog note — Task templates and Settings (SB-058 task 2)', () => {
       expect(region('tasks', TEMPLATES, 3).split('\n').slice(0, 6)).toEqual([
         '## Task templates',
         '',
-        '| Template | Label | Project |',
-        '|---|---|---|',
-        '| checkout | Checkout flow | FJH-NETT |',
-        '| standup | Standup | |',
+        // the Label column is this wide because of the THIRD template, which this slice does not
+        // show — since DD-023 a cell is as wide as the widest cell in its column, so a fixture's
+        // rows are coupled to each other in a way they were not before
+        '| Template | Label                                           | Project  |',
+        '| -------- | ----------------------------------------------- | -------- |',
+        '| checkout | Checkout flow                                   | FJH-NETT |',
+        '| standup  | Standup                                         |          |',
       ]);
     });
 
@@ -400,7 +432,7 @@ describe('catalog note — Task templates and Settings (SB-058 task 2)', () => {
       // (SB-045/DD-010). A template has no note, so neither is escaped here — importing that
       // codec by reflex would put a backslash in front of a legitimate label.
       const md = region('tasks', [TEMPLATES[2]]);
-      expect(md).toContain('| br-note | - a label starting with a dash, mentioning <br> | INT-ADM |');
+      expect(containsRow(md, '| br-note | - a label starting with a dash, mentioning <br> | INT-ADM |')).toBe(true);
       expect(md).not.toContain('\\<br>');
       expect(md).not.toContain('\\- ');
     });
@@ -420,10 +452,10 @@ describe('catalog note — Task templates and Settings (SB-058 task 2)', () => {
       expect(region('settings', SETTINGS, 3).split('\n').slice(0, 7)).toEqual([
         '## Settings',
         '',
-        '| Setting | Value |',
-        '|---|---|',
-        '| currency | kr |',
-        '| language | en |',
+        '| Setting            | Value   |',
+        '| ------------------ | ------- |',
+        '| currency           | kr      |',
+        '| language           | en      |',
         '| vaultTimeSeparator | unicode |',
       ]);
     });
@@ -473,7 +505,7 @@ describe('catalog note — Task templates and Settings (SB-058 task 2)', () => {
 
     it('a `|` in a setting value is escaped and comes back intact', () => {
       const md = region('settings', [{ key: 'currency', value: 'a|b' }]);
-      expect(md).toContain('| currency | a\\|b |');
+      expect(containsRow(md, '| currency | a\\|b |')).toBe(true);
       expect(parse('settings', md).rows[0].value).toBe('a|b');
     });
 
@@ -664,7 +696,7 @@ describe('catalog note — the whole note (SB-058 task 3)', () => {
         '## Projects',
         '## Archive',
       ]);
-      expect(res.md).toContain('| fjellheim | Fjellheim AS | 1400 | 15 |');
+      expect(containsRow(res.md, '| fjellheim | Fjellheim AS | 1400 | 15 |')).toBe(true);
       // and only the one line changed
       const before = HAND.split('\n');
       const after = res.md.split('\n');

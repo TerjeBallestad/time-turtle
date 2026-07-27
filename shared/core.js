@@ -1139,11 +1139,29 @@ const MALFORMED_REVISION_RE = /^`revision: \d+[^`]*`$/;
  * would collapse `→` (U+2192) and U+0092 to the same input. No `TextEncoder`, to keep this
  * function free of even ambient globals.
  *
- * DO NOT REUSE THIS FOR DD-008's ENTRY KEY. That digest is over PARSED VALUES of one row, so
- * escaping and the `→`/`->` separator setting drop out of it (DD-008 rule 1); this one is over
- * the RAW LINE BYTES of the whole block, precisely so that any byte-level change — including
- * one that parses back to the same values — is caught. Different question, different input.
- * DD-008 rule 10 leaves the entry-key hash to phase 3 to choose; this is not it.
+ * DO NOT REUSE THIS FOR DD-008's ENTRY KEY — and note that the REASON CHANGED under DD-023.
+ * The reason this sign used to give was that this digest is over the RAW LINE BYTES, "precisely
+ * so that any byte-level change — including one that parses back to the same values — is
+ * caught". SB-165 made that false on purpose: `vaultPayloadDigest` now normalises a table line's
+ * framing whitespace before hashing, so intra-cell padding is exactly a byte-level change that
+ * parses back to the same values and is deliberately NOT caught. A sign arguing from a withdrawn
+ * premise reads as superstition and gets deleted by the next person who checks it, so here are
+ * the two reasons that survive. Neither is a refinement of the other:
+ *
+ *   • DIFFERENT SUBJECT. This covers the WHOLE payload — header row, delimiter row, every data
+ *     row, the totals row. `TT.entryMatchKey` covers ONE row's parsed fields. A block digest
+ *     cannot answer "is this the same row"; a row key cannot see an added row, a removed row, a
+ *     reordered header or a rewritten totals row. Neither does the other's job at ANY level of
+ *     normalisation, so no amount of normalising here turns this into that.
+ *   • DIFFERENT TOLERANCE. Even normalised, this still sees three things `entryMatchKey` drops
+ *     BY DESIGN: the emitted time separator (it keys minutes-since-midnight, so flipping
+ *     `vaultTimeSeparator` re-keys nothing — SB-063), escaping (DD-008 rule 1), and leading or
+ *     trailing whitespace in `label` and `note`, which it trims on both sides. So
+ *     block-digest-equal does not imply row-keys-equal, and row-keys-equal does not imply
+ *     block-digest-equal. Two questions, two answers, still.
+ *
+ * DD-008 rule 10 leaves the entry-key hash to phase 3 (SB-167) to choose; this is not it, and
+ * `TT.normaliseVaultPayloadLine` is not it either — being exported is not an argument.
  * @param {string} payload @returns {string}
  */
 function vaultDigest(payload) {
@@ -1164,8 +1182,21 @@ function vaultDigest(payload) {
 // neither should have to fake the other's shape. What they share — the set of lines and the
 // separator between them — is exactly what this function owns, so emit and verify cannot drift
 // into two definitions that merely agree today.
+//
+// THE NORMALISATION LIVES IN HERE, NOT AT THE CALL SITES (DD-023 half 2, SB-165). The digest has
+// three consumers — read (`parseAnchoredBlock`), write (`serializeVaultBlock` and
+// `serializeVaultCatalogSection`) and the index (`server/src/vault-arbitrate.js`
+// `describeVaultFile`) — and all three must agree about what the hash is taken over. Normalise at
+// the WRITE sites only and TT writes an aligned block whose digest was taken over the compact
+// form, the reader hashes the aligned bytes, they disagree, and every note TT writes quarantines
+// on its own next read: the exact failure DD-023 exists to prevent, arriving from the fix. Inside
+// the function that state is unreachable rather than merely avoided.
+//
+// `normaliseVaultPayloadLine` is defined next to `vaultRow`, the canonical emitter it re-emits
+// through — see the ruling there for why the compact form is the normalisation TARGET and what
+// that buys (every digest already sitting in a note re-hashes to itself; nothing to migrate).
 /** @param {string[]} payloadLines @returns {string} */
-const vaultPayloadDigest = (payloadLines) => vaultDigest(payloadLines.join('\n'));
+const vaultPayloadDigest = (payloadLines) => vaultDigest(payloadLines.map(normaliseVaultPayloadLine).join('\n'));
 // Exposed because the digest is part of the BLOCK FORMAT CONTRACT, not an implementation detail
 // of one function: SB-057's index records a payload hash per path for the `file rev < index rev`
 // split, and it must be the same hash the anchor carries rather than a second one that can drift.
@@ -1716,30 +1747,148 @@ TT.parseVaultBlock = function (md, opts) {
 };
 
 // ---- vault block serialize + splice (SB-055) ----
-// Emits exactly SB-045's frozen shape:
+// Emits SB-045's frozen shape in OBSIDIAN'S ALIGNED FORM (DD-023 — the columns are padded, the
+// schema is untouched):
 //
 //   ## Time Log
 //
-//   | Time | Mode | Project | Task | Bill |
-//   |---|---|---|---|---|
-//   | 09:00→09:15 | #admin | [[Planning]] | Daily planning ritual | |
-//   | **8.7h** | | | | **5.1h billable** |
+//   | Time        | Mode   | Project      | Task                  | Bill |
+//   | ----------- | ------ | ------------ | --------------------- | ---- |
+//   | 09:00→09:15 | #admin | [[Planning]] | Daily planning ritual |      |
+//   | **8.7h**    |        |              |                       | **5.1h billable** |
 //
 //   `revision: 8`
 //
 // The header row is written ALWAYS, including on a zero-entry day — no header means no
-// schema. An empty cell is one space between pipes (`| |`), never two, which is what makes
-// the emitted bytes and SB-045's own example the same string.
+// schema.
+//
+// DD-023 CHANGED THE PADDING, NOT THE FORMAT: same five columns, same anchor heading, same
+// revision line, same digest in it. The reason is that Obsidian's table editor re-pads a table
+// the moment a cell is edited, which under a raw-byte digest mismatched and quarantined the day —
+// and TT then silently stopped writing to it (SB-155). TT emitting what Obsidian would emit is
+// half the fix; the digest comparing NORMALISED text (see `vaultPayloadDigest`) is the half that
+// makes every note already on disk keep verifying.
 //
 // THE TASK CELL USES TT.encodeTaskCell, NEVER TT.encodeNoteCell. encodeNoteCell escapes a
 // trailing `[nb]`/`[ea]` run, which is the v2 MIRROR's flag convention; the vault carries
 // billability in a dedicated `Bill` column, so routing through it would put a spurious
 // backslash on a note that happens to end in `[nb]`.
 /**
- * One table line. An empty cell is a single space, matching SB-045's example bytes.
+ * One table line in the CANONICAL (compact) form. An empty cell is a single space, matching
+ * SB-045's example bytes.
+ *
+ * SINCE DD-023 THIS IS NO LONGER WHAT REACHES DISK — `vaultAlignedTable` is. What this is now is
+ * the digest's normalisation target: `normaliseVaultPayloadLine` re-emits every table row through
+ * here, so "the canonical form" is defined by this expression rather than described in prose
+ * somewhere. That is what makes the compact form a FIXED POINT and therefore makes DD-023 free of
+ * migration: every block already on disk was written by this expression, so it normalises to
+ * itself and the digest in its anchor still verifies. Change these bytes and every note TT has
+ * ever written re-hashes to a new value and quarantines on first read.
  * @param {string[]} cells @returns {string}
  */
 const vaultRow = (cells) => '|' + cells.map((c) => (c === '' ? ' ' : ' ' + c + ' ')).join('|') + '|';
+// The delimiter row's canonical form, and it is a DIFFERENT RULE from `vaultRow` — no framing
+// spaces at all, `|---|---|`. That is why it is its own expression and not
+// `vaultRow(cells.map(() => '---'))`, which would emit `| --- | --- |` and stop matching what is
+// already on disk. One dash run per column, three dashes, exactly what `serializeVaultBlock`
+// emitted before DD-023.
+//
+// AN ALIGNMENT COLON IS CARRIED, not collapsed. The scope bound on this normaliser (Architect,
+// SB-165) is "framing whitespace and the separator row's dash run, nothing else" — a `:` is
+// neither. TT never writes one, so carrying it costs nothing and dropping it would silently make
+// a human's alignment choice invisible to the digest.
+const DELIMITER_CELL_RE = /^(:?)-+(:?)$/;
+/** @param {string[]} cells already trimmed, from `vaultRowCells` @returns {string} */
+const vaultDelimiterRow = (cells) =>
+  '|' +
+  cells
+    .map((c) => {
+      const m = DELIMITER_CELL_RE.exec(c);
+      return m ? m[1] + '---' + m[2] : c;
+    })
+    .join('|') +
+  '|';
+/**
+ * One payload line in canonical form — the shape `vaultPayloadDigest` hashes (DD-023 half 2).
+ *
+ * BUILT BY RE-EMITTING THROUGH THE CANONICAL EMITTERS, never by a hand-rolled trim-and-join. The
+ * obvious `'| ' + cell.trim() + ' |'` implementation is wrong twice over and both are live on
+ * Terje's own note: it gives `|  |` for an empty cell where `vaultRow` gives `| |`, and
+ * `| --- | --- |` for the delimiter where the emitter gives `|---|---|`. Neither is a fixed
+ * point, so `normalise(compact) !== compact`, and every existing block quarantines on first
+ * read — DD-023's own failure mode arriving from DD-023. Parsing to cells and re-emitting cannot
+ * get that wrong, because there is then only one definition of a row.
+ *
+ * WHAT IT IS ALLOWED TO LOSE, per DD-023: a change that is purely framing whitespace becomes
+ * undetectable. SB-075's write-edge trim means the store cannot hold a value that differs from
+ * another only by surrounding whitespace, so detecting it protected nothing. Interior runs are
+ * NOT collapsed — `a  b` in a label is content, and `vaultRowCells` only trims the edges.
+ * DD-009's SB-051 chimera detection is unaffected: a diff-merge keeps the buffer's ROWS, which
+ * changes cell content and still mismatches.
+ *
+ * A line that is not a table row comes back untouched. The payload is header + delimiter + data
+ * rows (DD-009 consequence 1), so that branch is unreachable through `vaultPayloadDigest`; it is
+ * there so the writer's skip test, the second call site, can hand this whole block regions.
+ * @param {string} line @returns {string}
+ */
+function normaliseVaultPayloadLine(line) {
+  // the delimiter test first — a delimiter row IS a table row, and it has the other rule
+  if (isDelimiterRow(line)) return vaultDelimiterRow(vaultRowCells(line));
+  return isTableRow(line) ? vaultRow(vaultRowCells(line)) : line;
+}
+// Exposed for `server/src/vault-write.js`'s diff-before-write, which compares WHOLE NOTE TEXT and
+// so cannot go through `vaultPayloadDigest` (DD-023 half 2 covers the skip test too). TWO CALL
+// SITES, ONE DEFINITION — a second normaliser over there would be two rules that merely agree
+// today, and the one that drifts turns a fixed quarantine into a per-keystroke iCloud write storm.
+TT.normaliseVaultPayloadLine = normaliseVaultPayloadLine;
+/**
+ * The table's lines in OBSIDIAN'S ALIGNED FORM (DD-023 half 1) — header row, delimiter row, then
+ * the data rows. THIS is what reaches disk.
+ *
+ * Takes cell ARRAYS rather than lines because a column's width is not known until every row is in
+ * hand; that is why both serializers now build their rows as cells and emit here at the end
+ * instead of pushing a finished line per row.
+ *
+ * DD-023's algorithm, measured against Terje's vault rather than assumed — `2026-07-03.md` has
+ * every raw cell at `width + 2` on all four of its columns, the delimiter row included:
+ *
+ *   width  = max str.length over the header row and every data row (the delimiter is DERIVED)
+ *   cell   = "| " + content.padEnd(width) + " "
+ *   dashes = "-".repeat(width)
+ *
+ * WIDTH IS `str.length` — UTF-16 CODE UNITS, not code points and not display width. DD-023
+ * measured `11:00→13:00 🕐` against the real file: 13 code points, 14 code units, and Obsidian
+ * wrote 14 dashes. A `[...str].length` implementation is off by one on that exact row, so the
+ * table Obsidian re-aligns is not the table TT wrote and the note wedges again.
+ *
+ * NO EMPTY-CELL SPECIAL CASE, deliberately unlike `vaultRow`. `vaultRow` writes `| |` for an
+ * empty cell, citing SB-045's example bytes; Obsidian pads an empty cell to the full column width
+ * like any other (observed in `Calendar/Daily/2026-02-09.md`). Keeping TT's single-space case
+ * here would leave Obsidian re-aligning every table TT writes — silent and harmless now that half
+ * 2 stops the quarantine, but permanent ping-pong, and stopping exactly that churn is what half 1
+ * is for. DD-023's algorithm has no exception and neither does the observation.
+ *
+ * The width floors at 1 so a block whose header row carries an EMPTY label still emits a
+ * delimiter with a dash in it. A zero-dash cell is not a delimiter row to any parser, TT's
+ * `isDelimiterRow` included, so the floor is what keeps a degenerate header set writable rather
+ * than a claim about what Obsidian would do.
+ * @param {string[][]} rows the header cells first, then one array per data row
+ * @returns {string[]}
+ */
+function vaultAlignedTable(rows) {
+  const widths = rows[0].map((_, j) => rows.reduce((w, cells) => Math.max(w, (cells[j] || '').length), 1));
+  /** @param {string[]} cells @returns {string} */
+  const line = (cells) => '|' + widths.map((w, j) => ' ' + (cells[j] || '').padEnd(w) + ' ').join('|') + '|';
+  const delimiter = '|' + widths.map((w) => ' ' + '-'.repeat(w) + ' ').join('|') + '|';
+  return [line(rows[0]), delimiter].concat(rows.slice(1).map(line));
+}
+// Exposed on the same grounds as `vaultPayloadDigest`: since DD-023 this is part of the BLOCK
+// FORMAT CONTRACT rather than an implementation detail of the two serializers — it decides the
+// bytes that reach the vault. And its rule is a claim about a program TT does not control, so it
+// has to be pinnable directly against a recorded Obsidian table; going through
+// `serializeVaultBlock` to check it would mix the parser, `vaultTimeSeparator` and the totals row
+// into an assertion that is only about column widths.
+TT.vaultAlignedTable = vaultAlignedTable;
 // THE REVISION LINE HAS EXACTLY ONE EMITTER — this one. SB-078 came back YES, so the digest
 // lands HERE and nowhere else (DD-009); see the ruling next to `REVISION_RE`, which is the sole
 // matcher. Do not inline this string anywhere.
@@ -1821,22 +1970,22 @@ TT.serializeVaultBlock = function (entries, opts) {
   const projects = (opts && opts.projects) || undefined; // absent ⇒ the bare project code
   const keys = headers.map((label) => label.toLowerCase());
 
-  const lines = ['## ' + heading, '', vaultRow(headers), '|' + headers.map(() => '---').join('|') + '|'];
+  // CELLS, not finished lines — `vaultAlignedTable` cannot know a column's width until the last
+  // row is in hand, so the rows are collected and emitted together at the end (DD-023 half 1).
+  const cellRows = [headers];
   for (const entry of rows) {
-    lines.push(
-      vaultRow(
-        keys.map((key) => {
-          if (key === 'time') return TT.fmtTimeCell(entry, timeSeparator);
-          if (key === 'mode') return TT.encodeTagsCell(entry.tags);
-          if (key === 'project') return entry.project ? vaultProjectCell(entry.project, projects) : '';
-          if (key === 'task') return TT.encodeTaskCell({ label: entry.label, note: entry.note });
-          if (key === 'bill') return entry.billable ? BILL_YES : '';
-          // a vocabulary column TT has no model field for — re-emitted verbatim from the raw
-          // cell the parser carried. Empty today (SB-059 gave `Mode` a home); SB-044's
-          // settings-extended vocabulary is what refills it
-          return (entry.vaultCells && entry.vaultCells[key]) || '';
-        }),
-      ),
+    cellRows.push(
+      keys.map((key) => {
+        if (key === 'time') return TT.fmtTimeCell(entry, timeSeparator);
+        if (key === 'mode') return TT.encodeTagsCell(entry.tags);
+        if (key === 'project') return entry.project ? vaultProjectCell(entry.project, projects) : '';
+        if (key === 'task') return TT.encodeTaskCell({ label: entry.label, note: entry.note });
+        if (key === 'bill') return entry.billable ? BILL_YES : '';
+        // a vocabulary column TT has no model field for — re-emitted verbatim from the raw
+        // cell the parser carried. Empty today (SB-059 gave `Mode` a home); SB-044's
+        // settings-extended vocabulary is what refills it
+        return (entry.vaultCells && entry.vaultCells[key]) || '';
+      }),
     );
   }
   // The totals row is KEYED, not positional: the hours total sits under `Time` and the
@@ -1856,10 +2005,13 @@ TT.serializeVaultBlock = function (entries, opts) {
   const billAt = keys.indexOf('bill') >= 0 ? keys.indexOf('bill') : headers.length - 1;
   totals[timeAt] = '**' + TT.fmtHours(min) + 'h**';
   if (billAt !== timeAt) totals[billAt] = '**' + TT.fmtHours(bill) + 'h billable**';
-  lines.push(vaultRow(totals));
+  cellRows.push(totals);
   // `lines` is `['## heading', '', header, delimiter, ...rows]` at this point, so everything from
   // index 2 to the end IS the payload — taken before the blank line and the revision line are
-  // appended, which is what keeps them out of it without any filtering.
+  // appended, which is what keeps them out of it without any filtering. The totals row is part of
+  // the width computation like any other data row, which is why it goes into `cellRows` rather
+  // than being appended to `lines` after the fact.
+  const lines = ['## ' + heading, ''].concat(vaultAlignedTable(cellRows));
   lines.push('', vaultRevisionLine(revision, vaultPayloadDigest(lines.slice(2))));
   return lines.join('\n');
 };
@@ -2273,8 +2425,13 @@ TT.serializeVaultCatalogSection = function (section, rows, opts) {
   const columns = catalogColumnsFor(spec, list);
   const revision = opts && opts.revision != null ? opts.revision : 1; // a first write starts at 1
   const labels = columns.map((column) => column.label);
-  const lines = ['## ' + spec.heading, '', vaultRow(labels), '|' + labels.map(() => '---').join('|') + '|'];
-  for (const row of list) lines.push(vaultRow(columns.map((column) => column.write(row))));
+  // Cells first, then one aligned emission — same reason as the daily block (DD-023 half 1): the
+  // column widths are not known until the last row is in hand. The catalog gets half 1 too
+  // because Obsidian re-pads whichever table is edited, and this is the one file where a silent
+  // rewrite costs money.
+  const cellRows = [labels];
+  for (const row of list) cellRows.push(columns.map((column) => column.write(row)));
+  const lines = ['## ' + spec.heading, ''].concat(vaultAlignedTable(cellRows));
   // No totals row: the daily block's exists because a day has hours to add up, and this table has
   // nothing to total. `lines.slice(2)` is therefore exactly the payload the digest covers —
   // header, delimiter, data rows — taken before the blank line and the anchor are appended.
