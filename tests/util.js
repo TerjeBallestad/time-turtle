@@ -156,3 +156,37 @@ export async function adminOn(port) {
   expect(login.status).toBe(200);
   return admin;
 }
+
+/**
+ * A DAY THIS INSTALL'S FREEZE CANNOT CLAIM — for suites that need to log an hour and do not
+ * care which day it lands on (SB-161).
+ *
+ * The three suites this was extracted from each wrote a hardcoded `'2026-07-26'`, which was
+ * `todayStr()` on the day it was typed and went pre-cutover the next morning: DD-017 §5 stamps
+ * `Settings.vaultCutover` at first personal boot, `TT.preCutover` is `date < cutoverDay`, and
+ * `frozenEntryRefusal` 403s the PUT before any of those suites' real assertions are reached.
+ *
+ * TAKEN FROM THE STAMP, NEVER FROM THE CLOCK, and that is the point rather than a preference.
+ * `vaultCutover` is an ISO instant in UTC while a local `todayStr()` is a local day, so the two
+ * disagree for a couple of hours a night (SB-147) — a `todayStr()` here would go red by the
+ * clock again, and intermittently, which is worse than the bug it replaced. `preCutover` is a
+ * strict `<`, so the cutover day ITSELF is the nearest day that is never pre-cutover.
+ *
+ * It answers the DATE clause only. A day inside a committed segment is frozen by the ledger
+ * clause whatever its date (DD-017 §2), so a suite with commits in its data dir must pick its
+ * own day — every caller here boots a fresh `mkdtemp` dir with an empty ledger.
+ *
+ * Under `team` there is no cutover and no freeze at all, so any day does; the clock is used
+ * there because nothing can overtake it.
+ * @param {any} state the body of a `GET /api/state`
+ * @returns {string} a `YYYY-MM-DD` that `frozenEntryRefusal` will not refuse
+ */
+export function unfrozenDay(state) {
+  const cutoverDay = String(state?.settings?.vaultCutover || '').slice(0, 10);
+  // Every path into `personal` stamps — the boot (server/src/index.js) and `putSettings`
+  // (server/src/db.js) both — so an unstamped personal install means the stamp moved, and the
+  // fallback below would quietly go back to choosing a day by the clock. Say so instead.
+  if (state?.shape === 'personal')
+    expect(cutoverDay, 'a personal install reported no vault cutover').toMatch(/^\d{4}-\d{2}-\d{2}$/);
+  return cutoverDay || new Date().toISOString().slice(0, 10);
+}

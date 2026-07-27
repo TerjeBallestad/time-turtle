@@ -43,7 +43,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { mkdtempSync, existsSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { startServer, stopServer, stopAllServers, adminOn, runServerUntilExit } from './util.js';
+import { startServer, stopServer, stopAllServers, adminOn, runServerUntilExit, unfrozenDay } from './util.js';
 
 /** The .md files sitting in a mirror dir right now (the dir may not exist at all). */
 function mirrorFiles(dir) {
@@ -63,7 +63,20 @@ function dataDir(label) {
 /** Log one hour through the caller's own /api/state, and prove the DB took it. */
 async function logAnHour(admin, id) {
   const state = await admin('GET', '/api/state');
-  const entry = { id, date: '2026-07-26', start: 540, end: 600, project: null, label: 'toggle', note: '', billable: 1 };
+  // SB-161: off the cutover this install just reported, not a literal and not the clock. The
+  // contrast this suite is built on runs the SAME helper against a team and a personal server,
+  // and only the second one freezes — so the day has to be derived per server, not per suite.
+  // See `unfrozenDay`.
+  const entry = {
+    id,
+    date: unfrozenDay(state.json),
+    start: 540,
+    end: 600,
+    project: null,
+    label: 'toggle',
+    note: '',
+    billable: 1,
+  };
   const put = await admin('PUT', '/api/state', { entries: [...state.json.entries, entry] });
   expect(put.status).toBe(200);
   // THE WRITE REALLY LANDED. Without this the absent-mirror assertions below would also pass

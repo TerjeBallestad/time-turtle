@@ -43,7 +43,7 @@ import { mkdtempSync, mkdirSync, existsSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { startServer, stopServer, stopAllServers, adminOn } from './util.js';
+import { startServer, stopServer, stopAllServers, adminOn, unfrozenDay } from './util.js';
 
 afterAll(stopAllServers);
 
@@ -83,7 +83,19 @@ function storedSetting(data, key) {
 /** Log one hour through the caller's own /api/state, and prove the DB took it. */
 async function logAnHour(admin, id) {
   const state = await admin('GET', '/api/state');
-  const entry = { id, date: '2026-07-26', start: 540, end: 600, project: null, label: 'echo', note: '', billable: 1 };
+  // SB-161: off the cutover this install just reported, not a literal and not the clock — the
+  // cases here run under `personal`, where a stale literal is pre-cutover and 403s before the
+  // mirror can be asserted. See `unfrozenDay`.
+  const entry = {
+    id,
+    date: unfrozenDay(state.json),
+    start: 540,
+    end: 600,
+    project: null,
+    label: 'echo',
+    note: '',
+    billable: 1,
+  };
   const put = await admin('PUT', '/api/state', { entries: [...state.json.entries, entry] });
   expect(put.status).toBe(200);
   const after = await admin('GET', '/api/state');
