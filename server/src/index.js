@@ -1314,19 +1314,25 @@ app.put('/api/users/:id/entries', requireUser, requireAdmin, (req, res) => {
   // too, so a piped id corrupts the target's frozen money exactly the same way.
   const badId = entryIdError(body.entries);
   if (badId) return res.status(400).json({ error: badId });
-  // SB-102 / DD-017 §1 — END-GATE REVIEW FINDING, DELIBERATELY NOT FIXED HERE. See SB-149.
+  // SB-149 (ruled by Terje, 2026-07-27): DD-017 §1 WINS. This route used to write entries
+  // without consulting `frozenEntryRefusal`, so under `personal` a hand-rolled PUT changed a
+  // pre-vault or frozen day that `PUT /api/state` refuses — the guarded route said 403, this one
+  // said 200 and stored the edit. `requireAdmin` gates nothing here: the one user IS the seeded
+  // admin (DD-015 depth 2), which is why the hole was reachable at all.
   //
-  // This route writes entries and does NOT consult `frozenEntryRefusal`, so under `personal` a
-  // hand-rolled PUT changes a pre-vault or frozen day that `PUT /api/state` refuses. Measured
-  // against a live server: the guarded route said 403, this one said 200 and stored the edit.
-  // `requireAdmin` gates nothing here — the one user IS the seeded admin (DD-015 depth 2).
+  // The sentence this reverses is withdrawn in writing at the ledger-write site below. Its
+  // justification was "refusing it would wedge an admin out of correcting any week that was ever
+  // committed" — and that admin cannot exist under `personal`: `identity` is false
+  // (`shared/core.js`), `App.tsx` gates the Review surface on `admin && identity`, so ReviewView
+  // never renders and `api.putUserEntries` has no caller. The route was a back door with no
+  // front door, protecting a user the shape does not have.
   //
-  // It is left open on purpose rather than overlooked. Closing it means reversing the ruling
-  // written out at the ledger-write site below — "the ENTRY edit still lands… It is the ledger
-  // that is frozen, not the timesheet" — which a previous end-gate review put there with its
-  // reasoning, and which `tests/shape-committing.test.js` asserts. DD-017 §1 says the opposite
-  // for `personal`. Two recorded rulings disagree, and picking the winner is not a call an
-  // executing agent gets to make quietly, so it is filed with the evidence instead.
+  // `frozenEntryRefusal` returns null outside `personal`, so `team` and SDD-002 ruling 6 (the
+  // admin exemption, and the re-freeze proven in `tests/api.test.js`) are untouched. Placed
+  // before every write below, so a refused PUT stores nothing — a 403 raised after `putEntries`
+  // is indistinguishable from outside the process.
+  const frozen = frozenEntryRefusal(id, body.entries);
+  if (frozen) return res.status(403).json({ error: frozen });
   // DC-001 optimistic concurrency (mirrors the self path's optional-version shape): a
   // `version` (StateVersion, the entries scope) makes the write conditional — if the
   // target's entries moved since the Review tab loaded (the employee logged an hour, or a
@@ -1412,17 +1418,20 @@ app.put('/api/users/:id/entries', requireUser, requireAdmin, (req, res) => {
         if (+expected.entries !== current.entries) throw new ConflictError('entries', current);
       }
       store.putEntries(id, marked);
-      // SB-056 / DD-008: the THIRD ledger-write site, and the one the first pass missed. Under
-      // `personal` the re-freeze is skipped and the stored ledger is left verbatim — the ENTRY edit
-      // still lands, because refusing it would wedge an admin out of correcting any week that
-      // was ever committed, which is the same failure the ride-along exists to prevent. It is
-      // the ledger that is frozen, not the timesheet. (Whether pre-switch segments should still
-      // be rendered at all is SB-093, not this guard.)
+      // SB-056 / DD-008: the THIRD ledger-write site. Under `personal` the re-freeze is skipped
+      // and the stored ledger is left verbatim.
       //
-      // SB-102 / DD-017 §1 CONTRADICTS THE SENTENCE ABOVE for `personal`, where editable ⇔
-      // vault-bound makes the timesheet frozen too. Both rulings are currently in the repo and
-      // one of them has to be withdrawn in writing. SB-149 carries the evidence and the choice;
-      // until it is ruled, this route behaves exactly as it did before PLAN-015.
+      // WITHDRAWN (SB-149, ruled 2026-07-27). The sentence that used to stand here — "the ENTRY
+      // edit still lands… It is the ledger that is frozen, not the timesheet" — is withdrawn for
+      // `personal`. It was right for `team` and got applied one shape too wide. Under `personal`
+      // DD-017 §1 rules that editable ⇔ vault-bound: the timesheet is frozen too, and the guard
+      // at the top of this route now refuses the edit before it reaches here. The "wedged admin"
+      // it protected does not exist in this shape — the Review surface that calls this route is
+      // gated on `admin && identity`, and `identity` is false under `personal`.
+      //
+      // So under `personal` this line is now unreachable-by-guard rather than load-bearing, and
+      // it stays as the belt to the guard's braces. Under `team` nothing changes: the re-freeze
+      // runs exactly as SDD-002 ruling 8 describes, proven in `tests/api.test.js`.
       if (commitsChanged && !TT.shapeOffReason('committing', activeShape())) store.putCommits(id, reFrozen);
       store.bumpEntriesVersion(id);
     });

@@ -27,6 +27,13 @@
 //   The third is a CASCADE, not an independent guard: the un-refused commit from the first test
 //   is still in the ledger when it re-reads. Named rather than counted as evidence.
 //   The team half of every pair stays green throughout, which is what makes it a contrast.
+//
+// ## Verified red-green: 2026-07-27, SB-149's guard (output TRANSCRIBED from the run.)
+//   Dropping the two-line `frozenEntryRefusal` call from `PUT /api/users/:id/entries` — 1 fails:
+//     FAIL  refuses the admin cross-user edit of a frozen day — the back door is shut (SB-149)
+//           AssertionError: expected 200 to be 403
+//   The 200 is the pre-SB-149 behaviour exactly, which is what makes this case the guard's and
+//   not a cascade of the capability check above it.
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -173,34 +180,42 @@ describe('committing in the personal shape', () => {
     expect(bare.status).toBe(200);
   });
 
-  it('the admin cross-user edit corrects the entry but leaves the frozen ledger alone', async () => {
-    // END-GATE REVIEW FINDING: the THIRD ledger-write site. `PUT /api/users/:id/entries`
-    // RE-FREEZES the money snapshot of any committed segment it touches, and the first pass
-    // gated only PUT /api/state and the lock verbs — so under `personal` an admin correcting an
-    // hour inside a pre-switch committed week still rewrote a ledger the shape is declared
-    // unable to hold. Reachable today: under `personal` the single user IS an admin, and the
-    // Review surface is not otherwise gated.
+  it('refuses the admin cross-user edit of a frozen day — the back door is shut (SB-149)', async () => {
+    // WAS: 'the admin cross-user edit corrects the entry but leaves the frozen ledger alone',
+    // asserting a 200. SB-149 (ruled 2026-07-27) reversed that for `personal`: DD-017 §1 makes
+    // editable ⇔ vault-bound, so the timesheet is frozen too and `PUT /api/users/:id/entries`
+    // now consults `frozenEntryRefusal` like the self path does.
     //
-    // The ENTRY edit still lands. Refusing it would wedge an admin out of correcting any week
-    // that was ever committed — the same failure the ride-along exists to prevent. It is the
-    // ledger that is frozen, not the timesheet.
+    // NOT re-scoped, rewritten — deliberately. The old case proved the ledger claim BY editing an
+    // entry inside a committed segment; once that 403s under `personal` there is no personal-shape
+    // path left that reaches the re-freeze code at all, so the claim cannot be asserted here any
+    // more. The team half of it — an admin correction re-freezing only the segment it touched —
+    // is covered at `tests/api.test.js` ('admin corrects a committed line: re-freezes ONLY that
+    // segment…' and the partial-re-freeze case below it), which runs the default `team` shape.
+    //
+    // A 403 protects the ledger MORE strongly than the old assertion did: the old one let the
+    // write land and checked the snapshot afterwards, this one never lets it land.
     const before = await ADMIN('GET', '/api/state');
     const frozen = before.json.commits.find((c) => c.key === KEY);
     const target = before.json.entries.find((e) => e.id === 'e1-personal');
+    // The fixture has to actually be frozen, or the case is vacuous against any implementation.
     expect(frozen.snapshot[target.id]).toBeTruthy();
+    expect(TT.committedOn(target.date, before.json.commits)).toBe(true);
 
     const edited = { ...target, label: 'corrected by admin', end: 660 };
     const put = await ADMIN('PUT', `/api/users/${USER_ID}/entries`, {
       entries: before.json.entries.map((e) => (e.id === target.id ? edited : e)),
     });
-    expect(put.status).toBe(200);
+    expect(put.status).toBe(403);
+    // An ADMIN session cannot be 403'd by the employee/admin split, so the message has to name
+    // the freeze rather than a role — the same refusal string the self path returns.
+    expect(put.json.error).toBe(TT.FROZEN_ENTRY_REFUSAL);
 
     const after = await ADMIN('GET', '/api/state');
-    // the correction really landed…
-    const corrected = after.json.entries.find((e) => e.id === target.id);
-    expect(corrected.label).toBe('corrected by admin');
-    expect(corrected.end).toBe(660);
-    // …and the frozen money did NOT move. Asserting only the 200 would pass against the bug.
+    // Neither half moved. A guard that ran AFTER putEntries would look identical from outside.
+    const untouched = after.json.entries.find((e) => e.id === target.id);
+    expect(untouched.label).toBe(target.label);
+    expect(untouched.end).toBe(target.end);
     const stillFrozen = after.json.commits.find((c) => c.key === KEY);
     expect(stillFrozen.snapshot).toEqual(frozen.snapshot);
   });
