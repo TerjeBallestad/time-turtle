@@ -38,16 +38,38 @@
 // ## Verified red-green: 2026-07-27, SB-149 must-fix 2 — the LEDGER BELT (output TRANSCRIBED.)
 //   The case above was rewritten on the premise that no personal-shape path still reaches the
 //   `commitsChanged && !shapeOffReason('committing', …)` line in `index.js`, and that premise is
-//   false (SB-164). Dropping the clause — `if (commitsChanged) store.putCommits(id, reFrozen);` —
-//   over the FULL suite, 1 fails, and it is the restored case and nothing else:
-//     FAIL  a durMin-only edit reaches the re-freeze line, and the belt keeps the ledger frozen
-//           AssertionError: expected { …(8) } to deeply equal { …(8) }
-//           -     "billMin": 60,
-//           +     "billMin": 999,
-//     Tests  1 failed | 814 passed (815)
-//   Hours moved and the frozen money followed them — the DD-017 §2 divergence the clause exists
-//   to prevent. Measured at c35eddf BEFORE this fix, the same deletion changed nothing anywhere
-//   in the suite: the clause had no coverage at all.
+//   false (SB-164). Measured at c35eddf BEFORE that fix, dropping the clause changed nothing
+//   anywhere in the suite: it had no coverage at all. The case below restores it.
+//
+// ## Verified red-green: 2026-07-28, SB-149 must-fix 3 — the LEVER AND THE RATE (TRANSCRIBED.)
+//   Must-fix 2's case used `durMin` as the lever and told the next reader to delete both it and
+//   the clause once SB-164 landed. Wrong on both counts, and this is what replaced it.
+//
+//   (a) THE LEVER IS NOW A TRAILING SPACE. Dropping the clause —
+//       `if (commitsChanged) store.putCommits(id, reFrozen);` — over the FULL suite, 1 fails,
+//       and it is this case and nothing else:
+//         FAIL  a normalised-away edit reaches the re-freeze line, and the belt keeps the …
+//               AssertionError: expected { …(7) } to deeply equal { …(7) }
+//               -     "amount": 1000,
+//               +     "amount": 1500,
+//               -     "rate": 1000,
+//               +     "rate": 1500,
+//         Tests  1 failed | 814 passed (815)
+//       Money moved on a request that stored nothing — SDD-002 ruling 8's divergence. Note the
+//       OTHER rows in the same segment keep their frozen money verbatim in that same output
+//       (`e3-…` stays at rate 1250), which is the partial re-freeze doing its job around the
+//       one line `changedIds` holds.
+//
+//   (b) THE FIXTURE NEEDED A RATE THAT MOVED. On this file's original `project: null` row the
+//       live rate and the frozen rate are both 0, so the re-price writes back what was already
+//       there and the deletion above left the file GREEN. Measured, and it is why `PROJ` /
+//       `RATE_AT_COMMIT` / `RATE_NOW` exist.
+//
+//   (c) THE CASE OUTLIVES SB-164, measured rather than argued. With `durMin` folded into
+//       `entryMatchKey`'s range branch — SB-164 simulated as landed — this file is 7 passed
+//       with the clause and 1 failed | 6 passed without it, the same assertion and the same
+//       1000 → 1500 diff. Reviewer's probe measured the wider table (`durMin` 403 / trailing
+//       space 200 / stringly `start` 200); this is the suite-level half of it.
 //
 // ## Measured, not asserted: which clause refuses in the case above (SB-149 preference)
 //   `readOnlyDay` under `personal` is `preCutover(date) || frozenSegment(date)`, and `DATE` is
@@ -61,7 +83,7 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import TT from '../shared/core.js';
-import { startServer, stopServer, stopAllServers, adminOn } from './util.js';
+import { startServer, stopServer, stopAllServers, adminOn, unfrozenDay } from './util.js';
 
 afterAll(stopAllServers);
 
@@ -70,17 +92,42 @@ const KEY = TT.segmentKey(DATE);
 const OTHER_DATE = '2026-08-11'; // a different ISO week, so a genuinely second segment
 const OTHER_KEY = TT.segmentKey(OTHER_DATE);
 
+// THE BELT'S RED-GREEN NEEDS A RATE THAT MOVED, and nothing else in this file does. What the
+// belt prevents is `deriveSnapshot` re-pricing a changed line at the LIVE rate instead of
+// keeping its frozen row (SDD-002 ruling 8). On the `project: null` fixture every other case
+// uses, the live rate is 0 and the frozen rate is 0 — so the re-price is a no-op and dropping
+// the belt is INVISIBLE. Measured, not assumed: with the personal fixture on `project: null`,
+// deleting the clause left this whole file green. A rated project plus a rate bump between the
+// commit and the edit is what makes the belt's absence observable at all.
+const PROJ = 'BELT';
+const RATE_AT_COMMIT = 1000; // exact, client-less, billable — so the bump touches nothing else
+const RATE_NOW = 1500;
+
 function dataDir(label) {
   const data = mkdtempSync(join(tmpdir(), 'tt-' + label + '-'));
   return { data, md: join(data, 'mirror') };
 }
 
-/** Log one hour on `date` and commit its segment. Returns the admin session + user id. */
-async function logAndCommit(port, id, date, key) {
+/**
+ * Log one hour on `date` and commit its segment. Returns the admin session + user id.
+ * With `projectCode`, seeds a rated billable project first and logs the hour against it, so the
+ * frozen snapshot carries a non-zero rate that a later bump can diverge from.
+ */
+async function logAndCommit(port, id, date, key, projectCode = null) {
   const admin = await adminOn(port);
   const me = await admin('GET', '/api/me');
+  if (projectCode) {
+    const catalog = await admin('GET', '/api/state');
+    const seeded = await admin('PUT', '/api/state', {
+      projects: [
+        ...catalog.json.projects,
+        { code: projectCode, name: 'belt', clientId: null, rate: RATE_AT_COMMIT, billable: true },
+      ],
+    });
+    expect(seeded.status).toBe(200);
+  }
   const state = await admin('GET', '/api/state');
-  const entry = { id, date, start: 540, end: 600, project: null, label: 'gate', note: '', billable: 1 };
+  const entry = { id, date, start: 540, end: 600, project: projectCode, label: 'gate', note: '', billable: 1 };
   const put = await admin('PUT', '/api/state', {
     entries: [...state.json.entries, entry],
     commits: [...state.json.commits, { key }],
@@ -114,7 +161,7 @@ describe('committing in the personal shape', () => {
   beforeAll(async () => {
     const { data, md } = dataDir('commit-personal');
     const team = await startServer({ TT_DATA_DIR: data, TT_MD_DIR: md });
-    const seeded = await logAndCommit(team.port, 'e1-personal', DATE, KEY);
+    const seeded = await logAndCommit(team.port, 'e1-personal', DATE, KEY, PROJ);
     expect(seeded.put.status).toBe(200);
     USER_ID = seeded.userId;
     await stopServer(team.child);
@@ -235,7 +282,11 @@ describe('committing in the personal shape', () => {
     // which it does not: forcing `TT.frozenSegment` to return false leaves this whole file green.
     // Both are asserted so the reader can see which one is load-bearing. The frozen-segment
     // clause's real coverage is `tests/shape-freeze.test.js` case (f), on a POST-cutover day.
-    const cutoverDay = (await ADMIN('GET', '/api/state')).json.settings.vaultCutover.slice(0, 10);
+    // `unfrozenDay`, not a hand-rolled `.slice(0, 10)` — SB-161 gave deriving the cutover day one
+    // home and `a51fc0e` brought that helper onto this branch two commits ago. It also carries a
+    // named assertion that a personal install really is stamped, so a moved stamp says so instead
+    // of surfacing here as a `TypeError` on `.slice` of undefined.
+    const cutoverDay = unfrozenDay(before.json);
     expect(target.date < cutoverDay).toBe(true); // ← the clause this case actually exercises
     expect(frozen.snapshot[target.id]).toBeTruthy();
     expect(TT.committedOn(target.date, before.json.commits)).toBe(true); // true, but not what refuses
@@ -267,41 +318,85 @@ describe('committing in the personal shape', () => {
   // there. Measured at `c35eddf`, deleting the clause (`if (commitsChanged) store.putCommits(…)`)
   // changed nothing anywhere in the suite.
   //
-  // THIS CASE IS COUPLED TO SB-164 ON PURPOSE, and says so in its assertions. The lever is the
-  // SB-164 hole itself — `TT.entryMatchKey` keys `range:<start>-<end>` and never reads `durMin`,
-  // so a `durMin`-only edit is invisible to `frozenEntryRefusal` while `entryDiffers`
-  // (`ENTRY_FIELDS`) sees it and marks the segment affected. When SB-164 lands the 200 below
-  // becomes a 403 and this case fails loudly. THAT IS THE INTENDED SIGNAL, not a regression:
-  // at that point no entry in a committed segment can change under `personal` at all, so
-  // `commitsChanged` cannot be true, the clause is dead rather than protective, and the right
-  // move is to DELETE both the clause and this case. Do not repair it into a passing test.
-  it('a durMin-only edit reaches the re-freeze line, and the belt keeps the ledger frozen (SB-149 must-fix 2)', async () => {
+  // THE LEVER IS A TRAILING SPACE, and choosing it is the whole point of this case.
+  //
+  // An earlier version used `durMin`, on the reasoning that SB-164 would close the hole and this
+  // case should then be deleted along with the clause. That reasoning was wrong. Reviewer measured
+  // it with `durMin` added to `entryMatchKey` — SB-164 simulated as landed — on a probe that logs
+  // at the ledger line itself:
+  //
+  //   durMin: 999                  → 403, refused, line NOT reached   (SB-164 does its job)
+  //   label + one trailing space    → 200, LINE REACHED
+  //   start: "540" instead of 540   → 200, LINE REACHED
+  //
+  // Re-measured here on the suite, which is the form that stays: with `durMin` folded into
+  // `entryMatchKey`'s range branch, THIS CASE still passes with the belt and still fails without
+  // it — same assertion, same diff (`rate`/`amount` 1000 → 1500). See the header transcription.
+  //
+  // `durMin` was one instance, not the mechanism. `frozenEntryRefusal` compares through
+  // `TT.entryMatchKey`, which NORMALISES — `String(label ?? '').trim()` among other things —
+  // while `entryDiffers` compares raw values with `!==`. Every normalisation the key performs is
+  // another gap of the same shape, so a case pinned to `durMin` would have gone green-by-deletion
+  // exactly when the clause was still live.
+  //
+  // A trailing space reaches the line TODAY AND AFTER SB-164, so this case outlives that fix. It
+  // is also the realistic one: `useServerSync` re-sends the whole row on any debounce where the
+  // user touched the field and backed out.
+  //
+  // AND THE RATE HAS TO MOVE, or the case cannot see the belt at all. Dropping the clause lets
+  // `deriveSnapshot` re-price the changed line at the LIVE rate; on a `project: null` row that
+  // rate is 0 and the frozen rate is 0, so the re-price writes back what was already there.
+  // Measured: with this case's fixture left on `project: null`, deleting the clause left the
+  // whole file GREEN. So the bump below is not colour — it is the only thing that makes the
+  // divergence observable, and it is also exactly the install SDD-002 ruling 8 is about.
+  it('a normalised-away edit reaches the re-freeze line, and the belt keeps the ledger frozen (SB-149 must-fix 2)', async () => {
     const before = await ADMIN('GET', '/api/state');
     const frozen = before.json.commits.find((c) => c.key === KEY);
     const target = before.json.entries.find((e) => e.id === 'e1-personal');
     expect(frozen.snapshot[target.id]).toBeTruthy(); // the fixture is genuinely frozen money
-    expect(target.start).not.toBe(null); // the range branch of entryMatchKey is the one with the hole
-    expect(target.end).not.toBe(null);
+    expect(target.editedByAdmin).toBeFalsy(); // …and nothing has marked this row yet
 
-    // Only `durMin` moves. Same id, same date, same start/end, same label — so the row's
-    // `entryMatchKey` is byte-identical and the guard sees no change.
-    const edited = { ...target, durMin: 999 };
+    // THE RATE MOVES SINCE THE COMMIT. A catalog-only PUT: no `entries`, so `frozenEntryRefusal`
+    // is not consulted, and no `commits`, so nothing re-freezes here. The frozen row keeps the
+    // rate it was committed at — asserted, because if the two rates were ever equal this case
+    // would pass against an implementation with no belt in it at all.
+    const bumped = await ADMIN('PUT', '/api/state', {
+      projects: before.json.projects.map((p) => (p.code === PROJ ? { ...p, rate: RATE_NOW } : p)),
+    });
+    expect(bumped.status).toBe(200);
+    expect(frozen.snapshot[target.id].rate).toBe(RATE_AT_COMMIT);
+    expect(RATE_NOW).not.toBe(RATE_AT_COMMIT);
+
+    // The label gains ONE TRAILING SPACE and nothing else changes. `entryMatchKey` trims, so the
+    // frozen key is byte-identical and `frozenEntryRefusal` sees no change at all; `entryDiffers`
+    // compares the raw strings and calls it changed. That disagreement is the gap.
+    const edited = { ...target, label: target.label + ' ' };
     const put = await ADMIN('PUT', `/api/users/${USER_ID}/entries`, {
       entries: before.json.entries.map((e) => (e.id === target.id ? edited : e)),
     });
-    expect(put.status).toBe(200); // ← SB-164. Becomes 403 when it lands; see the note above.
+    expect(put.status).toBe(200); // the guard passed it — that is the gap, not the bug under test
 
     const after = await ADMIN('GET', '/api/state');
-    // The write really landed, so the segment really was `affected` and `commitsChanged` really
-    // was true. Without this the snapshot assertion below could pass on a request that never got
-    // near the line it claims to cover.
-    expect(after.json.entries.find((e) => e.id === target.id).durMin).toBe(999);
+    const stored = after.json.entries.find((e) => e.id === target.id);
+    // THE POSITIVE WITNESS that the line was reached, and it has to be indirect. `entryDiffers`
+    // is the single predicate that sets `editedByAdmin` on the row, puts the id in `changedIds`
+    // and marks the segment `affected` — and `affected` is what sets `commitsChanged`. So the
+    // marker flipping IS the proof that the request got as far as the clause. Without it the
+    // snapshot assertion below could pass on a request that never went near the line.
+    expect(stored.editedByAdmin).toBe(true);
+    // …and note what did NOT change: SB-075 trims at the write edge, so the stored label is
+    // unchanged. This whole path fires on a request that stores nothing new, which is what makes
+    // deleting the clause quietly expensive rather than obviously so.
+    expect(stored.label).toBe(target.label);
 
-    // …and the belt held: the ledger was NOT re-frozen around the moved hours. This is the
-    // assertion that goes red if the `shapeOffReason` clause is dropped — the snapshot would
-    // re-derive and `billMin` would follow `durMin` instead of staying at the committed 60.
+    // THE BELT HELD: the ledger was not re-frozen. This is the assertion that goes red if the
+    // `shapeOffReason` clause is dropped — the row is in `changedIds`, so `deriveSnapshot`
+    // re-prices it at RATE_NOW and `rate`/`amount` follow, while the committed hours did not
+    // move a minute. Money changed on a request that stored nothing: SDD-002 ruling 8's
+    // divergence, which is what the belt is for.
     const stillFrozen = after.json.commits.find((c) => c.key === KEY);
     expect(stillFrozen.snapshot).toEqual(frozen.snapshot);
+    expect(stillFrozen.snapshot[target.id].rate).toBe(RATE_AT_COMMIT); // named, not just deep-equal
   });
 
   it('refuses UN-committing too — dropping a key is a change to the ledger', async () => {

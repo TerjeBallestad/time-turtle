@@ -1439,12 +1439,44 @@ app.put('/api/users/:id/entries', requireUser, requireAdmin, (req, res) => {
       // only thing that then stops the ledger being re-frozen around hours that moved while the
       // frozen money did not, which is precisely the divergence DD-017 §2 exists to prevent.
       //
-      // WHEN SB-164 LANDS, DELETE THIS CLAUSE AND ITS TEST — do not leave it as an untested belt.
-      // Once `durMin` is in the frozen key, every day of a committed segment is `readOnlyDay`
-      // under `personal` (`preCutover || frozenSegment`), so no entry in one can be changed,
-      // added, moved in or moved out without the guard refusing first — `commitsChanged` then
-      // genuinely cannot be true in this shape and the clause is dead code rather than a belt.
-      // `tests/shape-committing.test.js` carries the case that keeps it honest until then.
+      // WHAT WOULD MAKE THIS CLAUSE DEAD, and it is NOT "SB-164 lands". An earlier version of
+      // this comment said to delete the clause and its test once `durMin` was in the frozen key.
+      // That was wrong, and wrong in the same shape as the claim it replaced — an unreachability
+      // argument asserted rather than measured. REVIEWER measured it, on a probe that logs at this
+      // line with `durMin` added to `entryMatchKey`, i.e. SB-164 simulated as landed:
+      //
+      //   durMin: 999                  → 403, refused, line NOT reached   (SB-164 works)
+      //   label + one trailing space    → 200, LINE REACHED
+      //   start: "540" instead of 540   → 200, LINE REACHED
+      //
+      // Independently re-measured HERE, on the suite rather than a probe, and that is the form the
+      // repo keeps: with `durMin` folded into `entryMatchKey`'s range branch, the trailing-space
+      // case in `tests/shape-committing.test.js` still passes with this clause and still fails
+      // without it, byte-identically. The case survives SB-164; the clause is still load-bearing
+      // on the far side of it.
+      //
+      // `durMin` was never the mechanism, only the first instance of it. `frozenEntryRefusal`
+      // compares through `TT.entryMatchKey`, which NORMALISES — it trims label and note, maps a
+      // null project to '', keys billable as truthy, and builds its time field by string concat
+      // so `540` and `"540"` collapse to one key. `entryDiffers` (`ENTRY_FIELDS` above) compares
+      // the raw values with strict `!==`. EVERY normalisation the key performs is a gap between
+      // the two predicates, and each one is a row the guard passes and this line then receives.
+      //
+      // So the real precondition is: THIS CLAUSE STAYS UNTIL `frozenEntryRefusal` AND
+      // `entryDiffers` DECIDE "did this row change" ON ONE CANONICAL FORM. Adding fields to the
+      // key one at a time closes instances, never the class.
+      //
+      // What it costs to delete it early, which is why it is worth a comment this long: a client
+      // re-sends a frozen row whose label gained a trailing space — `useServerSync` does exactly
+      // that on any debounce where the user touched the field and backed out. `entryDiffers`
+      // calls it changed, its id lands in `changedIds`, and `deriveSnapshot` re-prices it at the
+      // LIVE rate instead of keeping its frozen row. On any install where the rate moved since
+      // the commit, committed money changes on a request that changed nothing — SDD-002 ruling
+      // 8's divergence, arriving silently. Note the row need not even differ once stored: the
+      // trailing space is trimmed at the write edge (SB-075), so this fires on a no-op write.
+      //
+      // `tests/shape-committing.test.js` carries the case, and it is pointed at the trailing-space
+      // lever precisely because that one reaches this line both today and after SB-164.
       //
       // Under `team` nothing changes: the re-freeze runs exactly as SDD-002 ruling 8 describes,
       // proven in `tests/api.test.js`.
