@@ -126,6 +126,52 @@ export function isLoopbackHostHeader(raw) {
   }
   return name === 'localhost' || name === '::1' || name === '::ffff:127.0.0.1' || IPV4_LOOPBACK.test(name);
 }
+
+// ---- SB-162 / DD-024 clause 4: the PEER address, and it is the third loopback predicate ----
+/**
+ * Whether a request's PEER — the far end of the TCP socket, `req.socket.remoteAddress` — is this
+ * machine itself.
+ *
+ * WHY IT EXISTS. `BIND_HOST` (`server/src/index.js`) is evaluated ONCE at module load, and DD-024
+ * moves the shape question AFTER boot. So a `personal` install is bound to every interface for
+ * the life of the process while `requireUser`'s no-identity branch hands out an implicit admin
+ * session, and the only thing in between was `isLoopbackHostHeader` — which a caller on the wifi
+ * forges by typing `-H 'Host: localhost'`. That was confirmed live against a real instance
+ * (SB-162): full admin, no credentials, from another machine on the LAN.
+ *
+ * IT IS NOT `isLoopbackHostHeader` AND MUST NOT BE FOLDED INTO IT — the same rule the note at
+ * `isLoopbackHost` above already states for a different pair, now for a third. The two stop
+ * DIFFERENT attacks and neither covers the other:
+ *
+ *   • this one reads an address the KERNEL supplies, and stops another machine on the network;
+ *   • the Host check reads a string the CALLER supplies, and stops DNS rebinding in the user's
+ *     own browser — an attack that arrives OVER LOOPBACK and is therefore invisible here.
+ *
+ * A "simplification" to one function silently re-opens whichever of SB-136 and SB-162 it drops.
+ *
+ * A STRICT DOTTED QUAD, reusing `IPV4_LOOPBACK` above, even though the kernel is not an attacker
+ * and a loose `/^127\./` would do: one definition of "an IPv4 loopback literal" is worth more
+ * than the two characters it saves, and it cannot drift into accepting a name.
+ *
+ * IPv4-MAPPED IS THE CASE THAT MATTERS IN PRACTICE. On a dual-stack listener Node reports a
+ * v4 peer as `::ffff:127.0.0.1`, so a check for `127.0.0.1` and `::1` alone would refuse
+ * loopback traffic on exactly the setup most machines have.
+ *
+ * AN ABSENT ADDRESS REFUSES. `remoteAddress` is `undefined` on a socket that has already been
+ * destroyed; under `personal` the safe direction is to answer nothing.
+ * @param {unknown} raw `req.socket.remoteAddress` @returns {boolean}
+ */
+export function isLoopbackPeer(raw) {
+  const value = String(raw ?? '')
+    .trim()
+    .toLowerCase();
+  if (!value) return false;
+  // `::ffff:127.0.0.1` — the v4-mapped form, unwrapped to the quad the regex below reads.
+  const bare = value.startsWith('::ffff:') ? value.slice('::ffff:'.length) : value;
+  if (IPV4_LOOPBACK.test(bare)) return true;
+  // The IPv6 loopback, in both the compressed spelling Node emits and the expanded one.
+  return value === '::1' || value === '0:0:0:0:0:0:0:1';
+}
 export const ADMIN_EMAIL = process.env.TT_ADMIN_EMAIL || 'admin@timeturtle.local';
 export const ADMIN_PASSWORD = process.env.TT_ADMIN_PASSWORD || 'turtle';
 export const SEED_DEMO = process.env.TT_SEED_DEMO !== '0';

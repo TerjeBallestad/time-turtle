@@ -3,7 +3,7 @@ import express from 'express';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
-import { PORT, HOST, MD_DIR_LOCKED, isLoopbackHost, isLoopbackHostHeader } from './config.js';
+import { PORT, HOST, MD_DIR_LOCKED, isLoopbackHost, isLoopbackHostHeader, isLoopbackPeer } from './config.js';
 import { shapeTarget, activeShape, shapeLocked } from './backend.js';
 import { verifyPassword, makeToken, readSessionCookie, sessionCookie, clearCookie } from './auth.js';
 // SB-056: the split is at the import site on purpose. `db` is IDENTITY ONLY here — users,
@@ -263,6 +263,61 @@ if (!TT.shapeCapabilities(activeShape()).mirror) {
 }
 
 const app = express();
+
+// ---- SB-162 / DD-024 clause 4: a `personal` install answers nobody but this machine ----
+//
+// THE HOLE THIS CLOSES, confirmed live against a real instance before it was a rule. `BIND_HOST`
+// above is evaluated ONCE at module load. DD-024 moves the shape question AFTER boot, so on every
+// personal install from now on `singleUserShape()` is false at bind time, `BIND_HOST` is
+// `undefined`, and the historical every-interface bind stands — while the shape becomes
+// `personal` seconds later and `requireUser`'s no-identity branch starts handing out an implicit
+// admin session with no cookie. `isLoopbackHostHeader` was the only thing left in between, and
+// `curl -H 'Host: localhost' http://<lan-ip>:<port>/api/state` walks straight through it: a full
+// admin session, no credentials, from any machine on the wifi, writes included.
+//
+// REFUSE TO SERVE, DO NOT RE-BIND (Architect's ruling on SB-162's second half). Re-binding the
+// socket on the shape transition is the only answer that actually closes the port and it is
+// still the wrong one: a runtime `close()` + `listen()` can fail — address in use, TIME_WAIT,
+// the port taken in the seconds since boot — and a failed re-listen leaves a process with NO
+// SOCKET AT ALL, which is worse than one that answers nothing. It also drops requests in flight.
+// The boot refusal's own comment block above says the guard whose subject is *the wrong people
+// can read this* should leave the least behind; a re-bind leaves the most.
+//
+// THE COST, stated so no later reader believes otherwise: this refuses at the HTTP layer and
+// DOES NOT CLOSE THE PORT. A `personal` install keeps a socket listening on every interface for
+// the life of the process — a port scan finds it, TCP still connects, only the response is
+// empty. `BIND_HOST` on the next restart is the durable fix and this does not replace it.
+//
+// PER REQUEST, NEVER CACHED. The shape changing at runtime is the entire bug, so a value read
+// once at startup would reproduce it in a new place.
+//
+// IT COVERS THE WHOLE APP, not `/api` — hence its position, ahead of the body parser, every
+// route and the static handler. Serving the client to the LAN while refusing the API would hand
+// out an app that cannot talk to anything, and it is the same bytes-to-the-wrong-network
+// question either way. Someone who genuinely wants a LAN-reachable personal instance is ALREADY
+// refused: the boot guard above exits 1 on a non-loopback `TT_HOST` under `personal`, so
+// refusing everything here is the consistent reading of a rule that already exists.
+//
+// AHEAD OF `express.json` deliberately: a refused caller should not get 4mb of body buffered on
+// its behalf first.
+//
+// THE HOST CHECK STAYS WHERE IT IS AND IS NOT REDUNDANT WITH THIS. Two guards, two attacks: the
+// peer address stops another machine; `isLoopbackHostHeader` in `requireUser` stops DNS
+// rebinding in the user's own browser, which arrives OVER LOOPBACK and is invisible to a peer
+// check. `config.js` already refuses to merge two loopback predicates; this is the third.
+//
+// NOT WIDENED TO `team`, where there is a cookie challenge and a LAN bind is the documented,
+// wanted behaviour (SB-099: Terje runs a team demo on the same machine).
+const NON_LOCAL_PEER_REFUSAL = 'this request did not come from this machine';
+app.use((req, res, next) => {
+  if (singleUserShape() && !isLoopbackPeer(req.socket.remoteAddress)) {
+    // Reflects nothing about the caller back — not the address it came from, not the Host it
+    // chose. 403, not 401: no credential would make this request acceptable.
+    return res.status(403).json({ error: NON_LOCAL_PEER_REFUSAL });
+  }
+  next();
+});
+
 app.use(express.json({ limit: '4mb' }));
 
 // ---- auth middleware ----
