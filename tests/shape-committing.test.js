@@ -34,6 +34,28 @@
 //           AssertionError: expected 200 to be 403
 //   The 200 is the pre-SB-149 behaviour exactly, which is what makes this case the guard's and
 //   not a cascade of the capability check above it.
+//
+// ## Verified red-green: 2026-07-27, SB-149 must-fix 2 — the LEDGER BELT (output TRANSCRIBED.)
+//   The case above was rewritten on the premise that no personal-shape path still reaches the
+//   `commitsChanged && !shapeOffReason('committing', …)` line in `index.js`, and that premise is
+//   false (SB-164). Dropping the clause — `if (commitsChanged) store.putCommits(id, reFrozen);` —
+//   over the FULL suite, 1 fails, and it is the restored case and nothing else:
+//     FAIL  a durMin-only edit reaches the re-freeze line, and the belt keeps the ledger frozen
+//           AssertionError: expected { …(8) } to deeply equal { …(8) }
+//           -     "billMin": 60,
+//           +     "billMin": 999,
+//     Tests  1 failed | 814 passed (815)
+//   Hours moved and the frozen money followed them — the DD-017 §2 divergence the clause exists
+//   to prevent. Measured at c35eddf BEFORE this fix, the same deletion changed nothing anywhere
+//   in the suite: the clause had no coverage at all.
+//
+// ## Measured, not asserted: which clause refuses in the case above (SB-149 preference)
+//   `readOnlyDay` under `personal` is `preCutover(date) || frozenSegment(date)`, and `DATE` is
+//   pre-cutover — so `preCutover` short-circuits and the committed-segment half never runs.
+//   Forcing `TT.frozenSegment` to `return false` leaves this whole file GREEN (7 passed), which
+//   is why the case now asserts `target.date < cutoverDay` and labels `committedOn` as true but
+//   not the thing that refuses. The frozen-segment clause's real coverage is
+//   `tests/shape-freeze.test.js` case (f), on a POST-cutover day.
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -187,11 +209,17 @@ describe('committing in the personal shape', () => {
     // now consults `frozenEntryRefusal` like the self path does.
     //
     // NOT re-scoped, rewritten — deliberately. The old case proved the ledger claim BY editing an
-    // entry inside a committed segment; once that 403s under `personal` there is no personal-shape
-    // path left that reaches the re-freeze code at all, so the claim cannot be asserted here any
-    // more. The team half of it — an admin correction re-freezing only the segment it touched —
-    // is covered at `tests/api.test.js` ('admin corrects a committed line: re-freezes ONLY that
-    // segment…' and the partial-re-freeze case below it), which runs the default `team` shape.
+    // entry inside a committed segment; once that 403s under `personal` the claim cannot be
+    // asserted the same way here. The team half of it — an admin correction re-freezing only the
+    // segment it touched — is covered at `tests/api.test.js` ('admin corrects a committed line:
+    // re-freezes ONLY that segment…' and the partial-re-freeze case below it), which runs the
+    // default `team` shape.
+    //
+    // AN EARLIER VERSION OF THIS COMMENT WENT FURTHER AND WAS WRONG. It said "there is no
+    // personal-shape path left that reaches the re-freeze code at all", and the rewrite traded
+    // away that clause's only red-green on that premise. SB-164 is the standing counterexample —
+    // a `durMin`-only edit walks through the guard and reaches the line — so the coverage is
+    // restored in the case below rather than left to the premise.
     //
     // A 403 protects the ledger MORE strongly than the old assertion did: the old one let the
     // write land and checked the snapshot afterwards, this one never lets it land.
@@ -199,8 +227,18 @@ describe('committing in the personal shape', () => {
     const frozen = before.json.commits.find((c) => c.key === KEY);
     const target = before.json.entries.find((e) => e.id === 'e1-personal');
     // The fixture has to actually be frozen, or the case is vacuous against any implementation.
+    //
+    // NAMING THE CLAUSE THAT ACTUALLY FIRES. `readOnlyDay` under `personal` is
+    // `preCutover(date) || frozenSegment(date)`, and `DATE` is before the cutover the personal
+    // boot stamps — so `preCutover` short-circuits and the committed-segment half never runs.
+    // Asserting only `committedOn` here read as "this case covers the frozen-segment clause",
+    // which it does not: forcing `TT.frozenSegment` to return false leaves this whole file green.
+    // Both are asserted so the reader can see which one is load-bearing. The frozen-segment
+    // clause's real coverage is `tests/shape-freeze.test.js` case (f), on a POST-cutover day.
+    const cutoverDay = (await ADMIN('GET', '/api/state')).json.settings.vaultCutover.slice(0, 10);
+    expect(target.date < cutoverDay).toBe(true); // ← the clause this case actually exercises
     expect(frozen.snapshot[target.id]).toBeTruthy();
-    expect(TT.committedOn(target.date, before.json.commits)).toBe(true);
+    expect(TT.committedOn(target.date, before.json.commits)).toBe(true); // true, but not what refuses
 
     const edited = { ...target, label: 'corrected by admin', end: 660 };
     const put = await ADMIN('PUT', `/api/users/${USER_ID}/entries`, {
@@ -216,6 +254,52 @@ describe('committing in the personal shape', () => {
     const untouched = after.json.entries.find((e) => e.id === target.id);
     expect(untouched.label).toBe(target.label);
     expect(untouched.end).toBe(target.end);
+    const stillFrozen = after.json.commits.find((c) => c.key === KEY);
+    expect(stillFrozen.snapshot).toEqual(frozen.snapshot);
+  });
+
+  // THE BELT'S OWN RED-GREEN, restored (SB-149 must-fix 2).
+  //
+  // `index.js`'s ledger write is `if (commitsChanged && !TT.shapeOffReason('committing', …))`.
+  // The rewrite of the case above deleted the only test that reached that line under `personal`,
+  // on the premise that the new guard made it unreachable. The premise is false, and this case is
+  // the proof: it drives the request that reaches it and pins what the clause does when it gets
+  // there. Measured at `c35eddf`, deleting the clause (`if (commitsChanged) store.putCommits(…)`)
+  // changed nothing anywhere in the suite.
+  //
+  // THIS CASE IS COUPLED TO SB-164 ON PURPOSE, and says so in its assertions. The lever is the
+  // SB-164 hole itself — `TT.entryMatchKey` keys `range:<start>-<end>` and never reads `durMin`,
+  // so a `durMin`-only edit is invisible to `frozenEntryRefusal` while `entryDiffers`
+  // (`ENTRY_FIELDS`) sees it and marks the segment affected. When SB-164 lands the 200 below
+  // becomes a 403 and this case fails loudly. THAT IS THE INTENDED SIGNAL, not a regression:
+  // at that point no entry in a committed segment can change under `personal` at all, so
+  // `commitsChanged` cannot be true, the clause is dead rather than protective, and the right
+  // move is to DELETE both the clause and this case. Do not repair it into a passing test.
+  it('a durMin-only edit reaches the re-freeze line, and the belt keeps the ledger frozen (SB-149 must-fix 2)', async () => {
+    const before = await ADMIN('GET', '/api/state');
+    const frozen = before.json.commits.find((c) => c.key === KEY);
+    const target = before.json.entries.find((e) => e.id === 'e1-personal');
+    expect(frozen.snapshot[target.id]).toBeTruthy(); // the fixture is genuinely frozen money
+    expect(target.start).not.toBe(null); // the range branch of entryMatchKey is the one with the hole
+    expect(target.end).not.toBe(null);
+
+    // Only `durMin` moves. Same id, same date, same start/end, same label — so the row's
+    // `entryMatchKey` is byte-identical and the guard sees no change.
+    const edited = { ...target, durMin: 999 };
+    const put = await ADMIN('PUT', `/api/users/${USER_ID}/entries`, {
+      entries: before.json.entries.map((e) => (e.id === target.id ? edited : e)),
+    });
+    expect(put.status).toBe(200); // ← SB-164. Becomes 403 when it lands; see the note above.
+
+    const after = await ADMIN('GET', '/api/state');
+    // The write really landed, so the segment really was `affected` and `commitsChanged` really
+    // was true. Without this the snapshot assertion below could pass on a request that never got
+    // near the line it claims to cover.
+    expect(after.json.entries.find((e) => e.id === target.id).durMin).toBe(999);
+
+    // …and the belt held: the ledger was NOT re-frozen around the moved hours. This is the
+    // assertion that goes red if the `shapeOffReason` clause is dropped — the snapshot would
+    // re-derive and `billMin` would follow `durMin` instead of staying at the committed 60.
     const stillFrozen = after.json.commits.find((c) => c.key === KEY);
     expect(stillFrozen.snapshot).toEqual(frozen.snapshot);
   });

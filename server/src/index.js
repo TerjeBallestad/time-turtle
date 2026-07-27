@@ -1429,9 +1429,25 @@ app.put('/api/users/:id/entries', requireUser, requireAdmin, (req, res) => {
       // it protected does not exist in this shape — the Review surface that calls this route is
       // gated on `admin && identity`, and `identity` is false under `personal`.
       //
-      // So under `personal` this line is now unreachable-by-guard rather than load-bearing, and
-      // it stays as the belt to the guard's braces. Under `team` nothing changes: the re-freeze
-      // runs exactly as SDD-002 ruling 8 describes, proven in `tests/api.test.js`.
+      // THE `committing` CLAUSE IS LOAD-BEARING UNDER `personal` TODAY. An earlier version of
+      // this comment said the line was "unreachable-by-guard rather than load-bearing" now that
+      // the guard above exists. That was WRONG, and SB-164 is the standing counterexample:
+      // `TT.entryMatchKey` keys `range:<start>-<end>` and never reads `durMin` (`shared/core.js`),
+      // while `entryDiffers` above DOES compare `durMin` (`ENTRY_FIELDS`). So a PUT that changes
+      // only `durMin` on a frozen row passes `frozenEntryRefusal` untouched, marks its segment
+      // `affected`, sets `commitsChanged` — and arrives here. The `shapeOffReason` clause is the
+      // only thing that then stops the ledger being re-frozen around hours that moved while the
+      // frozen money did not, which is precisely the divergence DD-017 §2 exists to prevent.
+      //
+      // WHEN SB-164 LANDS, DELETE THIS CLAUSE AND ITS TEST — do not leave it as an untested belt.
+      // Once `durMin` is in the frozen key, every day of a committed segment is `readOnlyDay`
+      // under `personal` (`preCutover || frozenSegment`), so no entry in one can be changed,
+      // added, moved in or moved out without the guard refusing first — `commitsChanged` then
+      // genuinely cannot be true in this shape and the clause is dead code rather than a belt.
+      // `tests/shape-committing.test.js` carries the case that keeps it honest until then.
+      //
+      // Under `team` nothing changes: the re-freeze runs exactly as SDD-002 ruling 8 describes,
+      // proven in `tests/api.test.js`.
       if (commitsChanged && !TT.shapeOffReason('committing', activeShape())) store.putCommits(id, reFrozen);
       store.bumpEntriesVersion(id);
     });
