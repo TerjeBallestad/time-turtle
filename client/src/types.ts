@@ -69,6 +69,14 @@ export interface UiActions {
   /** SB-063: which characters the vault daily note writes between a start and an end time. */
   setVaultTimeSeparator: (separator: VaultTimeSeparator) => void;
   /**
+   * SB-127 / DD-021 + DD-022: "Adopt the note as-is" — the paused note's rows become TT's and
+   * the day syncs again. Offered on three refusals and no others; the row decides that with
+   * `TT.vaultAdoptable`, and the server gates the same way.
+   *
+   * ONE DIRECTION. There is no "keep TT's version" action here, now or later.
+   */
+  adoptVaultNote: (path: string) => void;
+  /**
    * SB-065/SB-085: clear the standing mirror refusal — consent for the next save to
    * overwrite whatever is on disk. Resolves false (and toasts) when the server said no.
    *

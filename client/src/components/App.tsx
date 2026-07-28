@@ -413,6 +413,26 @@ export function App() {
       })),
     setVaultTimeSeparator: (separator) =>
       updateState((current) => ({ ...current, settings: { ...current.settings, vaultTimeSeparator: separator } })),
+    // SB-127 / DD-021: adopt the paused note. The server imports its rows, re-signs the anchor
+    // and clears the quarantine — so entries, the quarantine list AND the entries version have
+    // all moved server-side by the time this resolves.
+    //
+    // A HARD RELOAD, and the alternative is worse rather than merely different. `load()` is what
+    // `chooseShape` does, but a shape switch does not bump the entries version: this one does
+    // (DD-001 design decision 10, so the client's next whole-set PUT cannot overwrite the import),
+    // so `load()` would hand useServerSync a fresh entries array to diff, PUT it with the version
+    // from before the adopt, take a 409, and land the user on "someone else saved first" — a
+    // sentence about a race that did not happen, on the one gesture DD-021 spent a click keeping
+    // calm. Re-baselining without the 409 means teaching useServerSync a second resync trigger,
+    // which is SB-118's under DD-019. A full reload is honest about what happened — the day's rows
+    // were rewritten under the user — and it is a recovery gesture pressed in Settings, not a hot
+    // path. Any unflushed edit is lost, exactly as it is on the 409 path this replaces.
+    adoptVaultNote: (path) => {
+      void api
+        .adoptVaultNote(path)
+        .then(() => window.location.reload())
+        .catch((err: Error) => toast(err.message));
+    },
     // SB-065/SB-085: consent to overwrite. The server adopts the bytes on disk as its stamp
     // and clears the block; nothing is written until the next save. Deliberately NOT a
     // reload — `load()` hands useServerSync a fresh object for every synced key, which would

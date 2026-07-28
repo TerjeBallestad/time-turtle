@@ -441,18 +441,45 @@ export interface MirrorBlock {
  * it is worse, because the vault IS the storage — a silently quarantined day is a day whose hours
  * stop syncing with no signal anywhere.
  *
- * There is deliberately NO resolution action. SB-103 (`[grill]`) owns what a human can DO about a
- * quarantine, and all three of its options are additive on top of this.
+ * SB-103 RULED THE RESOLUTION ACTION (DD-021, widened by DD-022) and SB-127 built it — the three
+ * count fields below are its whole wire cost. They are what lets the row state its price BEFORE
+ * the click: DD-021's `TT holds 4 entries · the note has 4.` The gesture itself is offered on
+ * `TT.vaultAdoptable(reason)` and nothing else; every other refusal still renders with no action
+ * control at all (DD-021 consequence 4), and for those the counts are `null`.
  */
 export interface VaultQuarantinedNote {
   /** absolute path of the note TT declined to write */
   path: string;
   /** the note's calendar date, `YYYY-MM-DD` */
   date: string;
-  /** a `VaultQuarantineReason` or `VaultArbitrationReason` — rendered through `TT.vaultQuarantineText` */
+  /** a `VaultQuarantineReason` — rendered through `TT.vaultQuarantineText` */
   reason: string;
   /** when this note FIRST quarantined; sticky, so it does not look new on every scan pass */
   detectedAt: string | null;
+  /**
+   * How many vault-bound entries TT's index holds for this date. `null` on a reason the adopt
+   * gesture is not offered on — not because the number is unavailable there, but because a lone
+   * "TT holds 4" beside a note nobody can act on is noise about a count nothing will change.
+   */
+  ttEntries: number | null;
+  /**
+   * How many rows the NOTE has, read with the digest stood down (DD-021's admission test is "TT
+   * can read the rows"). `null` on the same reasons as above, and there it is also literally
+   * unavailable: those are the refusals where nothing parses.
+   */
+  noteEntries: number | null;
+  /**
+   * How many rows TT holds that the note does NOT — the number the confirm names, and the one
+   * that decides whether there is a confirm at all.
+   *
+   * CONTENT, NOT LENGTH (DD-021 "drop **or change**", DD-022 rider 1). Matching counts on a
+   * reflow are genuinely benign; matching counts on a restore prove little, because the same
+   * number of hours logged differently is the ordinary case. `0` means every row TT holds
+   * survives the adopt — one click, no confirm. Anything above `0` is the count of rows that do
+   * not, and each of those is genuinely dropped from the index whether it was deleted or edited.
+   * Row identity is `TT.entryMatchKey`, the vault import's own row-identity function.
+   */
+  dropped: number | null;
 }
 
 // ---- vault block (SB-055 / SB-045) ----
@@ -559,10 +586,33 @@ export type VaultCatalogQuarantineReason =
   | 'catalog-unknown-section';
 
 /**
- * Every refusal TT's vault codecs can produce — what a boot scan records and surfaces, and the
- * one type it may switch on.
+ * DD-022: the refusals the ARBITRATION produces, as opposed to a codec. Members and their prose
+ * live in `VAULT_ARBITRATION_QUARANTINE_REASONS` (shared/core.js) and this type is derived from
+ * that array, the same way the block half above is and for SB-109's reason — the completeness
+ * guard imports the array instead of scraping this declaration.
+ *
+ * A THIRD HALF RATHER THAN TWO MORE BLOCK MEMBERS, because the refusal is about PROVENANCE, NOT
+ * READABILITY: `parse.quarantine` is false on both, the block reads perfectly and its digest
+ * matches its own table, and the verdict comes from comparing the note against an index. No codec
+ * golden can ever produce one. The full argument is on the array.
  */
-export type VaultQuarantineReason = VaultBlockQuarantineReason | VaultCatalogQuarantineReason;
+export type VaultArbitrationQuarantineReason =
+  (typeof import('./core.js').VAULT_ARBITRATION_QUARANTINE_REASONS)[number];
+
+/**
+ * Every refusal TT can record against a daily note — what a boot scan records and surfaces, and
+ * the one type it may switch on.
+ *
+ * THREE HALVES SINCE DD-022, joined the way SB-058 joined the second: the codec's block
+ * vocabulary, the catalog's, and the arbitration's. Each is proved by goldens the other two
+ * cannot own — daily-note refusals in tests/roundtrip.test.js, catalog refusals in
+ * tests/catalog.test.js, arbitration verdicts in tests/vault-arbitration.test.js — which is
+ * exactly why they are three declarations and not one flat list. Downstream sees no seam:
+ * `quarantine_reason` in the index and the Settings row switch on this single type, as they
+ * always did.
+ */
+export type VaultQuarantineReason =
+  VaultBlockQuarantineReason | VaultCatalogQuarantineReason | VaultArbitrationQuarantineReason;
 
 /**
  * The block was refused. `reason` is a stable code SB-057's boot scan can record and
@@ -755,7 +805,7 @@ export interface VaultIndexRow {
   fileSha: string | null;
   /** the block's DD-009 digest was present and matched; null when TT has not parsed the file */
   verified: boolean | null;
-  quarantineReason: VaultQuarantineReason | VaultArbitrationReason | null;
+  quarantineReason: VaultQuarantineReason | null;
   /**
    * When this path FIRST quarantined — sticky, and set only by `putVaultIndex`. `seenAt` moves on
    * every scan pass including the cheap skip, so it answers "when did TT last look", which is a
@@ -767,32 +817,6 @@ export interface VaultIndexRow {
   /** when TT last WROTE this path — the echo guard's other half */
   writtenAt: string | null;
 }
-
-/**
- * The two refusals the ARBITRATION can produce, as opposed to the codec (`VaultQuarantineReason`).
- * Deliberately a separate union: every member of the codec's unions has a refusal golden over a
- * note in tests/roundtrip.test.js or tests/catalog.test.js, and neither of these is producible by
- * a codec at all — they are verdicts about a file's revision compared against TT's own record, and
- * no note can be written that provokes one on its own.
- *
- * Both mean the same thing to a human: TT has stopped writing to this note and will not overwrite
- * what is in it.
- */
-export type VaultArbitrationReason =
-  /**
-   * The file went BACK to a revision TT recorded, carrying content TT did not write at that
-   * revision. SB-061's case: the deliberate `git restore` from the vault's checkpoint history, or
-   * another editor rewriting the block. Rewriting from the index here would silently undo the one
-   * recovery gesture that history exists to provide.
-   */
-  | 'external-rewrite'
-  /**
-   * The file's revision is LOWER than the index's and TT has no record of it — the regression is
-   * more than one revision back, or the index was rebuilt. Staleness cannot be PROVEN, and
-   * defaulting to a rewrite when it cannot be proven is the same silent undo as `external-rewrite`
-   * with less evidence behind it.
-   */
-  | 'unprovable-staleness';
 
 /** What the arbitration was told about the file on disk. Pure data — see server/src/vault-arbitrate.js. */
 export interface VaultArbitrationInput {
@@ -823,7 +847,7 @@ export interface VaultArbitrationInput {
  */
 export interface VaultArbitrationVerdict {
   verdict: 'skip' | 'import' | 'import-and-rewrite' | 'rewrite-from-index' | 'quarantine' | 'unknown';
-  reason?: VaultQuarantineReason | VaultArbitrationReason;
+  reason?: VaultQuarantineReason;
   /** the revision the resulting index row (and any write) should carry */
   rev?: number;
 }
@@ -1011,6 +1035,22 @@ export interface MirrorAcknowledgeResponse {
   path: string;
 }
 /**
+ * SB-127 — `POST /api/vault/adopt`, DD-021's gesture. The note's rows are now TT's, the anchor is
+ * re-signed at `rev`, and the day syncs again.
+ *
+ * `imported` is the note's row count, NOT the number that changed: the client has already been
+ * told the delta on the row it clicked (`VaultQuarantinedNote.dropped`), and re-deriving a second
+ * "what happened" number here from a state that has already moved is how the confirm and the
+ * outcome come to disagree about the same click.
+ */
+export interface VaultAdoptResponse {
+  ok: boolean;
+  path: string;
+  date: string;
+  rev: number;
+  imported: number;
+}
+/**
  * SB-095 — `GET /api/mirror/blocks`, admin only. Every standing mirror refusal on this
  * instance, the caller's own included.
  *
@@ -1079,6 +1119,12 @@ export interface TTModule {
   VAULT_QUARANTINE_FALLBACK: string;
   /** SB-057: why a note stopped syncing, as a sentence. Unknown reasons take the fallback. */
   vaultQuarantineText(reason: string | null | undefined): string;
+  /**
+   * DD-021 + DD-022 / SB-127: may a human adopt a note refused for this reason? The one home of
+   * the three-reason admission list — the server gates its endpoint on it and the Settings row
+   * decides whether to draw a control from the same answer. Unknown codes are `false`.
+   */
+  vaultAdoptable(reason: string | null | undefined): boolean;
   /**
    * SB-057 / DD-016 + DD-017: is this entry the vault's? A false answer means the entry lives in
    * SQLite and never reaches a daily note — and never triggers DD-012 adoption on its behalf.
@@ -1222,7 +1268,12 @@ export interface TTModule {
    * in hand. Width is `str.length`: UTF-16 code units, not code points and not display width.
    */
   vaultAlignedTable(rows: string[][]): string[];
-  locateVaultBlock(md: string, opts?: { heading?: string }): VaultBlockLocation;
+  /**
+   * `opts.adopt` is DD-021's gesture reaching the codec: a present-and-WRONG digest is reported
+   * as a digest-less block (`verified: false`, `digest: null`) instead of quarantining. Off by
+   * default and set only on the adopt path — a `true` on the save path would retire DD-009.
+   */
+  locateVaultBlock(md: string, opts?: { heading?: string; adopt?: boolean }): VaultBlockLocation;
   /**
    * SB-055: parse the located block into entries. The header row is the schema; any
    * SUBSET of the canonical-English vocabulary (`Time`, `Mode`, `Project`, `Task`,
@@ -1239,7 +1290,10 @@ export interface TTModule {
    * reads only; nothing is written. A missing bottom anchor is therefore no longer a refusal on
    * its own, and 'no-revision' is a `locateVaultBlock`-only verdict.
    */
-  parseVaultBlock(md: string, opts?: { heading?: string; date?: string; projects?: Project[] }): VaultBlockParseResult;
+  parseVaultBlock(
+    md: string,
+    opts?: { heading?: string; date?: string; projects?: Project[]; adopt?: boolean },
+  ): VaultBlockParseResult;
   /**
    * SB-055: the block's region bytes — the `## <heading>` line through the
    * `` `revision: N` `` line, no trailing newline. Header row always, totals row always
@@ -1281,6 +1335,7 @@ export interface TTModule {
       revision?: number;
       timeSeparator?: VaultTimeSeparator;
       projects?: Project[];
+      adopt?: boolean;
     },
   ): { md: string; quarantine: boolean; reason: VaultQuarantineReason | null; adopted: boolean };
   /**

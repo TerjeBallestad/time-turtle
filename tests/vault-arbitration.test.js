@@ -15,7 +15,11 @@
 // before the parser runs (DD-009 / design decision 6), so it arrives as an ordinary quarantine and
 // the matrix's only job is to carry the reason. It appears below as exactly that.
 import { describe, it, expect } from 'vitest';
-import TT from '../shared/core.js';
+import TT, {
+  VAULT_ADOPTABLE_QUARANTINE_REASONS,
+  VAULT_ARBITRATION_QUARANTINE_REASONS,
+  VAULT_BLOCK_QUARANTINE_REASONS,
+} from '../shared/core.js';
 import { arbitrate, describeVaultFile, fileSha } from '../server/src/vault-arbitrate.js';
 
 const HEADING = 'Time Log';
@@ -279,6 +283,48 @@ describe('the vault arbitration matrix', () => {
     expect(describeVaultFile(md, opts).payloadDigest).toBe(describeVaultFile(edited, opts).payloadDigest);
     // and the matrix agrees: the file changed, the block did not, so there is nothing to do
     expect(arbitrate({ file: describeVaultFile(edited, opts), index: indexFor(DAY_TWO, 2) }).verdict).toBe('skip');
+  });
+
+  it('covers every arbitration-only quarantine reason the matrix can produce', () => {
+    // DD-022's completeness guard, the third of a trio. tests/roundtrip.test.js keeps this over
+    // the BLOCK half of `VaultQuarantineReason` and tests/catalog.test.js over the catalog half;
+    // this one is the arbitration half's, and it is here rather than in either of those files
+    // because that is where the goldens are. Neither member can meet the block guard's demand —
+    // "emitted in shared/core.js AND carrying a codec refusal golden" — since no note can be
+    // written that provokes an arbitration verdict on its own. That is the whole reason DD-022
+    // made it a third union instead of two more members, and the reason this guard exists at all.
+    //
+    // IMPORTED, NOT SCRAPED (SB-109). The catalog guard reads its union out of shared/types.ts
+    // with a regex, and its own file records how that went silently vacuous the day the block half
+    // moved to a runtime array: the scrape matched zero members, `for (const reason of [])` ran no
+    // assertions, and the test stayed green while checking nothing. An import cannot go quiet.
+    expect(Array.isArray(VAULT_ARBITRATION_QUARANTINE_REASONS), 'the vocabulary is not an array').toBe(true);
+    expect(VAULT_ARBITRATION_QUARANTINE_REASONS.every((r) => typeof r === 'string' && /^[a-z][a-z-]*$/.test(r)), `not all reasons are reason codes: ${JSON.stringify(VAULT_ARBITRATION_QUARANTINE_REASONS)}`).toBe(true); // prettier-ignore
+    // Pinned, not `toBeGreaterThan(0)`, for the reason the block guard states: a pin turns "a
+    // reason was added" into a deliberate edit here, and makes a shrunken list red rather than
+    // quietly easier. DD-022 ruled exactly two, one per PLAN-012 decision 5 sub-case, so the
+    // Settings row can say which happened.
+    expect(VAULT_ARBITRATION_QUARANTINE_REASONS.length, 'the arbitration vocabulary changed size — add a matrix row, then update this pin').toBe(2); // prettier-ignore
+
+    // EVERY MEMBER IS PRODUCED BY A ROW OF THE TABLE ABOVE. A reason declared and never returned
+    // is a branch nobody has ever run — and, since these are what the Settings row switches on,
+    // one nobody has ever seen either.
+    const produced = new Set(cases.map((c) => arbitrate({ file: c.file(), index: c.index() }).reason));
+    for (const reason of VAULT_ARBITRATION_QUARANTINE_REASONS)
+      expect(produced.has(reason), `no arbitration-matrix row produces the reason: ${reason}`).toBe(true);
+
+    // AND THE ARBITRATION HALF MUST NOT QUIETLY ACQUIRE A CODEC REASON — the mirror image of the
+    // block guard's `catalog-` check. `digest-mismatch` is the one to watch: it is the reason this
+    // union sits next to in `VAULT_ADOPTABLE_QUARANTINE_REASONS`, and moving it here would make
+    // the matrix responsible for a verdict the locator owns (see this file's header).
+    for (const reason of VAULT_ARBITRATION_QUARANTINE_REASONS)
+      expect(VAULT_BLOCK_QUARANTINE_REASONS.includes(reason), `a codec reason leaked into the arbitration vocabulary: ${reason}`).toBe(false); // prettier-ignore
+
+    // DD-022's admission argument, as an assertion rather than a paragraph: the gesture is offered
+    // on BOTH of these, and on exactly one codec reason besides.
+    expect([...VAULT_ADOPTABLE_QUARANTINE_REASONS].sort()).toEqual(
+      ['digest-mismatch', ...VAULT_ARBITRATION_QUARANTINE_REASONS].sort(),
+    );
   });
 
   it('every verdict in the union is reachable from the table above', () => {

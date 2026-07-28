@@ -22,7 +22,7 @@ import { shapePreflight, strandingBannerLines } from './shape-preflight.js';
 // business knowing the vault is being watched, and the only thing this file does with it is start
 // it once the server is answering.
 import { startVaultSync, scanVault, vaultSyncConfig, forgetOwnWrites, setVaultRewriter } from './vault-sync.js';
-import { rewriteVaultDate, setVaultCheckpointHook } from './vault-write.js';
+import { adoptVaultDate, rewriteVaultDate, setVaultCheckpointHook, vaultAdoptDelta } from './vault-write.js';
 import { vaultCheckpoint } from './vault-checkpoint.js';
 
 // SB-057: the two arbitration verdicts that need a WRITE are handed back to the writer HERE, at
@@ -396,9 +396,15 @@ app.post('/api/users/:id/password', requireUser, requireAdmin, (req, res) => {
  *
  * The REASON CODE is carried raw and the wording is resolved on the surface
  * (`TT.vaultQuarantineText`), which is what lets SB-090 move a reason without touching the wire.
+ *
+ * `userId` is SB-127's: DD-021's delta counts compare the note against the rows the INDEX holds
+ * for that day, and those are somebody's. Under `personal` there is exactly one somebody (DD-006
+ * consequence 1) — it is threaded rather than assumed so this reads the same as every other
+ * per-user field in `stateFor`.
+ * @param {number} userId
  * @returns {import('../../shared/types.ts').VaultQuarantinedNote[]}
  */
-function vaultQuarantinedNotes() {
+function vaultQuarantinedNotes(userId) {
   // GATED ON THE SHAPE, and this is a privacy check rather than an optimisation. Every other field
   // in `stateFor` is either stripped for employees, scoped to `user.id`, or admin-gated; this one
   // would hand any authenticated caller the absolute filesystem paths of the vault owner's daily
@@ -414,6 +420,12 @@ function vaultQuarantinedNotes() {
       date: row.date,
       reason: String(row.quarantineReason || ''),
       detectedAt: row.quarantinedAt ?? null,
+      // SB-127 / DD-021: the price of adopting, stated on the row BEFORE the click. Computed and
+      // never asserted — `entries` carries `date` and all three admitting reasons parse, so both
+      // numbers are real. It reads the note, which is why it is gated inside `vaultAdoptDelta` on
+      // the reason being adoptable: on a quiet install this list is empty and nothing is read at
+      // all, and on the reasons the gesture is not offered on there is nothing to count.
+      ...vaultAdoptDelta(userId, row.path, row.date, row.quarantineReason),
     }));
 }
 /**
@@ -485,7 +497,7 @@ function stateFor(user) {
     // silently quarantined day is a day whose hours stop syncing with no signal anywhere. Read-only
     // and additive; empty under `team`, which has no vault. No resolution ACTION — SB-103 rules
     // what a human may do about one, and every option there is additive on top of this.
-    vaultQuarantined: vaultQuarantinedNotes(),
+    vaultQuarantined: vaultQuarantinedNotes(user.id),
     // SB-133: `wireSettings()`, never `store.getSettings()` — the defaulted `shape` must not
     // leave the server, because the client PUTs this object straight back.
     settings: wireSettings(),
@@ -1113,7 +1125,7 @@ app.put('/api/state', requireUser, (req, res) => {
     mirrorBlocked: mirrorBlockFor(req.user),
     // SB-085's lesson, one shape over: the save that TRIPS a quarantine is the moment the client
     // should learn about it, not the next reload.
-    vaultQuarantined: vaultQuarantinedNotes(),
+    vaultQuarantined: vaultQuarantinedNotes(req.user.id),
   });
 });
 
@@ -1200,6 +1212,41 @@ app.post('/api/mirror/acknowledge', requireUser, (req, res) => {
   const path = mirrorPath(target);
   const cleared = acknowledgeMirrorBlock(path);
   res.json({ ok: true, cleared, path });
+});
+
+// ---- SB-127 / DD-021 + DD-022: the one thing a human can do about a paused note ----
+//
+// "Adopt the note as-is." The note's rows win and TT's index is rewritten from them, because
+// under `vault` SQLite is the DERIVED side (DD-006). There is deliberately no counterpart: no
+// "keep TT's version", not on this route and not on another one. DD-021 settled that and DD-022
+// declined to reopen it — TT may overwrite what it can read and prove stale (`rewrite-from-index`,
+// an arbitration verdict), and it may never overwrite what it has REFUSED.
+//
+// ONE ROUTE, THREE ADMITTING REASONS (DD-022 binding consequence 2), gated in `adoptVaultDate` on
+// `TT.vaultAdoptable` — the same list the Settings row draws its control from, so the button and
+// the endpoint cannot come to disagree about which refusals are actionable.
+//
+// SAME SHAPE GATE AS `vaultQuarantinedNotes`, and for the same reason it is a privacy check: the
+// body is an absolute path inside the vault owner's own vault. Under `personal` there is exactly
+// one user (DD-006 consequence 1), so the caller IS the owner; under `team` there is no vault and
+// nothing to adopt. `requireUser` and no admin gate — the one user here is not an administrator
+// of anybody.
+//
+// THE PATH IS MATCHED AGAINST THE INDEX, never resolved from the body. `adoptVaultDate` looks the
+// row up and refuses anything that is not a currently-quarantined note, so an arbitrary path in
+// the body reaches no filesystem call at all.
+app.post('/api/vault/adopt', requireUser, (req, res) => {
+  if (activeShape() !== 'personal') return res.status(403).json({ error: 'adopting a note needs the personal shape' });
+  const path = req.body && req.body.path;
+  if (typeof path !== 'string' || !path) return res.status(400).json({ error: 'path is required' });
+  const row = store.listVaultIndex().find((candidate) => candidate.path === path);
+  if (!row) return res.status(404).json({ error: 'no such note' });
+  const result = adoptVaultDate(req.user.id, row.path, row.date);
+  // 409, not 500: every refusal here is "the world moved" — the note un-quarantined between the
+  // render and the click, or its bytes changed and it no longer reads. The client re-reads state
+  // either way, and a 500 would put a server fault's wording on a race.
+  if (!result.ok) return res.status(409).json({ error: result.error });
+  res.json({ ok: true, path: row.path, date: row.date, rev: result.rev, imported: result.imported });
 });
 
 // SB-095: the cross-user READ that makes the line above reachable. `GET /api/state` reports

@@ -1,6 +1,6 @@
 import React from 'react';
 import TT from '../../i18n';
-import { SectionLabel, SegToggle, Select, Input } from '../../ds';
+import { Button, SectionLabel, SegToggle, Select, Input } from '../../ds';
 import st from './settings.module.css';
 import type { AppState, Shape, VaultPaths, VaultQuarantinedNote, VaultTimeSeparator } from '../../../../shared/types';
 import type { UiActions } from '../../types';
@@ -79,6 +79,100 @@ function whenLocal(iso: string): string {
 }
 
 /**
+ * SB-127 / DD-021 + DD-022: the one gesture a paused note gets.
+ *
+ * OFFERED ON THREE REFUSALS AND NO OTHERS, decided by `TT.vaultAdoptable` — the same predicate the
+ * server gates its endpoint on, so the button and the endpoint cannot come to disagree about which
+ * refusals are actionable. Every other reason renders with NO CONTROL AT ALL rather than a
+ * disabled one (DD-021 consequence 4): there is nothing for a person to press, and a greyed button
+ * says there is.
+ *
+ * ONE DIRECTION. There is no "keep Time Turtle's version" button beside this one and there is not
+ * going to be one. Under `vault` SQLite is the derived index (DD-006), so that button would be an
+ * in-place rewrite onto a file Time Turtle has just said it cannot read — the shape SB-065/DD-011
+ * refused for the mirror in capitals, and the thing DD-021 killed permanently.
+ *
+ * THE COUNTS ARE ALWAYS THERE; THE CONFIRM IS NOT. The label cannot tell a reflow from a restore —
+ * if it could, the note would not be paused — but the row CAN state the price, so the click is
+ * uninformed only when it is also harmless. `dropped === 0` is one click. Anything else names the
+ * number and asks once, in the shape MirrorSection already established one screen over: a warning
+ * line, a danger confirm, a ghost cancel.
+ *
+ * `dropped` IS ABOUT CONTENT, NOT LENGTH, and the server computes it that way (DD-021 "drop **or
+ * change**", DD-022 rider 1). Matching counts on a reflow are genuinely benign; matching counts on
+ * a restore prove nothing, because the same number of hours logged differently is the ordinary
+ * case. So `4 · 4` on this row does not imply one click, and must not be read as if it did.
+ *
+ * ADOPTING DOES NOT DAMAGE THE NOTE, and the confirm says so where a reader will meet it rather
+ * than here. The table already parses; the rows that go away go away from Time Turtle's INDEX, the
+ * derived side. That is why there is no checkpoint, no backup copy and no rename-first anywhere on
+ * this path — DD-021 refuses the ceremony by name.
+ */
+function AdoptRow({ note, ui }: { note: VaultQuarantinedNote; ui: UiActions }) {
+  const [confirming, setConfirming] = React.useState(false);
+  if (!TT.vaultAdoptable(note.reason)) return null;
+  const dropped = note.dropped ?? 0;
+  const counts =
+    note.ttEntries == null || note.noteEntries == null
+      ? null
+      : TT.t('Time Turtle holds ') +
+        note.ttEntries +
+        ' ' +
+        TT.t(note.ttEntries === 1 ? 'entry' : 'entries') +
+        ' · ' +
+        TT.t('the note has ') +
+        note.noteEntries +
+        '.';
+  const adopt = () => ui.adoptVaultNote(note.path);
+  return (
+    <>
+      {counts && <div className={st.mirrorBlockMeta}>{counts}</div>}
+      {confirming ? (
+        <>
+          <div className={st.mirrorBlockWarn}>
+            {TT.t('Adopting takes this note’s rows exactly as they stand. ') +
+              dropped +
+              ' ' +
+              TT.t(
+                dropped === 1
+                  ? 'entry Time Turtle holds is not in the note, and adopting drops it'
+                  : 'entries Time Turtle holds are not in the note, and adopting drops them',
+              ) +
+              TT.t(
+                ' — from Time Turtle’s index, not from the note. Nothing in the note is removed: Time Turtle re-signs its revision line and starts writing the day again.',
+              )}
+          </div>
+          <div className={st.mirrorBlockActions}>
+            <Button variant="danger" size="sm" data-tt="vault-adopt-confirm" onClick={adopt}>
+              {TT.t('Adopt the note as-is')}
+            </Button>
+            <Button variant="ghost" size="sm" onClick={() => setConfirming(false)}>
+              {TT.t('cancel')}
+            </Button>
+          </div>
+        </>
+      ) : (
+        <div className={st.mirrorBlockActions}>
+          <Button
+            variant="secondary"
+            size="sm"
+            data-tt="vault-adopt"
+            onClick={() => (dropped ? setConfirming(true) : adopt())}
+          >
+            {dropped
+              ? TT.t('Adopt — ') +
+                dropped +
+                ' ' +
+                TT.t(dropped === 1 ? 'entry will be dropped' : 'entries will be dropped')
+              : TT.t('Adopt the note as-is')}
+          </Button>
+        </div>
+      )}
+    </>
+  );
+}
+
+/**
  * SB-057 task 8: the daily notes Time Turtle has stopped writing to.
  *
  * STICKY STATE A PERSON CAN SEE, not a log line — modelled on `mirrorBlocked`, which is the shape
@@ -86,8 +180,11 @@ function whenLocal(iso: string): string {
  * to write leaves the file drifting while it still LOOKS current). Under `personal` it is worse,
  * because the vault IS the storage.
  *
- * NO ACTION BUTTON, deliberately. SB-103 (`[grill]`) owns what a human can DO about a quarantine,
- * and all three of its options are additive on top of this. Shipping a button here would rule it.
+ * SB-127 ADDED THE ACTION SB-057 DELIBERATELY LEFT OUT. That omission was correct at the time and
+ * said so: SB-103 owned what a human could DO about a quarantine, and shipping a button before it
+ * was ruled would have ruled it. It was ruled — DD-021, widened by DD-022 — and `AdoptRow` above
+ * is that ruling. Everything SB-057 built here is untouched; the gesture is purely additive, which
+ * is what both decisions' first binding consequence requires.
  *
  * THE WORDING NEVER SAYS THE HOURS WERE CORRUPTED. Two of the commonest reasons are not damage —
  * an adopted note's missing digest (SB-091 rider 3) and a table editor reflowing cell padding
@@ -96,7 +193,7 @@ function whenLocal(iso: string): string {
  * SB-090 is open and will move reason names, and a row that renders nothing for an unfamiliar code
  * is a note that silently stops syncing, which is the whole failure this surface exists to prevent.
  */
-function QuarantinedNotes({ notes }: { notes: VaultQuarantinedNote[] }) {
+function QuarantinedNotes({ notes, ui }: { notes: VaultQuarantinedNote[]; ui: UiActions }) {
   if (!notes.length) return null;
   return (
     <div className={st.mirrorBlock} data-tt="vault-quarantined">
@@ -115,6 +212,7 @@ function QuarantinedNotes({ notes }: { notes: VaultQuarantinedNote[] }) {
             {note.detectedAt ? ' · ' + TT.t('paused') + ' ' + whenLocal(note.detectedAt) : ''}
           </div>
           <div className={st.mirrorBlockBody}>{TT.t(TT.vaultQuarantineText(note.reason))}</div>
+          <AdoptRow note={note} ui={ui} />
         </div>
       ))}
     </div>
@@ -196,7 +294,7 @@ export function VaultSection({ state, ui }: SettingsProps) {
           {/* Under the paths, because that is where "which files" already lives, and a paused note
               is a fact ABOUT those files. Above the separator, because it is the one thing on this
               screen that needs doing something about. */}
-          <QuarantinedNotes notes={state.vaultQuarantined ?? []} />
+          <QuarantinedNotes notes={state.vaultQuarantined ?? []} ui={ui} />
           <div className={st.mirror}>
             <div className={st.mirrorRow}>
               <span className={[st.label, st.mirrorLabel, st.vaultLabel].join(' ')}>{TT.t('Time separator')}</span>

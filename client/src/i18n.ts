@@ -110,6 +110,32 @@ const NO: Record<string, string> = {
     'dette notatet gikk tilbake til en tidligere revisjon med innhold Time Turtle ikke skrev — en gjenoppretting fra historikken, eller en annen redigerer.',
   'this note’s revision is older than the one Time Turtle recorded, and Time Turtle has no record of it — so it cannot tell an out-of-date copy from a deliberate restore.':
     'revisjonen i dette notatet er eldre enn den Time Turtle har notert, og Time Turtle har ingen oppføring av den — så den kan ikke skille en utdatert kopi fra en bevisst gjenoppretting.',
+  // SB-127 / DD-021 + DD-022: the adopt gesture. Same discipline as the reasons above — nothing
+  // here says corrupted, invalid or broken, in either language, because nothing is. `Overta` and
+  // not `adoptere`: this is Norwegian for taking something over, and it is already the verb the
+  // mirror's own consent uses one section along.
+  //
+  // THE COUNTS AND THE DROP COUNT ARE INTERPOLATED AROUND THESE KEYS, so each fragment has to
+  // stand on its own with a number either side of it. That is why the trailing spaces are inside
+  // the keys — the same shape `'detected '` and `'last written by Time Turtle '` already take in
+  // MirrorSection — and why the singular and plural halves are separate keys rather than one
+  // string with a placeholder: Norwegian agreement is not English's, and a `{n}` template would
+  // have committed both languages to English's.
+  'Time Turtle holds ': 'Time Turtle har ',
+  entry: 'oppføring',
+  entries: 'oppføringer',
+  'the note has ': 'notatet har ',
+  'Adopt the note as-is': 'Overta notatet slik det er',
+  'Adopt — ': 'Overta — ',
+  'entry will be dropped': 'oppføring blir forkastet',
+  'entries will be dropped': 'oppføringer blir forkastet',
+  'Adopting takes this note’s rows exactly as they stand. ': 'Å overta tar radene i notatet nøyaktig slik de står. ',
+  'entry Time Turtle holds is not in the note, and adopting drops it':
+    'oppføring Time Turtle har ligger ikke i notatet, og å overta forkaster den',
+  'entries Time Turtle holds are not in the note, and adopting drops them':
+    'oppføringer Time Turtle har ligger ikke i notatet, og å overta forkaster dem',
+  ' — from Time Turtle’s index, not from the note. Nothing in the note is removed: Time Turtle re-signs its revision line and starts writing the day again.':
+    ' — fra Time Turtles indeks, ikke fra notatet. Ingenting i notatet fjernes: Time Turtle signerer revisjonslinjen på nytt og begynner å skrive dagen igjen.',
   // SB-098 item 4: the first-run question (ShapeChoice.tsx). SHAPE LANGUAGE IN BOTH LANGUAGES —
   // never `sqlite`, never `vault` as an engine name. DD-015's point is that an install chooses
   // what it IS and the storage falls out of that, and someone opening Time Turtle for the first

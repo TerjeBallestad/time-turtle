@@ -374,9 +374,14 @@ export function applyVerdict(path, date, verdict, ctx) {
  * ONE `getEntries` CALL FEEDS BOTH HALVES — the split is by date, so the same read that supplies
  * the other days supplies the day's existing rows. Inside the transaction, so the rows matched
  * against are the rows replaced.
+ *
+ * EXPORTED FOR SB-127. DD-021's adopt gesture is an import a human asked for rather than one a
+ * scan decided on, and it lands here for the same reasons the scan's does — the whole-collection
+ * replace, the id preservation, the version bump that stops the client's next PUT overwriting it.
+ * A second copy in the writer would be a second answer to "what does importing a day mean".
  * @param {number} userId @param {string} date @param {Entry[]} entries
  */
-function importEntries(userId, date, entries) {
+export function importEntries(userId, date, entries) {
   db.transaction(() => {
     const held = db.getEntries(userId);
     const others = held.filter((entry) => entry.date !== date);

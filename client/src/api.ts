@@ -13,6 +13,7 @@ import type {
   ProjectRenameResponse,
   ShapeChoiceResponse,
   TeamReportResponse,
+  VaultAdoptResponse,
   Shape,
   User,
   Settings,
@@ -100,6 +101,16 @@ export const api = {
    * plus the `userId` each block needs for `acknowledgeMirror`.
    */
   mirrorBlocks: () => request<MirrorBlocksResponse>('GET', '/api/mirror/blocks'),
+  /**
+   * SB-127 / DD-021 + DD-022 — "Adopt the note as-is": the paused note's rows win and TT's index
+   * is rewritten from them. Keyed by PATH, which is what the Settings row already holds and what
+   * the server matches against `vault_index` — nothing here resolves a filesystem path.
+   *
+   * There is no counterpart call and there is not going to be one. "Keep TT's version" would be
+   * an in-place rewrite onto a file TT has refused; DD-021 killed it and DD-022 declined to
+   * reopen it.
+   */
+  adoptVaultNote: (path: string) => request<VaultAdoptResponse>('POST', '/api/vault/adopt', { path }),
   listUsers: () => request<UsersResponse>('GET', '/api/users'),
   createUser: (u: UserCreateRequest) => request<UserResponse>('POST', '/api/users', u),
   deleteUser: (id: number) => request<OkResponse>('DELETE', '/api/users/' + id),

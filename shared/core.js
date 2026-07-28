@@ -1280,6 +1280,81 @@ export const VAULT_BLOCK_QUARANTINE_REASONS = /** @type {const} */ ([
   'write-would-corrupt',
 ]);
 /**
+ * Every way the ARBITRATION can refuse a daily note — DD-022's third half of
+ * `VaultQuarantineReason`, beside the block half above and the catalog half in shared/types.ts.
+ *
+ * WHY THIS IS A UNION OF ITS OWN AND NOT TWO MORE MEMBERS ABOVE: the refusal is about
+ * PROVENANCE, NOT READABILITY. `parse.quarantine` is false on both of these — the block reads
+ * perfectly and its digest matches its own table. The verdict comes from comparing the note
+ * against TT's index, so no note can be written that provokes one and no codec golden can ever
+ * produce one. tests/roundtrip.test.js's guard demands of every member above that it be emitted
+ * in THIS file and carry a codec refusal golden, and neither of these can meet either half. That
+ * is the wall SB-058 hit joining the catalog half; this is the same remedy. These two are proved
+ * by ARBITRATION-MATRIX rows, and their completeness guard lives beside them in
+ * tests/vault-arbitration.test.js.
+ *
+ * SO THEY ARE EMITTED IN server/src/vault-arbitrate.js, NOT HERE. That is the one thing that
+ * differs from the vocabulary above, and it is the whole reason the split exists.
+ *
+ * A RUNTIME ARRAY, for SB-109's reason: the guard IMPORTS this rather than scraping a `.ts`
+ * declaration with a regex, and prose cannot lie to an import. The catalog half still scrapes,
+ * and tests/catalog.test.js records how that scrape went silently vacuous once already.
+ */
+export const VAULT_ARBITRATION_QUARANTINE_REASONS = /** @type {const} */ ([
+  /**
+   * PLAN-012 decision 5 (b). The file went BACK to a revision TT recorded, carrying content TT
+   * did not write at that revision. SB-061's case: the deliberate `git restore` from the vault's
+   * checkpoint history, or another editor rewriting the block. Rewriting from the index here
+   * would silently undo the one recovery gesture that history exists to provide.
+   */
+  'external-rewrite',
+  /**
+   * PLAN-012 decision 5 (c). The file's revision is LOWER than the index's and TT has no record
+   * of it — the regression is more than one revision back, or the index was rebuilt. Staleness
+   * cannot be PROVEN, and defaulting to a rewrite when it cannot be proven is the same silent
+   * undo as 'external-rewrite' with less evidence behind it.
+   */
+  'unprovable-staleness',
+]);
+/**
+ * The reasons DD-021's adopt gesture is offered on, and NO others.
+ *
+ * ONE CONTROL, ONE CODE PATH, THREE ADMITTING REASONS (DD-022 binding consequence 2) — not two
+ * gestures that look alike. DD-021 ruled the first; DD-022 widened it to the two arbitration
+ * sub-cases twenty-one minutes later and named SB-127 as the carrier of both.
+ *
+ * THE ADMISSION TEST IS "TT CAN READ THE ROWS", and it is why the list is these three and not
+ * thirteen. On 'no-table', 'unknown-header', 'unparseable-time', 'row-cell-count',
+ * 'bad-bill-cell', 'multiple-headings' and 'unexpected-content-in-block' there is nothing to
+ * import — the gesture would have no data to act on. 'malformed-revision' and
+ * 'crlf-line-endings' are excluded DELIBERATELY rather than by oversight: TT could bound those
+ * blocks, but adopting them is a REPAIR, and SB-083 ruled that TT refuses either way and repairs
+ * neither.
+ *
+ * THE TWO ARBITRATION REASONS PASS THAT TEST MORE CLEANLY THAN THE ONE IT WAS WRITTEN FOR
+ * (DD-022). On a rev regression the block parses AND its digest matches its own table — it is
+ * internally consistent. On 'digest-mismatch' it is not: TT is importing rows it has itself
+ * flagged as possibly damaged. The weaker case got the gesture; the stronger one cannot be
+ * denied it.
+ *
+ * ONE HOME, because both ends read it: the server gates `POST /api/vault/adopt` on this and the
+ * Settings row decides whether to render a control at all from the same list. DD-021 consequence
+ * 4 is that every OTHER reason renders with no action control whatsoever — not a disabled one,
+ * because a greyed button implies there is something for a human to press.
+ */
+export const VAULT_ADOPTABLE_QUARANTINE_REASONS = /** @type {const} */ ([
+  'digest-mismatch', // DD-021
+  'external-rewrite', // DD-022 (b)
+  'unprovable-staleness', // DD-022 (c)
+]);
+/**
+ * May a human adopt a note refused for this reason? Never throws; an unknown code is `false`,
+ * which is the safe direction — an unfamiliar reason renders as a legible refusal with no
+ * button, exactly like the ten reasons that are meant to.
+ * @param {string | null | undefined} reason @returns {boolean}
+ */
+TT.vaultAdoptable = (reason) => VAULT_ADOPTABLE_QUARANTINE_REASONS.some((known) => known === reason);
+/**
  * @param {import('./types.ts').VaultQuarantineReason} reason
  * @returns {{ quarantine: true, reason: import('./types.ts').VaultQuarantineReason }}
  */
@@ -1400,7 +1475,11 @@ function vaultAnchorScan(lines, fenced, heading) {
 }
 /**
  * Locate the vault block in a note, or refuse. Never throws.
- * @param {string} md @param {{ heading?: string }} [opts]
+ *
+ * `opts.adopt` IS THE HUMAN HAVING PRESSED "Adopt the note as-is" (DD-021), and it is the only
+ * thing in this file that can stand a present-and-wrong digest down. See the digest step at the
+ * bottom for what it does and what it deliberately does not do.
+ * @param {string} md @param {{ heading?: string, adopt?: boolean }} [opts]
  * @returns {import('./types.ts').VaultBlockLocation}
  */
 TT.locateVaultBlock = function (md, opts) {
@@ -1491,9 +1570,24 @@ TT.locateVaultBlock = function (md, opts) {
   //     is resolved" holds without a second check anywhere.
   //   • ABSENT               → verified: false. Parses, unverified, NEVER quarantined
   //     (DD-009 consequence 2) — the back-compat and hand-made-block path.
-  const verified = digest != null;
+  //
+  // AND UNDER `opts.adopt`, THE SECOND CASE BECOMES THE THIRD (DD-021). A human has pressed
+  // "Adopt the note as-is" on this exact note, which is the one thing that can answer the
+  // question the digest asks and TT cannot: *is this table what you meant?* So a wrong digest is
+  // reported as a digest-LESS block rather than refused — `verified: false`, `digest: null`, the
+  // shape DD-009 consequence 2 already defines as "parses, unverified, never quarantined". No
+  // second notion of half-trust enters the codec.
+  //
+  // THREE THINGS IT DELIBERATELY DOES NOT DO. It does not touch a digest that MATCHES: a correct
+  // anchor is still correct, and the two arbitration reasons DD-022 admits arrive here with one.
+  // It does not stand down any OTHER refusal — a block adoption cannot read is a block adoption
+  // may not overrule, which is the same rule `vaultAdoptionCandidate` keeps for 'no-revision'.
+  // And it defaults OFF, reached only from the adopt endpoint: a `true` that leaked onto the save
+  // path would retire DD-009 entirely and silently.
   const payloadLines = [lines[headerLine], lines[separatorLine]].concat(rowLines.map((ln) => lines[ln]));
-  if (verified && digest !== vaultPayloadDigest(payloadLines)) return vaultQuarantine('digest-mismatch');
+  const mismatch = digest != null && digest !== vaultPayloadDigest(payloadLines);
+  if (mismatch && !(opts && opts.adopt)) return vaultQuarantine('digest-mismatch');
+  const verified = digest != null && !mismatch;
 
   return {
     quarantine: false,
@@ -1511,7 +1605,11 @@ TT.locateVaultBlock = function (md, opts) {
         : -1,
     revisionLine,
     revision,
-    digest,
+    // A STOOD-DOWN DIGEST IS REPORTED AS ABSENT, not as the wrong token it was. This field's own
+    // contract is "the digest as found, or null on a digest-less line", and a region is only ever
+    // returned when it is null or MATCHES — handing back a token that describes other bytes would
+    // break that for every reader downstream, `verified` included.
+    digest: mismatch ? null : digest,
     verified,
   };
 };
@@ -1552,7 +1650,13 @@ TT.locateVaultBlock = function (md, opts) {
 // (they DO carry `## Time Log` and a well-shaped table — it is `Cat`/`Description` failing the
 // vocabulary that keeps SB-049 closed, not the heading).
 /**
- * @param {string} md @param {{ heading?: string }} [opts]
+ * DD-021 ADDED NO BRANCH HERE, and that is worth saying because it looks like the natural place
+ * for one. The adopt gesture's digest case never reaches this function's body: `opts.adopt` makes
+ * the locator RETURN the region (digest-less) instead of refusing, so the guard below sees
+ * `!loc.quarantine` and declines — there is no missing anchor to synthesise, only a wrong one to
+ * re-sign, and `writeVaultBlock`'s ordinary splice is what re-signs it. Two ways to adopt would
+ * be two things called adoption.
+ * @param {string} md @param {{ heading?: string, adopt?: boolean }} [opts]
  * @returns {string | null} the note with the missing anchor inserted — an INPUT to the parse,
  *   never bytes for disk — or null when adoption does not apply.
  */
@@ -1620,7 +1724,7 @@ const BILL_YES = '✓'; // U+2713. SB-045: `✓` or blank — never `—`, and n
  * adoption-aware entry point is `TT.parseVaultBlock` below, which is this function plus the
  * DD-012 pre-step; everything that must not adopt twice — the adoption candidate's own
  * validation, and `writeVaultBlock`'s output gate — calls this one.
- * @param {string} md @param {{ heading?: string, date?: string, projects?: Project[] }} [opts]
+ * @param {string} md @param {{ heading?: string, date?: string, projects?: Project[], adopt?: boolean }} [opts]
  * @returns {import('./types.ts').VaultBlockParseResult}
  */
 function parseAnchoredBlock(md, opts) {
@@ -1730,7 +1834,7 @@ function parseAnchoredBlock(md, opts) {
  * exactly the hand-made-block path it was written for — already reports it. Forcing it here as
  * well would be a second lock on the same door, and two rules that merely agree today is the
  * drift this file keeps unifying away.
- * @param {string} md @param {{ heading?: string, date?: string, projects?: Project[] }} [opts]
+ * @param {string} md @param {{ heading?: string, date?: string, projects?: Project[], adopt?: boolean }} [opts]
  * @returns {import('./types.ts').VaultBlockParseResult}
  */
 TT.parseVaultBlock = function (md, opts) {
@@ -2042,7 +2146,7 @@ TT.serializeVaultBlock = function (entries, opts) {
  * `(rev, hash)` in SB-057's index at all — a genuinely new arbitration row, not a variant of an
  * existing one — and inferring that from an empty index entry is a weaker signal than being told.
  * @param {string} md @param {VaultEntry[]} entries
- * @param {{ heading?: string, date?: string, headers?: string[], revision?: number, timeSeparator?: VaultTimeSeparator, projects?: Project[] }} [opts]
+ * @param {{ heading?: string, date?: string, headers?: string[], revision?: number, timeSeparator?: VaultTimeSeparator, projects?: Project[], adopt?: boolean }} [opts]
  * @returns {{ md: string, quarantine: boolean, reason: import('./types.ts').VaultQuarantineReason | null, adopted: boolean }}
  */
 TT.writeVaultBlock = function (md, entries, opts) {

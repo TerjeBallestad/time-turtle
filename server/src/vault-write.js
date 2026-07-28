@@ -75,7 +75,7 @@ import * as db from './db.js';
 import { activeShape } from './backend.js';
 import { writeVaultFile } from './vault-fs.js';
 import { fileSha } from './vault-arbitrate.js';
-import { classifyVaultFile, noteOwnWrite, readNoteForWrite, vaultSyncConfig } from './vault-sync.js';
+import { classifyVaultFile, importEntries, noteOwnWrite, readNoteForWrite, vaultSyncConfig } from './vault-sync.js';
 
 /** @typedef {import('../../shared/types.ts').Entry} Entry */
 /** @typedef {import('../../shared/types.ts').VaultIndexRow} VaultIndexRow */
@@ -283,20 +283,35 @@ function sameIgnoringTableFraming(a, b, opts) {
 /**
  * One date. Read the note, splice TT's block into it, and write only if that changed anything.
  *
- * `revisionOverride` is what makes this the ONLY write path in this module. The arbitration's
- * `rev` is authoritative on the two verdicts that reach `rewriteVaultDate` — the file is known to
- * be wrong there, so re-deriving the counter from it would put the two in disagreement — and every
+ * `over.revision` is what makes this the ONLY write path in this module. The arbitration's `rev`
+ * is authoritative on the two verdicts that reach `rewriteVaultDate` — the file is known to be
+ * wrong there, so re-deriving the counter from it would put the two in disagreement — and every
  * other caller derives it from the note. A second copy of this body is how the quarantine
  * recording, the `unread` gate and the checkpoint hook drift apart one fix at a time.
+ *
+ * `over.adopt` (SB-127) is the one flag that reaches the CODEC rather than this function: it makes
+ * `TT.locateVaultBlock` report a present-and-wrong digest as a digest-less block instead of
+ * refusing, so DD-021's gesture can re-sign an anchor the writer would otherwise bounce. It rides
+ * in the same options object as the revision because the two always travel together — an adopt
+ * that did not also force `index.rev + 1` is DD-022 rider 2's silent undo — and `adoptVaultDate`
+ * below is its ONLY caller. Everything else leaves it unset, which is DD-009 intact.
  * @param {string} date @param {Entry[]} entries @param {string} path
  * @param {NonNullable<ReturnType<typeof vaultSyncConfig>>} config
  * @param {{ written: string[], skipped: string[], refused: { date: string, reason: string }[] }} report
- * @param {number} [revisionOverride]
+ * @param {{ revision?: number, adopt?: boolean }} [over]
  */
-function writeOneDate(date, entries, path, config, report, revisionOverride) {
+function writeOneDate(date, entries, path, config, report, over) {
+  const revisionOverride = over && over.revision != null ? over.revision : null;
+  const adopt = !!(over && over.adopt);
   const row = db.getVaultIndex(path);
   const eligibility = writeEligibility(path, row);
-  if (eligibility === 'quarantined') {
+  // ADOPT IS THE ONE THING THAT PASSES THIS GATE, and only because the gate is what it is FOR:
+  // `writeEligibility` says "TT has refused this note and must leave it exactly as it is", and a
+  // human pressing "Adopt the note as-is" is precisely the authority that withdraws the refusal.
+  // `adoptVaultDate` has already cleared the row off `quarantined` before calling, so in practice
+  // this branch is not reached on the adopt path at all; the condition is here so that a row that
+  // re-quarantined between the two steps cannot silently turn the gesture into a no-op.
+  if (eligibility === 'quarantined' && !adopt) {
     report.refused.push({ date, reason: row && row.quarantineReason ? row.quarantineReason : 'quarantined' });
     return;
   }
@@ -335,6 +350,12 @@ function writeOneDate(date, entries, path, config, report, revisionOverride) {
     date,
     timeSeparator: config.timeSeparator,
     projects: config.projects,
+    // SB-127: threaded into EVERY codec call below, not just the splice. The locator runs three
+    // times on this path (the revision probe, the diff's serialize-and-compare, and the splice's
+    // own re-locate) and a flag set on some of them would make the three disagree about whether
+    // the block is readable — which is how the diff would answer "unchanged" about a note the
+    // splice then refused.
+    adopt,
   };
   // The revision TT is about to write. A located block's counter plus one; a note with no block
   // yet — brand new, or being adopted — starts at 1, which is what DD-012 says a first write does
@@ -434,14 +455,18 @@ function writeOneDate(date, entries, path, config, report, revisionOverride) {
  * It writes the INDEX's rows for that date, which is the point: for `rewrite-from-index` the file
  * is provably one revision behind and its rows are TT's own older ones, and for
  * `import-and-rewrite` the file's rows have just been imported, so the index is already current.
+ *
+ * SB-127 added `over` and the RETURN, for `adoptVaultDate`: the adopt gesture is the third caller
+ * and the only one with a human waiting on a response, so it needs the refusal rather than a log
+ * line. The two arbitration verdicts ignore both, exactly as before — nobody is watching them.
  * @param {number} userId @param {string} date @param {number} rev
+ * @param {{ adopt?: boolean }} [over]
+ * @returns {{ written: string[], skipped: string[], refused: { date: string, reason: string }[] } | undefined}
  */
-export function rewriteVaultDate(userId, date, rev) {
+export function rewriteVaultDate(userId, date, rev, over) {
   const config = vaultSyncConfig();
   if (!config) return;
-  const settings = db.getSettings();
-  const context = { shape: activeShape(), vaultCutover: settings.vaultCutover, commits: db.getCommits(userId) };
-  const entries = db.getEntries(userId).filter((entry) => entry.date === date && TT.vaultBound(entry, context));
+  const entries = vaultBoundEntries(userId, date);
   const path = join(config.dailyDir, date + '.md');
   /** @type {{ written: string[], skipped: string[], refused: { date: string, reason: string }[] }} */
   const report = { written: [], skipped: [], refused: [] };
@@ -449,7 +474,7 @@ export function rewriteVaultDate(userId, date, rev) {
     // `rev` comes from the arbitration and is the revision the FILE should end up at, so it is
     // passed as the override rather than re-derived: on this path the note is known to be wrong,
     // and deriving the counter from it would put the writer and the arbitration in disagreement.
-    writeOneDate(date, entries, path, config, report, rev);
+    writeOneDate(date, entries, path, config, report, { revision: rev, adopt: !!(over && over.adopt) });
   } catch (err) {
     console.error(`[time-turtle] vault rewrite failed for ${date}: ${/** @type {Error} */ (err).message}`);
   }
@@ -458,4 +483,166 @@ export function rewriteVaultDate(userId, date, rev) {
   for (const refusal of report.refused)
     console.error(`[time-turtle] vault rewrite refused for ${refusal.date}: ${refusal.reason}`);
   if (report.written.length) console.log(`[time-turtle] vault rewrite: ${date} → revision ${rev}`);
+  return report;
+}
+
+/**
+ * The entries a daily note for this date may carry — the index's rows for that day, through the
+ * DD-016/DD-017 filter. Hoisted because SB-127's delta counts have to compare against EXACTLY the
+ * set the writer would write, and a second `getEntries().filter(...)` spelled beside it is how
+ * "TT holds 4" comes to mean a different four than the four that get written.
+ * @param {number} userId @param {string} date @returns {Entry[]}
+ */
+function vaultBoundEntries(userId, date) {
+  const settings = db.getSettings();
+  const context = { shape: activeShape(), vaultCutover: settings.vaultCutover, commits: db.getCommits(userId) };
+  return db.getEntries(userId).filter((entry) => entry.date === date && TT.vaultBound(entry, context));
+}
+
+/**
+ * What adopting this note would cost, in rows — DD-021's delta counts, computed server-side
+ * because only the server can read the note.
+ *
+ * WHAT COUNTS AS A MATCHING ROW: `TT.entryMatchKey`, the vault import's own row-identity function
+ * (TERM-018, DD-008 rule 3's join over the fields a daily note can carry). Reused rather than
+ * defined again here, which is the point — `preserveEntryIds` already answers "is this parsed row
+ * the row the index holds?" on the import path, and a second answer to that question on the adopt
+ * path is two definitions of the same word. It is deliberately blind to mode and the passthrough
+ * columns, because the SQLite index has no column for either; see its own comment.
+ *
+ * `dropped` IS A MULTISET DIFFERENCE, TT MINUS NOTE — the rows TT holds that the note does not.
+ * COUNTS ARE NOT THE TEST (DD-021 "drop **or change**", DD-022 rider 1): the same number of hours
+ * logged differently is the ordinary restore, so `4 → 4` proves nothing on its own. Terje's live
+ * case is one row on each side, `10:30→12:00` against `10:30→20:00`, and it must come back
+ * `dropped: 1` — matching counts, one row lost, the confirm fires.
+ *
+ * Multiset, not set: two identical rows on one day are two rows, and adopting a note that has one
+ * of them drops one. `preserveEntryIds` treats duplicates the same way, for the same reason.
+ *
+ * NULLS ON EVERY REASON THE GESTURE IS NOT OFFERED ON. There the note does not parse (that IS the
+ * refusal, on ten of the thirteen), so there is no second number to compare against — and a lone
+ * "TT holds 4" beside a note nobody can act on is noise.
+ * @param {number} userId @param {string} path @param {string} date @param {string | null} reason
+ * @returns {{ ttEntries: number | null, noteEntries: number | null, dropped: number | null }}
+ */
+export function vaultAdoptDelta(userId, path, date, reason) {
+  const none = { ttEntries: null, noteEntries: null, dropped: null };
+  const config = vaultSyncConfig();
+  if (!config || !TT.vaultAdoptable(reason)) return none;
+  /** @type {string | null} */
+  let current;
+  try {
+    current = readNoteForWrite(path);
+  } catch {
+    // A note TT cannot READ has no counts to state. Not an error and not surfaced as one: the
+    // quarantine row is still legible without them, and this runs on every `/api/state`.
+    return none;
+  }
+  // Absent, likewise. `readNoteForWrite` answers null for ENOENT, and a note that is gone has no
+  // rows — this is NOT the DD-012 empty-string case, which is about a day TT is creating.
+  if (current == null) return none;
+  const parsed = TT.parseVaultBlock(current, {
+    heading: config.heading,
+    date,
+    projects: config.projects,
+    // The same stand-down the adopt itself uses, and it has to be here too or the ONE reason
+    // DD-021 was written for could never be counted — a `digest-mismatch` note refuses to parse
+    // under the ordinary flag, which is exactly why it is quarantined.
+    adopt: true,
+  });
+  if (parsed.quarantine) return none;
+  const held = vaultBoundEntries(userId, date);
+  /** @type {Map<string, number>} */
+  const inNote = new Map();
+  for (const entry of parsed.entries) {
+    const key = TT.entryMatchKey({ .../** @type {any} */ (entry), date });
+    inNote.set(key, (inNote.get(key) || 0) + 1);
+  }
+  let dropped = 0;
+  for (const entry of held) {
+    const key = TT.entryMatchKey(entry);
+    const left = inNote.get(key) || 0;
+    if (left > 0) inNote.set(key, left - 1);
+    else dropped++;
+  }
+  return { ttEntries: held.length, noteEntries: parsed.entries.length, dropped };
+}
+
+/**
+ * DD-021's gesture, and DD-022's: the human has said this note is right. Take its rows into the
+ * index, re-sign its anchor, and let the day sync again.
+ *
+ * ONE DIRECTION ONLY. Adopt means the NOTE's rows win and the index is rewritten from them —
+ * under `vault` SQLite is the derived side (DD-006). There is no "keep TT's version" counterpart
+ * and there is not going to be one: DD-021 killed it, DD-022 declined to reopen it, and
+ * `rewrite-from-index` stays an arbitration verdict about a file TT can read and prove stale,
+ * never a button on a file TT has refused. Do not grow this function a second direction.
+ *
+ * ADOPT IS NOT DESTRUCTIVE TO THE VAULT, which is why there is no checkpoint, no backup copy and
+ * no rename-first here. The table already parses; TT re-emits the rows it just read and replaces
+ * the revision line. The rows that go away go away from TT's INDEX, the derived side. Anyone
+ * adding a ceremony to this write should read DD-021 first — it is refused there by name.
+ *
+ * THE ORDER MATTERS. Import first, then clear the quarantine, then write: the writer writes the
+ * INDEX's rows for the date (that is what `rewriteVaultDate` does), so importing second would
+ * write TT's old rows straight back over the note the human just adopted — the silent undo this
+ * whole gesture exists to prevent, arriving through the gesture itself.
+ * @param {number} userId @param {string} path @param {string} date
+ * @returns {{ ok: boolean, error?: string, rev?: number, imported?: number }}
+ */
+export function adoptVaultDate(userId, path, date) {
+  const config = vaultSyncConfig();
+  if (!config) return { ok: false, error: 'no vault configured' };
+  const row = db.getVaultIndex(path);
+  if (!row || row.state !== 'quarantined') return { ok: false, error: 'that note is not paused' };
+  if (!TT.vaultAdoptable(row.quarantineReason))
+    return { ok: false, error: `a ${row.quarantineReason} refusal has no rows to adopt` };
+
+  /** @type {string | null} */
+  let current;
+  try {
+    current = readNoteForWrite(path);
+  } catch (err) {
+    return { ok: false, error: /** @type {Error} */ (err).message };
+  }
+  // There is nothing to adopt from a note that is no longer there — and creating one from TT's
+  // index would be "keep TT's version" wearing the adopt button's label.
+  if (current == null) return { ok: false, error: 'that note is no longer there' };
+  const parsed = TT.parseVaultBlock(current, {
+    heading: config.heading,
+    date,
+    projects: config.projects,
+    adopt: true,
+  });
+  // The admission test is "TT can read the rows", and this is where it is actually taken rather
+  // than inferred from the reason code. A row whose reason says adoptable but whose note will not
+  // parse today — the bytes moved between the scan and the click — is refused, not guessed at.
+  if (parsed.quarantine) return { ok: false, error: `the note no longer reads: ${parsed.reason}` };
+
+  // THE COUNTER JUMPS AND NEVER REWINDS (DD-022 rider 2). Re-anchoring at the FILE's own revision
+  // is the SB-061 failure this gesture exists to prevent: on a regression the file's counter is
+  // behind the index's, so the peer machine's higher-rev copy would win the next arbitration and
+  // silently undo the restore the human just accepted. `max` rather than `index.rev` alone so the
+  // rule also holds the one time they are the other way round — a stale index row against a note
+  // written on another machine — and so a row that has never recorded a revision (a note that
+  // quarantined on TT's first ever sight of it) still lands somewhere sane. Accepted visible cost,
+  // stated in the ruling: the number in the line Terje reads daily can jump.
+  const rev = Math.max(row.rev == null ? 0 : row.rev, parsed.revision == null ? 0 : parsed.revision) + 1;
+
+  importEntries(userId, date, parsed.entries);
+  // Cleared BEFORE the write, because `writeEligibility` refuses a quarantined row and the whole
+  // point of the gesture is that the refusal is withdrawn. `unknown` and not `known`: TT has not
+  // written this file yet, and the write below is what earns the `known` row it ends on.
+  db.putVaultIndex(
+    /** @type {VaultIndexRow} */ ({
+      ...row,
+      state: 'unknown',
+      quarantineReason: null,
+      seenAt: new Date().toISOString(),
+    }),
+  );
+  const report = rewriteVaultDate(userId, date, rev, { adopt: true });
+  if (report && report.refused.length) return { ok: false, error: report.refused[0].reason };
+  console.log(`[time-turtle] vault adopt: ${date} → revision ${rev}, ${parsed.entries.length} rows from the note`);
+  return { ok: true, rev, imported: parsed.entries.length };
 }
