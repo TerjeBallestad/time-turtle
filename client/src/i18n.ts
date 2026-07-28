@@ -16,8 +16,16 @@ const NO: Record<string, string> = {
   // `sqlite | vault`, derived from the shape and never selected — so the one place the word
   // reached a user named the concept it specifically does not mean. This section configures the
   // markdown MIRROR, which is the word the rest of the surface already uses (Mirror folder,
-  // "mirror paused"), and `speil` is its established Norwegian.
-  'Markdown mirror': 'Markdown-speil',
+  // "mirror paused").
+  //
+  // `Markdown mirror` is deliberately NOT translated (Terje, 2026-07-27), so there is no key for
+  // it here and it falls through TT.t untouched. The rule, in his words: a compound that welds an
+  // English word to a Norwegian one — `Markdown-speil` — is naming ONE specific concept in two
+  // languages at once, and the concept is what goes blurry. Keep the term whole and English; let
+  // the surrounding Norwegian do the explaining. So `Speilmappe` in the body directly beneath this
+  // heading is correct and stays: the English term names the thing, the Norwegian words describe
+  // it. `speil`/`speiling` likewise remain the Norwegian for the standalone Mirror section and for
+  // the ACT of mirroring — those are ordinary words, not this term.
   // SB-056 / SB-100: the vault settings surface.
   // SB-056 / DD-008 / DD-011: the two capability refusals. The English side of these keys is
   // TT.shapeOffReason's text VERBATIM (shared/core.js) — the server puts the same string in
@@ -129,7 +137,7 @@ const NO: Record<string, string> = {
   'A team install keeps SQLite as the source of truth and mirrors every save to markdown. A personal install is one person, with an Obsidian vault as the source of truth instead.':
     'En laginstallasjon har SQLite som fasit og speiler hver lagring til markdown. En personlig installasjon er én person, med et Obsidian-hvelv som fasit i stedet.',
   'The personal shape is not finished: the markdown mirror is off (the files it wrote are retired), committing is off until weekly notes land, and markdown paste-back is off. Daily notes DO sync — hours you log here are written into them, and edits made elsewhere are read back.':
-    'Den personlige formen er ikke ferdig: markdown-speilet er av (filene det skrev er pensjonert), innsending er av til ukenotater kommer, og markdown-tilbakeliming er av. Dagsnotatene synkroniseres — timer du fører her skrives inn i dem, og endringer gjort andre steder leses tilbake.',
+    'Den personlige formen er ikke ferdig: markdown mirror er av (filene den skrev er pensjonert), innsending er av til ukenotater kommer, og markdown-tilbakeliming er av. Dagsnotatene synkroniseres — timer du fører her skrives inn i dem, og endringer gjort andre steder leses tilbake.',
   'Vault folder': 'Hvelvmappe',
   'e.g. ~/Obsidian/ballestad': 'f.eks. ~/Obsidian/ballestad',
   'the vault root — every path below is relative to it.': 'roten i hvelvet — alle stiene under er relative til den.',
@@ -291,9 +299,9 @@ const NO: Record<string, string> = {
   'This timesheet changed while you were editing — reloaded. Re-apply your correction.':
     'Denne timelisten ble endret mens du redigerte — hentet på nytt. Gjør korrigeringen på nytt.',
   saved: 'lagret',
-  'Saved to server + markdown mirror': 'Lagret til server + markdown-speil',
+  'Saved to server + markdown mirror': 'Lagret til server + markdown mirror',
   'Mirror folder': 'Speilmappe',
-  'markdown mirror failed: ': 'markdown-speil feilet: ',
+  'markdown mirror failed: ': 'markdown mirror feilet: ',
   'server default — e.g. ~/Obsidian/vault/timesheets': 'serverstandard — f.eks. ~/Obsidian/vault/timelister',
   'every save writes timesheet-<user>.md here — point it at a cloud-synced folder (Obsidian, Dropbox…). Empty uses the server default.':
     'hver lagring skriver timesheet-<bruker>.md hit — pek på en skysynket mappe (Obsidian, Dropbox…). Tom bruker serverstandarden.',
