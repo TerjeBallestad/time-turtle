@@ -420,11 +420,12 @@ function vaultQuarantinedNotes(userId) {
       date: row.date,
       reason: String(row.quarantineReason || ''),
       detectedAt: row.quarantinedAt ?? null,
-      // SB-127 / DD-021: the price of adopting, stated on the row BEFORE the click. Computed and
-      // never asserted — `entries` carries `date` and all three admitting reasons parse, so both
-      // numbers are real. It reads the note, which is why it is gated inside `vaultAdoptDelta` on
-      // the reason being adoptable: on a quiet install this list is empty and nothing is read at
-      // all, and on the reasons the gesture is not offered on there is nothing to count.
+      // SB-127 / DD-021: whether the gesture is on offer, and the price of taking it, stated on
+      // the row BEFORE the click. Both come from ONE call and one read of the note, so the flag
+      // and the counts cannot disagree — `adoptable: true` arrives with real numbers or not at
+      // all. It reads the note, which is why the reason is checked first inside `vaultAdoptDelta`:
+      // on a quiet install this list is empty and nothing is read, and on the ten refusals the
+      // gesture is not admitted on there is nothing to count.
       ...vaultAdoptDelta(userId, row.path, row.date, row.quarantineReason),
     }));
 }

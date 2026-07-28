@@ -441,13 +441,16 @@ export interface MirrorBlock {
  * it is worse, because the vault IS the storage — a silently quarantined day is a day whose hours
  * stop syncing with no signal anywhere.
  *
- * SB-103 RULED THE RESOLUTION ACTION (DD-021, widened by DD-022) and SB-127 built it — the three
- * count fields below are its whole wire cost. They are what lets the row state its price BEFORE
- * the click: DD-021's `TT holds 4 entries · the note has 4.` The gesture itself is offered on
- * `TT.vaultAdoptable(reason)` and nothing else; every other refusal still renders with no action
- * control at all (DD-021 consequence 4), and for those the counts are `null`.
+ * SB-103 RULED THE RESOLUTION ACTION (DD-021, widened by DD-022) and SB-127 built it — the four
+ * fields below are its whole wire cost. They are what lets the row state its price BEFORE the
+ * click: DD-021's `TT holds 4 entries · the note has 4.` Whether it is offered at all is
+ * `adoptable`, which the server decides — an admitting reason AND a note it could actually read;
+ * everything else renders with no action control at all (DD-021 consequence 4) and no counts.
  */
-export interface VaultQuarantinedNote {
+export type VaultQuarantinedNote = VaultQuarantinedNoteRow & (VaultAdoptOffered | VaultAdoptNotOffered);
+
+/** The part of a paused note's row that is true whether or not the gesture is on offer. */
+export interface VaultQuarantinedNoteRow {
   /** absolute path of the note TT declined to write */
   path: string;
   /** the note's calendar date, `YYYY-MM-DD` */
@@ -456,18 +459,32 @@ export interface VaultQuarantinedNote {
   reason: string;
   /** when this note FIRST quarantined; sticky, so it does not look new on every scan pass */
   detectedAt: string | null;
+}
+
+/**
+ * The gesture is on offer AND its price is known — the only shape the control may render from.
+ *
+ * THE FLAG AND THE COUNTS ARE ONE ANSWER, NOT TWO, and the union is what makes that
+ * unforgeable: there is no value of this type carrying `adoptable: true` with a count missing,
+ * so no reader can default an absent price to a free one. That was a live defect — the client
+ * read `dropped ?? 0`, which turned "TT could not price this" into "this costs nothing" and
+ * dropped both halves of DD-021's bargain (the counts are ALWAYS stated; the confirm fires
+ * WHENEVER adopting is lossy) on every path where the note momentarily would not read.
+ */
+export interface VaultAdoptOffered {
   /**
-   * How many vault-bound entries TT's index holds for this date. `null` on a reason the adopt
-   * gesture is not offered on — not because the number is unavailable there, but because a lone
-   * "TT holds 4" beside a note nobody can act on is noise about a count nothing will change.
+   * SERVER-DECIDED, and only the server can decide it: `TT.vaultAdoptable(reason)` is necessary
+   * but not sufficient, because the price is only knowable by READING the note. `true` means
+   * both — an adoptable reason and a note that read and parsed when the row was built.
    */
-  ttEntries: number | null;
+  adoptable: true;
+  /** How many vault-bound entries TT's index holds for this date. */
+  ttEntries: number;
   /**
    * How many rows the NOTE has, read with the digest stood down (DD-021's admission test is "TT
-   * can read the rows"). `null` on the same reasons as above, and there it is also literally
-   * unavailable: those are the refusals where nothing parses.
+   * can read the rows").
    */
-  noteEntries: number | null;
+  noteEntries: number;
   /**
    * How many rows TT holds that the note does NOT — the number the confirm names, and the one
    * that decides whether there is a confirm at all.
@@ -479,7 +496,24 @@ export interface VaultQuarantinedNote {
    * not, and each of those is genuinely dropped from the index whether it was deleted or edited.
    * Row identity is `TT.entryMatchKey`, the vault import's own row-identity function.
    */
-  dropped: number | null;
+  dropped: number;
+}
+
+/**
+ * The gesture is NOT on offer — the row is still rendered and still legible, with no control.
+ *
+ * TWO CAUSES, ONE SHAPE, deliberately. Either the refusal is one of the ten with no rows to adopt
+ * (`TT.vaultAdoptable` is false), or the reason admits the gesture but TT could not read the note
+ * to price it — gone, unreadable, or no longer parsing. They collapse here because they have the
+ * same consequence for a human: `adoptVaultDate` refuses every one of those states too, so a
+ * control offered on them would be a button that cannot work. DD-021 consequence 4 is that the
+ * answer to "no action available" is NO CONTROL, never a disabled or an unpriced one.
+ */
+export interface VaultAdoptNotOffered {
+  adoptable: false;
+  ttEntries: null;
+  noteEntries: null;
+  dropped: null;
 }
 
 // ---- vault block (SB-055 / SB-045) ----

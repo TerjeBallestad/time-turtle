@@ -459,24 +459,30 @@ function writeOneDate(date, entries, path, config, report, over) {
  * SB-127 added `over` and the RETURN, for `adoptVaultDate`: the adopt gesture is the third caller
  * and the only one with a human waiting on a response, so it needs the refusal rather than a log
  * line. The two arbitration verdicts ignore both, exactly as before — nobody is watching them.
+ *
+ * `failed` IS THE THROW, RECORDED RATHER THAN ONLY LOGGED. `writeOneDate` reports every refusal it
+ * DECIDES on, but an exception out of the filesystem is not a decision and left no trace in the
+ * report at all — so a caller reading `refused` could not tell a write that failed from a write
+ * that happened. It is the same log line as before plus a field the one waiting caller can read.
  * @param {number} userId @param {string} date @param {number} rev
  * @param {{ adopt?: boolean }} [over]
- * @returns {{ written: string[], skipped: string[], refused: { date: string, reason: string }[] } | undefined}
+ * @returns {{ written: string[], skipped: string[], refused: { date: string, reason: string }[], failed: string | null } | undefined}
  */
 export function rewriteVaultDate(userId, date, rev, over) {
   const config = vaultSyncConfig();
   if (!config) return;
   const entries = vaultBoundEntries(userId, date);
   const path = join(config.dailyDir, date + '.md');
-  /** @type {{ written: string[], skipped: string[], refused: { date: string, reason: string }[] }} */
-  const report = { written: [], skipped: [], refused: [] };
+  /** @type {{ written: string[], skipped: string[], refused: { date: string, reason: string }[], failed: string | null }} */
+  const report = { written: [], skipped: [], refused: [], failed: null };
   try {
     // `rev` comes from the arbitration and is the revision the FILE should end up at, so it is
     // passed as the override rather than re-derived: on this path the note is known to be wrong,
     // and deriving the counter from it would put the writer and the arbitration in disagreement.
     writeOneDate(date, entries, path, config, report, { revision: rev, adopt: !!(over && over.adopt) });
   } catch (err) {
-    console.error(`[time-turtle] vault rewrite failed for ${date}: ${/** @type {Error} */ (err).message}`);
+    report.failed = /** @type {Error} */ (err).message;
+    console.error(`[time-turtle] vault rewrite failed for ${date}: ${report.failed}`);
   }
   // Said out loud, because this path runs from a scan and not from a save — nobody is watching a
   // response for it, so silence here is a note that quietly stops being corrected.
@@ -500,8 +506,21 @@ function vaultBoundEntries(userId, date) {
 }
 
 /**
- * What adopting this note would cost, in rows — DD-021's delta counts, computed server-side
- * because only the server can read the note.
+ * WHETHER the adopt gesture is on offer for this note, and what it would cost in rows — DD-021's
+ * delta counts, computed server-side because only the server can read the note.
+ *
+ * IT ANSWERS BOTH QUESTIONS BECAUSE THEY ARE ONE QUESTION. `TT.vaultAdoptable(reason)` is
+ * necessary and not sufficient: the reason says the refusal ADMITS the gesture, and only reading
+ * the note says whether it can actually be performed. Every path below that cannot produce counts
+ * is a path where `adoptVaultDate` refuses too — no config, the read threw, the note is gone, the
+ * note no longer parses — so `adoptable: false` there is not a caution, it is the truth about what
+ * pressing the button would do. That correspondence is the invariant: this function and
+ * `adoptVaultDate` take the SAME admission test, one on the render and one on the click.
+ *
+ * SO THE CALLER GETS ONE ANSWER, NOT A FLAG BESIDE THREE MAYBE-NUMBERS. `VaultAdoptOffered` and
+ * `VaultAdoptNotOffered` are a union for that reason (shared/types.ts): the surface cannot render
+ * a control from a row that has no price, because there is no such value to render from. The
+ * client used to read `dropped ?? 0` and turn an unpriced row into a free one-click adopt.
  *
  * WHAT COUNTS AS A MATCHING ROW: `TT.entryMatchKey`, the vault import's own row-identity function
  * (TERM-018, DD-008 rule 3's join over the fields a daily note can carry). Reused rather than
@@ -519,14 +538,15 @@ function vaultBoundEntries(userId, date) {
  * Multiset, not set: two identical rows on one day are two rows, and adopting a note that has one
  * of them drops one. `preserveEntryIds` treats duplicates the same way, for the same reason.
  *
- * NULLS ON EVERY REASON THE GESTURE IS NOT OFFERED ON. There the note does not parse (that IS the
- * refusal, on ten of the thirteen), so there is no second number to compare against — and a lone
- * "TT holds 4" beside a note nobody can act on is noise.
+ * NOT OFFERED ON EVERY REASON THE GESTURE IS NOT ADMITTED ON. There the note does not parse (that
+ * IS the refusal, on ten of the thirteen), so there is no second number to compare against — and a
+ * lone "TT holds 4" beside a note nobody can act on is noise.
  * @param {number} userId @param {string} path @param {string} date @param {string | null} reason
- * @returns {{ ttEntries: number | null, noteEntries: number | null, dropped: number | null }}
+ * @returns {import('../../shared/types.ts').VaultAdoptOffered | import('../../shared/types.ts').VaultAdoptNotOffered}
  */
 export function vaultAdoptDelta(userId, path, date, reason) {
-  const none = { ttEntries: null, noteEntries: null, dropped: null };
+  /** @type {import('../../shared/types.ts').VaultAdoptNotOffered} */
+  const none = { adoptable: false, ttEntries: null, noteEntries: null, dropped: null };
   const config = vaultSyncConfig();
   if (!config || !TT.vaultAdoptable(reason)) return none;
   /** @type {string | null} */
@@ -534,8 +554,10 @@ export function vaultAdoptDelta(userId, path, date, reason) {
   try {
     current = readNoteForWrite(path);
   } catch {
-    // A note TT cannot READ has no counts to state. Not an error and not surfaced as one: the
-    // quarantine row is still legible without them, and this runs on every `/api/state`.
+    // A note TT cannot READ cannot be adopted — `adoptVaultDate` returns the read error on the
+    // same file — so the row is legible and carries no control rather than an unpriced one. Not
+    // surfaced as an error of its own: a permissions blip on a synced folder is not a statement
+    // about the note's CONTENT, and this runs on every `/api/state`.
     return none;
   }
   // Absent, likewise. `readNoteForWrite` answers null for ENOENT, and a note that is gone has no
@@ -565,7 +587,7 @@ export function vaultAdoptDelta(userId, path, date, reason) {
     if (left > 0) inNote.set(key, left - 1);
     else dropped++;
   }
-  return { ttEntries: held.length, noteEntries: parsed.entries.length, dropped };
+  return { adoptable: true, ttEntries: held.length, noteEntries: parsed.entries.length, dropped };
 }
 
 /**
@@ -642,7 +664,40 @@ export function adoptVaultDate(userId, path, date) {
     }),
   );
   const report = rewriteVaultDate(userId, date, rev, { adopt: true });
-  if (report && report.refused.length) return { ok: false, error: report.refused[0].reason };
+  // SUCCESS IS "THE NOTE WAS WRITTEN", NOT "NOTHING WAS REFUSED". Gating on `refused` alone could
+  // not see a write that THREW: an EACCES out of the atomic temp-write — the vault folder held for
+  // a moment by a sync client, a full disk — leaves `refused` and `written` both empty, so the
+  // gesture reported `ok` for a note it never touched. The anchor still carried the old digest, so
+  // the day re-quarantined on the very next scan while the human had been told it was resolved.
+  //
+  // `written` IS A SOUND TEST AND `skipped` IS NOT A LEGITIMATE OUTCOME HERE. `rev` is
+  // `max(index, file) + 1`, so it is always above the note's own counter, so the block TT
+  // serializes always differs from the file by at least the revision line — neither the diff nor
+  // the raw compare in `writeOneDate` can answer "unchanged" on this path. A skip means something
+  // is wrong, and it must not read as a success.
+  //
+  // THE HALF THAT IS ALREADY DURABLE IS SAID OUT LOUD. Import-first is required (see THE ORDER
+  // MATTERS above), so by the time a write can fail the note's rows are already in the index and
+  // the quarantine is already cleared. What did not happen is the one thing the gesture exists to
+  // do — re-sign the anchor — and the error says which half stands rather than implying neither.
+  //
+  // AND THE PAUSED ROW GOES BACK ON THE SURFACE. Clearing it first is forced, but leaving it
+  // cleared after a write that did not happen takes the day OFF the screen at the moment a human
+  // most needs it there: the note is still unwritten, still carries an anchor describing bytes
+  // that are not in it, and the next scan re-quarantines it anyway — so the only thing the gap
+  // buys is a stretch of time where the error message and the Settings surface disagree. Restored
+  // to the row exactly as it stood, so a retry is the same press. Skipped when `writeOneDate`
+  // recorded a quarantine of its OWN: that is a newer verdict about the same note, and putting the
+  // old reason back over it would be this function overwriting a fresher reading with a stale one.
+  if (!report || !report.written.includes(date)) {
+    const after = db.getVaultIndex(path);
+    if (!after || after.state !== 'quarantined') db.putVaultIndex(row);
+    const why = report && report.refused.length ? report.refused[0].reason : report && report.failed;
+    return {
+      ok: false,
+      error: `${why || 'the note was not written'} — the note’s rows are in the index, but the note itself was not rewritten`,
+    };
+  }
   console.log(`[time-turtle] vault adopt: ${date} → revision ${rev}, ${parsed.entries.length} rows from the note`);
   return { ok: true, rev, imported: parsed.entries.length };
 }

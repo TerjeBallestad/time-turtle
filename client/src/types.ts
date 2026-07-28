@@ -70,8 +70,9 @@ export interface UiActions {
   setVaultTimeSeparator: (separator: VaultTimeSeparator) => void;
   /**
    * SB-127 / DD-021 + DD-022: "Adopt the note as-is" — the paused note's rows become TT's and
-   * the day syncs again. Offered on three refusals and no others; the row decides that with
-   * `TT.vaultAdoptable`, and the server gates the same way.
+   * the day syncs again. Offered on three refusals and no others, AND only where the note read
+   * well enough to be priced; `VaultQuarantinedNote.adoptable` carries both, decided server-side,
+   * and the endpoint takes the same admission test again on the click.
    *
    * ONE DIRECTION. There is no "keep TT's version" action here, now or later.
    */

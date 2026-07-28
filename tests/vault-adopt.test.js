@@ -1,5 +1,7 @@
-// SB-127 — DD-021's adopt gesture, widened by DD-022. Two rungs in one file, because it is one
-// gesture: the codec change that makes it possible (pure) and the whole thing end to end (api).
+// SB-127 — DD-021's adopt gesture, widened by DD-022. Three rungs in one file, because it is one
+// gesture: the codec change that makes it possible (pure), the whole thing end to end (api), and
+// the admission test on its own (module) — the last because every state it turns on is one the
+// scan reconciles within a debounce, so a live server can only race them.
 //
 // WHAT THIS FILE CANNOT PROVE, and it is the half that matters most: that a person can SEE the
 // button and press it. A green api test here is exactly the failure SB-063 is this repo's example
@@ -13,8 +15,8 @@
 // count has to get right or the confirm is decoration.
 //
 // ## Verified red-green: 2026-07-28
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+import { describe, it, expect, beforeAll, beforeEach, afterEach, afterAll } from 'vitest';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, chmodSync, rmSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import TT, { VAULT_ADOPTABLE_QUARANTINE_REASONS, VAULT_BLOCK_QUARANTINE_REASONS } from '../shared/core.js';
@@ -353,7 +355,8 @@ describe('adopting a paused note (api)', () => {
     expect(await until(async () => (await paused(date)) != null)).toBe(true);
     const row = await paused(date);
     expect(row.reason).toBe('no-table');
-    // no numbers on a row nobody can act on
+    // not on offer, and no numbers on a row nobody can act on
+    expect(row.adoptable).toBe(false);
     expect(row.ttEntries).toBe(null);
     expect(row.noteEntries).toBe(null);
     expect(row.dropped).toBe(null);
@@ -364,6 +367,86 @@ describe('adopting a paused note (api)', () => {
     expect(read(date)).toBe(prose); // and the note is exactly where it was
     expect((await paused(date)).reason).toBe('no-table');
   });
+
+  // ------------------------------------------------------------------------------------------
+  // The two failure edges. Both were shipped wrong once and both are silent by nature: the human
+  // is TOLD the day is fixed, which is the one thing this gesture must never say falsely.
+  // ------------------------------------------------------------------------------------------
+
+  it('a write that FAILS is not a success — the note is untouched and the response says which half stands', async () => {
+    // The vault is a synced folder. Obsidian Sync, iCloud or a full disk holds the directory for a
+    // moment and the atomic temp-write throws. `rewriteVaultDate` catches every throw, which left
+    // BOTH `refused` and `written` empty — so gating on `refused` alone returned `{ok: true}` for a
+    // note that was never opened. The client then reloads on that 200, the paused row is gone, and
+    // the day re-quarantines on the next scan with the human believing it is resolved.
+    const date = TT.addDays(TODAY, 5);
+    await save([entry('f1', date, 540, 600, 'the hour TT holds')]);
+    expect(await until(async () => parseNote(date).entries.length === 1)).toBe(true);
+    writeFileSync(notePath(date), read(date).replace('09:00→10:00', '09:00-10:00'));
+    expect(await until(async () => (await paused(date)) != null, { timeout: 15000 })).toBe(true);
+    const row = await paused(date);
+    expect(row.reason).toBe('digest-mismatch');
+    const before = read(date);
+
+    // Lock the directory the temp file has to be created in. Asserted to have actually taken
+    // effect before anything is claimed about it — running as root would make this a no-op and
+    // every assertion below vacuous.
+    chmodSync(dailyDir, 0o555);
+    let locked = true;
+    try {
+      writeFileSync(join(dailyDir, '.tt-probe'), 'x');
+      locked = false;
+    } catch {
+      /* the directory really is read-only, which is the point */
+    }
+    try {
+      expect(locked, 'chmod 555 did not make the daily directory read-only — running as root?').toBe(true);
+      const res = await admin('POST', '/api/vault/adopt', { path: row.path });
+      expect(res.status).toBe(409);
+      // NOT `ok`, and the error names the half that is durable rather than implying nothing
+      // happened: import-first is required, so the rows ARE in the index by the time a write can
+      // fail. What did not happen is the only thing the gesture exists to do.
+      expect(res.json.error).toContain('the note itself was not rewritten');
+    } finally {
+      chmodSync(dailyDir, 0o755);
+    }
+
+    // The measurable truth the 200 used to contradict: the note is byte-identical, its anchor
+    // still carries the digest that describes bytes which are no longer there, and the day is
+    // still not syncing.
+    expect(read(date)).toBe(before);
+    expect(TT.locateVaultBlock(read(date), { heading: HEADING }).reason).toBe('digest-mismatch');
+
+    // THE ROW IS STILL ON THE SURFACE — the failure did not quietly take the paused day off the
+    // screen. Without this the human is told the write failed and then shown nothing to retry
+    // against until the next scan pass.
+    const stillPaused = await paused(date);
+    expect(stillPaused).not.toBe(null);
+    expect(stillPaused.reason).toBe('digest-mismatch');
+
+    // …and it is recoverable: with the directory writable the same press works.
+    const again = await admin('POST', '/api/vault/adopt', { path: row.path });
+    expect(again.status).toBe(200);
+    expect(parseNote(date).verified).toBe(true);
+    expect(await paused(date)).toBe(null);
+  }, 30000);
+
+  it('the row states its price and offers the gesture only while the note reads', async () => {
+    // The api half of the admission test — the module rung below takes the states themselves,
+    // where they can be held still. Here it is only the wire shape: `adoptable` travels with the
+    // counts and says the same thing they do.
+    const date = TT.addDays(TODAY, 6);
+    await save([entry('u1', date, 540, 600, 'the hour TT holds'), entry('u2', date, 660, 720, 'and another')]);
+    expect(await until(async () => parseNote(date).entries.length === 2)).toBe(true);
+    writeFileSync(notePath(date), read(date).replace('09:00→10:00', '09:00-10:00'));
+    expect(await until(async () => (await paused(date)) != null, { timeout: 15000 })).toBe(true);
+    const row = await paused(date);
+    expect(row.reason).toBe('digest-mismatch');
+    expect(row.adoptable).toBe(true);
+    expect(row.ttEntries).toBe(2);
+    expect(row.noteEntries).toBe(2);
+    expect(row.dropped).toBe(0);
+  }, 30000);
 
   it('refuses a path it holds no paused row for, without touching the filesystem', async () => {
     // The path arrives in the request body. It is matched against `vault_index` and never
@@ -381,4 +464,167 @@ describe('adopting a paused note (api)', () => {
     expect(res.json.error).toContain('not paused');
     expect(parseNote(healthy).entries).toHaveLength(1); // and it did not touch the note
   }, 20000);
+});
+
+// ============================================================================================
+// The admission test, at the MODULE rung — `vaultAdoptDelta` and `adoptVaultDate` side by side.
+//
+// WHY NOT THE api RUNG, where the rest of the gesture is proved. Every state below is one the
+// scan RECONCILES: an unreadable note becomes `unknown` on the next pass (SB-052's invariant 1),
+// a note that stops parsing gets a new reason, a note that is gone loses its row. On a live server
+// they exist only inside the 500 ms watch debounce, so an api test for them is a test that has to
+// win a race — and a test that usually wins a race is a flake, not a claim. Here nothing is
+// watching and nothing is scanning: the state is set and it stays set.
+//
+// WHAT IS CLAIMED: the two functions take the SAME admission test. Every state where the delta
+// cannot be priced is a state where the adopt would refuse — so `adoptable: false` is not caution,
+// it is the truth about what pressing the button would do, and DD-021 consequence 4's answer to
+// that is no control rather than a weakened one. The client used to be handed `dropped: null` on
+// exactly these states with the reason still saying "offer it", read the missing price as `?? 0`,
+// and render a bare one-click adopt with no counts and no confirm.
+// ============================================================================================
+describe('the adopt admission test — priced and offered, or neither (module)', () => {
+  /** @type {typeof import('../server/src/db.js')} */
+  let db;
+  /** @type {typeof import('../server/src/vault-write.js')} */
+  let writer;
+  let vaultRoot = '';
+  let daily = '';
+  let userId = 0;
+  const DATE = '2026-07-20';
+  const path = () => join(daily, DATE + '.md');
+  const signed = (entries, revision) =>
+    `# ${DATE}\n\n## Intentions\n\nplans\n\n` +
+    TT.serializeVaultBlock(entries, { heading: HEADING, revision }) +
+    '\n\n## Captures\n\nthoughts\n';
+
+  /** A paused row for the note as it stands, on the reason DD-021 was written for. */
+  const pause = () =>
+    db.putVaultIndex({
+      path: path(),
+      date: DATE,
+      state: 'quarantined',
+      rev: 3,
+      payloadDigest: 'b3ce',
+      fileSha: null,
+      verified: true,
+      quarantineReason: 'digest-mismatch',
+      seenAt: new Date().toISOString(),
+      quarantinedAt: new Date().toISOString(),
+    });
+
+  beforeAll(async () => {
+    process.env.TT_DATA_DIR = mkdtempSync(join(tmpdir(), 'tt-adopt-module-'));
+    process.env.TT_SHAPE = 'personal';
+    db = await import('../server/src/db.js');
+    writer = await import('../server/src/vault-write.js');
+    const user = db.createUser({ email: 'solo@timeturtle.local', name: 'Solo', role: 'admin', password: 'pw' });
+    userId = user.id;
+  });
+
+  beforeEach(() => {
+    vaultRoot = mkdtempSync(join(tmpdir(), 'tt-adopt-module-vault-'));
+    daily = join(vaultRoot, 'Calendar', 'Daily');
+    mkdirSync(daily, { recursive: true });
+    db.putSettings({ shape: 'personal', vaultPaths: { root: vaultRoot, daily: 'Calendar/Daily' } });
+    db.db.exec("INSERT INTO settings (key, value) VALUES ('vaultCutover', '2020-01-01T00:00:00.000Z') ON CONFLICT(key) DO UPDATE SET value = excluded.value"); // prettier-ignore
+    for (const row of db.listVaultIndex()) db.deleteVaultIndex(row.path);
+    db.putEntries(userId, [entry('m1', DATE, 540, 600, 'the hour TT holds')]);
+  });
+  afterEach(() => {
+    try {
+      chmodSync(path(), 0o644);
+    } catch {
+      /* the note may have been unlinked, or never chmodded */
+    }
+    rmSync(vaultRoot, { recursive: true, force: true });
+  });
+
+  /** The whole claim, in one place: unpriceable and un-adoptable are the same set. */
+  const bothRefuse = () => {
+    const delta = writer.vaultAdoptDelta(userId, path(), DATE, 'digest-mismatch');
+    expect(delta.adoptable).toBe(false);
+    expect(delta.ttEntries).toBe(null);
+    expect(delta.noteEntries).toBe(null);
+    expect(delta.dropped).toBe(null);
+    expect(writer.adoptVaultDate(userId, path(), DATE).ok).toBe(false);
+  };
+
+  it('prices and offers the note it CAN read — the control the other cases are measured against', () => {
+    // Not decoration: without it every `false` below would also be produced by a delta that
+    // answers `false` unconditionally, and the four cases would prove nothing.
+    writeFileSync(path(), signed([entry('m1', DATE, 540, 630, 'a longer hour')], 3));
+    pause();
+    const delta = writer.vaultAdoptDelta(userId, path(), DATE, 'digest-mismatch');
+    expect(delta.adoptable).toBe(true);
+    expect(delta.ttEntries).toBe(1);
+    expect(delta.noteEntries).toBe(1);
+    expect(delta.dropped).toBe(1); // one row each side, and they are not the same row
+  });
+
+  it('a note that will not READ is neither priced nor offered', () => {
+    writeFileSync(path(), signed([entry('m1', DATE, 540, 630, 'a longer hour')], 3));
+    pause();
+    chmodSync(path(), 0o000);
+    let unreadable = true;
+    try {
+      readFileSync(path(), 'utf8');
+      unreadable = false;
+    } catch {
+      /* exactly the state under test */
+    }
+    // Never silently skipped: an environment where chmod cannot make a file unreadable must say
+    // so, or a green run here would be meaningless.
+    expect(unreadable, 'chmod 000 did not make the note unreadable — running as root?').toBe(true);
+    bothRefuse();
+  });
+
+  it('a note that is GONE is neither priced nor offered', () => {
+    writeFileSync(path(), signed([entry('m1', DATE, 540, 630, 'a longer hour')], 3));
+    pause();
+    unlinkSync(path());
+    bothRefuse();
+  });
+
+  it('a note that no longer PARSES is neither priced nor offered, reason notwithstanding', () => {
+    // The row says `digest-mismatch` — an admitting reason — and the bytes have moved since the
+    // scan recorded it. The admission test is "TT can read the rows", and it is taken against the
+    // note as it is NOW, not against the reason code.
+    writeFileSync(
+      path(),
+      `# ${DATE}\n\n## ${HEADING}\n\nI wrote about my morning instead.\n\n\`revision: 3 · b3ce\`\n`,
+    );
+    pause();
+    bothRefuse();
+  });
+
+  it('no vault configured at all is neither priced nor offered', () => {
+    writeFileSync(path(), signed([entry('m1', DATE, 540, 630, 'a longer hour')], 3));
+    pause();
+    db.putSettings({ shape: 'personal', vaultPaths: { root: '', daily: '' } });
+    bothRefuse();
+  });
+
+  it('a reason the gesture is not admitted on is refused before the note is read at all', () => {
+    // The tenth-through-thirteenth refusals. Same answer, reached one step earlier — and reached
+    // even though the note on disk is perfectly readable, which is what makes it the REASON's
+    // refusal and not the read's.
+    writeFileSync(path(), signed([entry('m1', DATE, 540, 630, 'a longer hour')], 3));
+    db.putVaultIndex({
+      path: path(),
+      date: DATE,
+      state: 'quarantined',
+      rev: 3,
+      payloadDigest: null,
+      fileSha: null,
+      verified: false,
+      quarantineReason: 'no-table',
+      seenAt: new Date().toISOString(),
+      quarantinedAt: new Date().toISOString(),
+    });
+    const delta = writer.vaultAdoptDelta(userId, path(), DATE, 'no-table');
+    expect(delta.adoptable).toBe(false);
+    expect(delta.dropped).toBe(null);
+    expect(writer.adoptVaultDate(userId, path(), DATE).ok).toBe(false);
+  });
 });

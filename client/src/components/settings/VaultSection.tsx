@@ -81,11 +81,19 @@ function whenLocal(iso: string): string {
 /**
  * SB-127 / DD-021 + DD-022: the one gesture a paused note gets.
  *
- * OFFERED ON THREE REFUSALS AND NO OTHERS, decided by `TT.vaultAdoptable` — the same predicate the
- * server gates its endpoint on, so the button and the endpoint cannot come to disagree about which
- * refusals are actionable. Every other reason renders with NO CONTROL AT ALL rather than a
- * disabled one (DD-021 consequence 4): there is nothing for a person to press, and a greyed button
- * says there is.
+ * OFFERED ON `note.adoptable` AND NOTHING ELSE, which the SERVER decides — `TT.vaultAdoptable` on
+ * the reason, plus the note actually reading and parsing when the row was built. Both halves have
+ * to be the server's: the predicate is the same one its endpoint gates on, and the second half is
+ * a fact only a process that can read the vault has. Every row without it renders with NO CONTROL
+ * AT ALL rather than a disabled or an unpriced one (DD-021 consequence 4): there is nothing for a
+ * person to press, and a greyed button says there is.
+ *
+ * THE FLAG COMES WITH THE COUNTS OR NOT AT ALL. `VaultQuarantinedNote` is a union on it, so past
+ * the guard below the three numbers are numbers — there is no unpriced row to default. That is the
+ * defect this shape exists to make unwritable: the guard used to be the reason alone and the price
+ * was read as `dropped ?? 0`, so a note that momentarily would not read — a sync blip, an iCloud
+ * placeholder — rendered a bare one-click adopt with no counts, and discarded whatever it
+ * discarded without asking. "The cost is unknown" is not "the cost is zero".
  *
  * ONE DIRECTION. There is no "keep Time Turtle's version" button beside this one and there is not
  * going to be one. Under `vault` SQLite is the derived index (DD-006), so that button would be an
@@ -110,23 +118,21 @@ function whenLocal(iso: string): string {
  */
 function AdoptRow({ note, ui }: { note: VaultQuarantinedNote; ui: UiActions }) {
   const [confirming, setConfirming] = React.useState(false);
-  if (!TT.vaultAdoptable(note.reason)) return null;
-  const dropped = note.dropped ?? 0;
+  if (!note.adoptable) return null;
+  const dropped = note.dropped;
   const counts =
-    note.ttEntries == null || note.noteEntries == null
-      ? null
-      : TT.t('Time Turtle holds ') +
-        note.ttEntries +
-        ' ' +
-        TT.t(note.ttEntries === 1 ? 'entry' : 'entries') +
-        ' · ' +
-        TT.t('the note has ') +
-        note.noteEntries +
-        '.';
+    TT.t('Time Turtle holds ') +
+    note.ttEntries +
+    ' ' +
+    TT.t(note.ttEntries === 1 ? 'entry' : 'entries') +
+    ' · ' +
+    TT.t('the note has ') +
+    note.noteEntries +
+    '.';
   const adopt = () => ui.adoptVaultNote(note.path);
   return (
     <>
-      {counts && <div className={st.mirrorBlockMeta}>{counts}</div>}
+      <div className={st.mirrorBlockMeta}>{counts}</div>
       {confirming ? (
         <>
           <div className={st.mirrorBlockWarn}>
