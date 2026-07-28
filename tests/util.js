@@ -78,9 +78,16 @@ export function session(port) {
  * POLL IT, never read it once: `startServer` resolves as soon as `/api/me` answers, and that can
  * beat lines printed from the `app.listen` callback. Lines printed at module top level — which is
  * where the shape banner lives — are already there, but a caller cannot tell which is which.
+ *
+ * `readyHost` EXISTS FOR ONE CASE and should not grow others (SB-162 / DD-024 Amendment 1): a
+ * server spawned with `TT_HOST=<a routable address>` never binds loopback at all, so the default
+ * probe cannot reach it and the helper reports "did not become ready" about a server that started
+ * perfectly. That is the exact install the bind refusal is about, so it has to be startable here.
+ * Every other caller wants the default and should keep it — probing a routable address when
+ * loopback would do makes a test depend on the machine's network.
  * @returns {Promise<{port: number, child: any, output: () => string}>}
  */
-export async function startServer(env) {
+export async function startServer(env, { readyHost = 'localhost' } = {}) {
   const port = await freePort();
   const child = spawn('node', [SERVER], {
     env: { ...process.env, PORT: String(port), TT_SEED_DEMO: '1', TT_ADMIN_PASSWORD: 'testpw', ...env },
@@ -97,7 +104,7 @@ export async function startServer(env) {
   for (let i = 0; i < 100; i++) {
     if (exited !== null) throw new Error(`server on ${port} exited with code ${exited} before becoming ready`);
     try {
-      const res = await fetch(`http://localhost:${port}/api/me`);
+      const res = await fetch(`http://${readyHost}:${port}/api/me`);
       if (res.status) return { port, child, output: () => out };
     } catch {
       /* not up yet */

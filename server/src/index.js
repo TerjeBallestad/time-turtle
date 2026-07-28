@@ -112,8 +112,20 @@ const BIND_REFUSAL =
  *
  * `isLoopbackHost` is reused rather than joined by a fourth predicate — it reads an
  * operator-supplied value, which is exactly what `BIND_HOST` is.
+ *
+ * THE BIND CLAUSE IS ITS OWN FUNCTION rather than a line in here, because the three doors do not
+ * share refusal SEMANTICS even though they share the rules. `PUT /api/state` is compare-not-reject
+ * — the client re-sends the whole settings object on every debounce and `useServerSync` re-queues
+ * any non-409 forever, so a blanket refusal there is a permanent toast loop — while the two POST
+ * doors refuse outright. That door composes `bindRefusal` inside its own change detection; these
+ * two take the whole list.
  * @param {string} shape the shape the caller wants stored @returns {string | null} the refusal, or null
  */
+/** @param {string} shape the shape the caller wants stored @returns {string | null} */
+function bindRefusal(shape) {
+  return shape === 'personal' && BIND_HOST != null && !isLoopbackHost(BIND_HOST) ? BIND_REFUSAL : null;
+}
+/** @param {string} shape the shape the caller wants stored @returns {string | null} */
 function shapeStoreRefusal(shape) {
   if (shapeLocked()) return 'the instance shape is locked by server configuration (TT_SHAPE_LOCK)';
   // DD-006 consequence 1, direction 2. Compared against the EFFECTIVE shape rather than the stored
@@ -122,8 +134,7 @@ function shapeStoreRefusal(shape) {
     const users = db.listUsers().length;
     if (users > 1) return shapeSwitchRefusal(users);
   }
-  if (shape === 'personal' && BIND_HOST != null && !isLoopbackHost(BIND_HOST)) return BIND_REFUSAL;
-  return null;
+  return bindRefusal(shape);
 }
 
 /** Is the effective shape one that permits only a single user? @returns {boolean} */
@@ -187,10 +198,24 @@ if (singleUserShape() && HOST && !isLoopbackHost(HOST)) {
   process.exit(1);
 }
 /**
- * The address `app.listen` binds. Under `personal` it is loopback, always — the refusal above
- * has already rejected every TT_HOST that is not, so an explicit loopback TT_HOST is honoured
- * (`::1`, say) and an absent one means `127.0.0.1`. Under `team` an absent TT_HOST keeps the
- * historical every-interface bind exactly as it was.
+ * The address `app.listen` binds.
+ *
+ * CORRECTED by DD-024 Amendment 1. This comment used to say *"under `personal` it is loopback,
+ * always — the refusal above has already rejected every TT_HOST that is not"*. **That premise is
+ * false on the path DD-024 makes standard.** `singleUserShape()` is `activeShape() === 'personal'`
+ * and this line runs at MODULE LOAD, before the shape question is asked — so on every first run
+ * the shape is still `team` here, the boot refusal above never fires, and this resolves to
+ * `undefined`: the every-interface bind. The shape becomes `personal` seconds later and NOTHING
+ * re-evaluates this. That is SB-162, and it was confirmed live.
+ *
+ * What is still true: an install that boots with the shape ALREADY resolved to `personal` (a
+ * stored row, `TT_SHAPE=personal`) does bind loopback, and the refusal above did reject every
+ * `TT_HOST` that would make it otherwise.
+ *
+ * The gap is covered at the request layer instead, in two places — the peer refusal registered
+ * first on `app` below (clause 4), and `shapeStoreRefusal`'s bind refusal, which stops an install
+ * bound to a ROUTABLE address from storing `personal` at all. Neither closes the socket; only a
+ * restart does that, and by then this line has the right answer.
  */
 const BIND_HOST = singleUserShape() ? HOST || '127.0.0.1' : HOST || undefined;
 
@@ -303,6 +328,55 @@ if (!TT.shapeCapabilities(activeShape()).mirror) {
 }
 
 const app = express();
+
+// ---- SB-162 / DD-024 clause 4: a `personal` install answers only the machine it runs on ----
+//
+// CONFIRMED LIVE against Terje's own instance on 2026-07-27, from another machine on the wifi:
+//
+//     curl    http://192.168.1.91:3002/api/state                    → 403
+//     curl -H 'Host: localhost' http://192.168.1.91:3002/api/state  → 200, admin session, no credentials
+//
+// `BIND_HOST` is evaluated ONCE at module load (see its comment above). DD-024 moves the shape
+// question AFTER boot, so `singleUserShape()` is false at bind time on every personal install from
+// now on, the every-interface bind stands, and the shape becomes `personal` seconds later — at
+// which point `requireUser`'s no-identity branch hands out an admin session with no credential.
+// Before DD-024 that ordering was an accident of one person's boot order. This plan makes it the
+// standard path, so closing it belongs here rather than to a later cleanup.
+//
+// EVALUATED PER REQUEST, never cached. The shape changing at runtime IS the bug; a value resolved
+// once would reproduce it exactly.
+//
+// FIRST, ahead of the body parser, the routes and the static handler. A caller this refuses should
+// not get 4 MB of JSON parsed on its behalf, and the static client is refused on the same terms as
+// the API — serving the app to the LAN while refusing the API hands out a client that cannot talk
+// to anything, and it is the same bytes-to-the-wrong-network question either way.
+//
+// IT REFUSES TO SERVE AND DOES NOT RE-BIND, and the cost of that is real and belongs in writing:
+// THE PORT STAYS OPEN. The socket keeps listening on every interface for the life of the process,
+// so a port scan finds it and a TCP connection succeeds — only the response is empty. Re-binding
+// was rejected because a runtime `close()` + `listen()` can fail (address in use, TIME_WAIT) and
+// leaves a process with NO socket at all, which is worse than one that answers nothing, and it
+// drops requests in flight. The boot refusal's own reasoning applies: the guard whose subject is
+// *the wrong people can read this* should leave the least behind. The restart the person makes
+// anyway is what corrects the bind durably. Do not let a later reader believe the port closed.
+//
+// THE HOST CHECK IN `requireUser` STAYS AND IS NOT REDUNDANT WITH THIS. Two guards, two attacks:
+// the peer address stops another machine on the wifi; the Host header stops DNS rebinding in the
+// user's own browser, which arrives OVER LOOPBACK and is therefore invisible here. Deleting either
+// re-opens an attack the other never covered. `server/src/config.js` refuses to fold two loopback
+// predicates together for a related reason; this is the third and the same rule holds.
+//
+// `team` IS UNTOUCHED. There a LAN bind is the documented, wanted behaviour and there is a cookie
+// challenge in front of it — a colleague typing an IP is what a company install is FOR.
+const PEER_REFUSAL = 'this Time Turtle is a personal install: it answers only the machine it runs on.';
+app.use((req, res, next) => {
+  if (singleUserShape() && !isLoopbackPeer(req.socket.remoteAddress)) {
+    // Nothing about the caller is reflected back, including the address it came from.
+    return res.status(403).json({ error: PEER_REFUSAL });
+  }
+  next();
+});
+
 app.use(express.json({ limit: '4mb' }));
 
 // ---- auth middleware ----
@@ -1042,6 +1116,11 @@ app.put('/api/state', requireUser, (req, res) => {
   if (body.settings && body.settings.shape === 'personal' && store.getSettings().shape !== 'personal') {
     const users = db.listUsers().length;
     if (users > 1) return res.status(403).json({ error: shapeSwitchRefusal(users) });
+    // DD-024 Amendment 1: the third door gets the bind refusal too, INSIDE the change detection
+    // above rather than beside the locks — this route is compare-not-reject on purpose, and a
+    // refusal that fired on an unchanged ride-along would wedge `useServerSync` permanently.
+    const bound = bindRefusal('personal');
+    if (bound) return res.status(403).json({ error: bound });
   }
   // SB-056 / DD-008: committing is a CAPABILITY of the shape, and under `personal` there is
   // nowhere to persist a commit — the ledger belongs in weekly notes, which are phase 3.
@@ -1267,16 +1346,12 @@ app.post('/api/shape', requireUser, requireAdmin, (req, res) => {
   const { shape } = req.body || {};
   if (!TT.SHAPES.includes(shape))
     return res.status(400).json({ error: 'shape must be one of ' + TT.SHAPES.join(', ') });
-  // The same three refusals the shared PUT applies, in the same order — this is a second door
-  // into one decision, never a second decision. DC-002: the lock is env-only and beats a write.
-  if (shapeLocked())
-    return res.status(403).json({ error: 'the instance shape is locked by server configuration (TT_SHAPE_LOCK)' });
-  // DD-006 consequence 1, direction 2. Compared against the EFFECTIVE shape rather than the
-  // stored one, because that is the shape the caller is actually moving away from.
-  if (shape === 'personal' && activeShape() !== 'personal') {
-    const users = db.listUsers().length;
-    if (users > 1) return res.status(403).json({ error: shapeSwitchRefusal(users) });
-  }
+  // The same refusals the shared PUT applies, in the same order — this is a second door into one
+  // decision, never a second decision. They were inlined here and in `PUT /api/state`; DD-024
+  // Amendment 1 added a THIRD (the bind refusal) and three copies of a growing list is how one
+  // door comes to refuse less than its siblings, so the list moved to `shapeStoreRefusal`.
+  const refusal = shapeStoreRefusal(shape);
+  if (refusal) return res.status(403).json({ error: refusal });
   // NO `bumpCatalogVersion()`, and that is a considered omission rather than a forgotten line.
   //
   // `shape` is instance-local: it never travels to the vault or the mirror, it is not one of the
