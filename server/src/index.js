@@ -1251,6 +1251,8 @@ app.put('/api/state', requireUser, (req, res) => {
 // DELIBERATELY NARROW (DD-024 deviation 1). `/api/state` is untouched and still 401s in the open
 // state. Widening it would make every field it carries unauthenticated for the sake of one boolean.
 const FIRST_RUN_CLOSED = 'the first run is over: this install has already answered what it is';
+const DEMO_UNDER_PERSONAL =
+  'the personal shape gets no demo content: its hours belong in your vault, and fabricated ones would be written into your real daily notes or frozen behind the cutover forever (DD-024 clause 3).';
 /**
  * Is the install in DD-015's OPEN STATE — the one configuration where the shape question has two
  * real answers and nobody has given one?
@@ -1304,9 +1306,16 @@ app.get('/api/first-run', (req, res) => {
 app.post('/api/first-run', (req, res) => {
   if (!firstRunCaller(req)) return notFound(res);
   if (!firstRunOpen()) return res.status(409).json({ error: FIRST_RUN_CLOSED });
-  const { shape } = req.body || {};
+  const { shape, demo } = req.body || {};
   if (!TT.SHAPES.includes(shape))
     return res.status(400).json({ error: 'shape must be one of ' + TT.SHAPES.join(', ') });
+  // DD-024 clause 3 (Rook's provisional ruling, Terje-overridable at no cost): under `personal`
+  // there is no demo content at all, so asking for it is REFUSED rather than silently ignored.
+  // Ignoring it would leave the person believing they had asked for something.
+  //
+  // BEFORE ANY WRITE, so a refused first run stores nothing and can simply be answered again. A
+  // half-applied first run is worse than a rejected one.
+  if (demo && shape === 'personal') return res.status(403).json({ error: DEMO_UNDER_PERSONAL });
   // THE SAME REFUSAL LIST THE OTHER TWO DOORS CARRY (DD-024 Amendment 1 §3). This is a third door
   // into one decision, never a third decision — `POST /api/shape` and `PUT /api/state` apply these
   // in this order and so does this. A door that refuses less than its siblings is a bypass.
@@ -1320,7 +1329,11 @@ app.post('/api/first-run', (req, res) => {
   store.transaction(() => {
     store.putSettings({ shape });
   });
-  res.json({ ok: true, shape });
+  // AFTER the shape, and outside its transaction. DD-024 clause 3's whole mechanism is that the
+  // seed happens PAST the answer — under `team` there is then no cutover for the demo rows to land
+  // before, which is what dissolves SB-146 without touching DD-017's freeze.
+  const seeded = demo ? store.seedDemoContent() : false;
+  res.json({ ok: true, shape, demo: seeded });
 });
 
 // ---- SB-098 / SB-139: the deliberate shape-choosing gesture ----

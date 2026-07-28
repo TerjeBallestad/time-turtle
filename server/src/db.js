@@ -1011,17 +1011,48 @@ export function seedIfEmpty() {
     console.log(
       `[time-turtle] created admin user ${admin.email} (password from TT_ADMIN_PASSWORD${process.env.TT_ADMIN_PASSWORD ? '' : ", default 'turtle' — change it"})`,
     );
-    const projectCount = /** @type {{ n: number }} */ (db.prepare('SELECT COUNT(*) AS n FROM projects').get());
-    if (SEED_DEMO && projectCount.n === 0) {
-      const seedState = TT.seed();
-      transaction(() => {
-        putSettings(seedState.settings);
-        putClients(seedState.clients);
-        putProjects(seedState.projects);
-        putTasks(admin.id, seedState.tasks);
-        putEntries(admin.id, seedState.entries);
-      });
-      console.log('[time-turtle] seeded demo data (disable with TT_SEED_DEMO=0)');
-    }
+    // DD-024 clause 3: the demo half is opt-in now and lives in its own function, so the first-run
+    // answer can call it after boot. `TT_SEED_DEMO=1` keeps seeding here for tests and scripts.
+    if (SEED_DEMO) seedDemoContent();
   }
+}
+
+/**
+ * DD-024 clause 3: the demo catalog and hours, as a SEPARATELY CALLABLE step.
+ *
+ * WHY IT LEFT `seedIfEmpty`'s user-count branch, and this is the whole of SB-146's fix. The trap
+ * is a SEQUENCING window, not a bug in any one function: this ran at boot while the shape was
+ * still `default`, `TT.seedMd()` dates its entries at `T`, `T-1`, `T-2`, `T-7`, `T-8`, `T-9`, and
+ * `putSettings` stamped the DD-016 cutover seconds later when `personal` was stored. Eight rows
+ * landed pre-cutover and DD-017 §1 correctly froze them forever — demo data the person could never
+ * delete. Run it AFTER the answer instead and the window does not exist: under `personal` it is
+ * refused outright, and under `team` there is no cutover for anything to be before.
+ *
+ * SB-146's OTHER CANDIDATE — stamp the cutover before the seed — is deliberately NOT built. It
+ * makes the demo rows POST-cutover and therefore eligible to be written into real daily notes,
+ * which is DD-016's first named hazard verbatim.
+ *
+ * ADMIN CREATION DID NOT MOVE and must not: every join is keyed `user_id` and three separate
+ * guards assume the row exists.
+ *
+ * IDEMPOTENT ON PROJECT COUNT, which it already was — that is what makes it safe to call again
+ * after a boot that did not seed.
+ * @returns {boolean} whether anything was seeded
+ */
+export function seedDemoContent() {
+  const projectCount = /** @type {{ n: number }} */ (db.prepare('SELECT COUNT(*) AS n FROM projects').get());
+  if (projectCount.n !== 0) return false;
+  // The seeded admin — `seedIfEmpty` guarantees a row, and in the open state there is exactly one.
+  const owner = listUsers()[0];
+  if (!owner) return false;
+  const seedState = TT.seed();
+  transaction(() => {
+    putSettings(seedState.settings);
+    putClients(seedState.clients);
+    putProjects(seedState.projects);
+    putTasks(owner.id, seedState.tasks);
+    putEntries(owner.id, seedState.entries);
+  });
+  console.log('[time-turtle] seeded demo data (opt-in: TT_SEED_DEMO=1, or the first run’s demo step)');
+  return true;
 }

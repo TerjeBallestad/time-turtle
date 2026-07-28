@@ -169,7 +169,25 @@ export function isLoopbackPeer(raw) {
 
 export const ADMIN_EMAIL = process.env.TT_ADMIN_EMAIL || 'admin@timeturtle.local';
 export const ADMIN_PASSWORD = process.env.TT_ADMIN_PASSWORD || 'turtle';
-export const SEED_DEMO = process.env.TT_SEED_DEMO !== '0';
+// ---- DD-024 clause 3: demo content is a step you ask for, not one you opt out of ----
+//
+// INVERTED from `!== '0'`. Terje ruled the direction on SB-159 ("Create demo content — don't spawn
+// it by default") and Rook ruled provisionally that under `personal` there is none at all.
+//
+// IT IS FREE IN THE SUITE, and that was checked rather than assumed: all six server-spawning sites
+// in `tests/` and `tests-browser/` pass `TT_SEED_DEMO` explicitly, and `startServer`'s own default
+// passes `'1'`. Nothing depended on the unset value — which is also why exactly ONE test in the
+// repo can see this line change (`tests/first-run-seed.test.js`, the case that removes the
+// variable from the child's environment entirely). A green suite is not evidence about this flip.
+//
+// WHAT ELSE MOVED, and the two together are the mechanism: the demo half of `seedIfEmpty` came out
+// from behind the boot (`server/src/db.js`), so the first-run answer can ask for it. That is what
+// dissolves SB-146 — the trap is a sequencing window between a boot-time seed and a cutover
+// stamped seconds later, and a seed that happens after the answer has no window to sit in.
+//
+// THE HUMAN DEFAULT CHANGED AND NOTHING ANNOUNCES IT (DD-024's stated cost 2): anyone who relied
+// on a stock boot having something in it must now ask. `TT_SEED_DEMO=1` still does exactly that.
+export const SEED_DEMO = process.env.TT_SEED_DEMO === '1';
 
 // Session-signing secret: env override, else generated once and stored next to the DB.
 mkdirSync(DATA_DIR, { recursive: true });
