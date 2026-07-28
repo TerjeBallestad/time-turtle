@@ -356,7 +356,14 @@ export function stampVaultCutover() {
  * Writes ONLY the keys that are present, which is what makes a partial legal and always has
  * been — the route hands it whatever the client PUT, and SB-100's boot-time inference hands it
  * `{ shape: 'team' }` and nothing else. The type says so now; the body already did.
- * @param {Partial<Settings>} settings
+ *
+ * `vaultPaths` IS PARTIAL TOO, and the type has to say that separately (SB-140). `Settings` types
+ * it as a complete `VaultPaths` because every READ hands back a complete one — the validation
+ * below RECONSTRUCTS it key by key from `TT.VAULT_PATHS_DEFAULT`, so a caller supplying only
+ * `{ root }` is the normal case rather than an edge one, and the first run is exactly that caller.
+ * `Partial<Settings>` alone would force it to restate four sub-paths it has no opinion about,
+ * which is the drift `TT.VAULT_PATHS_DEFAULT`'s own comment exists to prevent.
+ * @param {Partial<Omit<Settings, 'vaultPaths'>> & { vaultPaths?: Partial<import('../../shared/types.ts').VaultPaths> }} settings
  */
 export function putSettings(settings) {
   const upsert = db.prepare(

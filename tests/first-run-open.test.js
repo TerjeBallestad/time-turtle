@@ -29,7 +29,7 @@
 //   See the stanza above each describe block.
 import { describe, it, expect, afterAll } from 'vitest';
 import { connect } from 'node:net';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir, networkInterfaces } from 'node:os';
 import { join } from 'node:path';
 import { startServer, stopServer, stopAllServers, session } from './util.js';
@@ -239,6 +239,86 @@ describe('DD-024 clause 1: the first run answers without a credential', () => {
     expect((await postFirstRun(server.port, { shape: 'persona' })).status).toBe(400);
     // Still open, so nothing was stored on the way to the refusal.
     expect((await bare(server.port, '/api/first-run')).json.open).toBe(true);
+
+    await stopServer(server.child);
+  }, 60000);
+});
+
+// ## Verified red-green: 2026-07-28, TRANSCRIBED.
+//   ABSENCE, before the vault half existed — all 3 fail:
+//     FAIL  the prefill rides on the same round trip, read from Obsidian's own registry
+//           AssertionError: expected undefined to deeply equal [ … ]
+//     FAIL  a personal answer stores the vault root it was given
+//           AssertionError: expected '' to be '/var/folders/…/vault'
+//     FAIL  a vault root that is not there is rejected, and stores NOTHING
+//           AssertionError: expected 200 to be 400 // Object.is equality
+//   REMOVING THE DIRECTORY VALIDATION — 1 fails, and it is the half-applied first run:
+//     FAIL  a vault root that is not there is rejected, and stores NOTHING
+//           AssertionError: expected 200 to be 400 // Object.is equality
+describe('SB-140: the vault step knows where the vault is', () => {
+  it('the prefill rides on the same round trip, read from Obsidian’s own registry', async () => {
+    // FIXTURE registry, never the real one. `TT_OBSIDIAN_REGISTRY` exists for exactly this.
+    const dir = mkdtempSync(join(tmpdir(), 'tt-first-run-registry-'));
+    const vault = join(dir, 'ballestad');
+    mkdirSync(vault, { recursive: true });
+    const other = join(dir, 'Ideaverse');
+    mkdirSync(other, { recursive: true });
+    writeFileSync(
+      join(dir, 'obsidian.json'),
+      JSON.stringify({ vaults: { a1: { path: other, ts: 300 }, b2: { path: vault, ts: 100, open: true } } }),
+    );
+
+    const server = await startServer({
+      ...open('first-run-prefill'),
+      TT_OBSIDIAN_REGISTRY: join(dir, 'obsidian.json'),
+    });
+
+    // ONE ROUND TRIP — the vault step costs no second endpoint.
+    const res = await bare(server.port, '/api/first-run');
+    expect(res.status).toBe(200);
+    expect(res.json.open).toBe(true);
+    expect(res.json.vaults.map((v) => v.name)).toEqual(['ballestad', 'Ideaverse']);
+    expect(res.json.vaults[0].path).toBe(vault);
+    // The fallback's fixed prefix rides along, so the client states one path rather than two.
+    expect(res.json.vaultPrefix).toMatch(/iCloud~md~obsidian/);
+
+    await stopServer(server.child);
+  }, 60000);
+
+  it('a personal answer stores the vault root it was given', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'tt-first-run-root-'));
+    const vault = join(dir, 'ballestad');
+    mkdirSync(vault, { recursive: true });
+    const server = await startServer(open('first-run-root'));
+
+    expect((await postFirstRun(server.port, { shape: 'personal', vaultRoot: vault })).status).toBe(200);
+
+    // ASSERTED FROM THE STORE, not from the response: a route that answers 200 and stores nothing
+    // is the exact failure this pairing exists to catch.
+    const state = await bare(server.port, '/api/state');
+    expect(state.status).toBe(200);
+    expect(state.json.shape).toBe('personal');
+    expect(state.json.settings.vaultPaths.root).toBe(vault);
+    // Only `root` travels — the sub-paths keep their defaults.
+    expect(state.json.settings.vaultPaths.daily).toBe('Calendar/Daily');
+
+    await stopServer(server.child);
+  }, 60000);
+
+  it('a vault root that is not there is rejected, and stores NOTHING', async () => {
+    // A HALF-APPLIED FIRST RUN IS WORSE THAN A REJECTED ONE. If the shape were stored and the
+    // root refused, the person lands in a `personal` install with no vault, the open state is
+    // over, and the step that would have fixed it is permanently closed.
+    const server = await startServer(open('first-run-bad-root'));
+    const missing = join(tmpdir(), 'tt-no-such-vault-' + Date.now());
+
+    const res = await postFirstRun(server.port, { shape: 'personal', vaultRoot: missing });
+    expect(res.status).toBe(400);
+    expect(res.json.error).toContain(missing); // it names the path, so the person can see the typo
+
+    // The shape was NOT stored, and the question is still askable.
+    const after = await bare(server.port, '/api/first-run');
+    expect(after.json.open).toBe(true);
 
     await stopServer(server.child);
   }, 60000);

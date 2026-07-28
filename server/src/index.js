@@ -45,6 +45,10 @@ setVaultCheckpointHook((day) => {
   const config = vaultSyncConfig();
   if (config) vaultCheckpoint(config.root, day);
 });
+// SB-140 / DD-024: where Obsidian says this person's vaults are, so the first run can offer rather
+// than ask them to type a path. Read-only, one known path, and injectable so no test ever reads
+// the real registry.
+import { readObsidianVaults, directoryExists, ICLOUD_VAULT_PREFIX } from './obsidian-registry.js';
 import { teamReport } from './reports.js';
 import TT from '../../shared/core.js';
 
@@ -1298,7 +1302,11 @@ const notFound = (res) => res.status(404).json({ error: 'not found' });
 // so the vault step costs no second round trip.
 app.get('/api/first-run', (req, res) => {
   if (!firstRunCaller(req)) return notFound(res);
-  res.json({ open: firstRunOpen() });
+  // SB-140: the vault prefill rides HERE rather than on a second endpoint. The vault step is one
+  // beat of one flow, and a second round trip is a second thing that can be slow or fail on the
+  // first screen a person ever sees. `readObsidianVaults` never throws — an absent or malformed
+  // registry is an empty list, and the client falls back to a vault NAME over `vaultPrefix`.
+  res.json({ open: firstRunOpen(), vaults: readObsidianVaults(), vaultPrefix: ICLOUD_VAULT_PREFIX });
 });
 
 // POST is PERMANENTLY CLOSED once the question is answered — 409, not 404, because a loopback
@@ -1306,9 +1314,22 @@ app.get('/api/first-run', (req, res) => {
 app.post('/api/first-run', (req, res) => {
   if (!firstRunCaller(req)) return notFound(res);
   if (!firstRunOpen()) return res.status(409).json({ error: FIRST_RUN_CLOSED });
-  const { shape, demo } = req.body || {};
+  const { shape, demo, vaultRoot } = req.body || {};
   if (!TT.SHAPES.includes(shape))
     return res.status(400).json({ error: 'shape must be one of ' + TT.SHAPES.join(', ') });
+  // SB-140: the vault root is VALIDATED BEFORE ANYTHING IS STORED, and the ordering is the whole
+  // point. A half-applied first run — shape stored, root refused — leaves the person in a
+  // `personal` install with no vault, with the open state over and the step that would have fixed
+  // it permanently closed. Four vault-shaped folders sit in the iCloud directory on the target
+  // machine while the registry names two of them, so a composed name really can miss.
+  //
+  // The refusal NAMES THE PATH, because the person is looking at a typo they cannot otherwise see.
+  // That is safe here in a way it is not in the peer refusals above: this caller supplied the
+  // string and is on loopback.
+  if (vaultRoot !== undefined) {
+    if (typeof vaultRoot !== 'string' || !vaultRoot || !directoryExists(vaultRoot))
+      return res.status(400).json({ error: 'no folder at ' + JSON.stringify(String(vaultRoot)) });
+  }
   // DD-024 clause 3 (Rook's provisional ruling, Terje-overridable at no cost): under `personal`
   // there is no demo content at all, so asking for it is REFUSED rather than silently ignored.
   // Ignoring it would leave the person believing they had asked for something.
@@ -1327,7 +1348,10 @@ app.post('/api/first-run', (req, res) => {
   // `personal`, so nothing that can store the shape can skip the stamp. Task 3 adds
   // `vaultPaths: { root }` to this same write.
   store.transaction(() => {
-    store.putSettings({ shape });
+    // SB-140: only `root` travels. `putSettings` rebuilds `vaultPaths` key by key from
+    // `TT.VAULT_PATHS_DEFAULT`, so the sub-paths keep their defaults without being restated here —
+    // and a second copy of them would be the drift `TT.VAULT_PATHS_DEFAULT`'s own comment forbids.
+    store.putSettings(vaultRoot ? { shape, vaultPaths: { root: vaultRoot } } : { shape });
   });
   // AFTER the shape, and outside its transaction. DD-024 clause 3's whole mechanism is that the
   // seed happens PAST the answer — under `team` there is then no cutover for the demo rows to land
