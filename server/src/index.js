@@ -85,6 +85,30 @@ const SECOND_USER_REFUSAL =
 /** @param {number} count how many users are already stored */
 const shapeSwitchRefusal = (count) =>
   `cannot switch to the personal shape: a vault belongs to one person and this install has ${count} users (DD-006). Delete the others first, or stay on the team shape.`;
+/**
+ * DD-024 Amendment 1: the third refusal on the shape path, beside the lock and the user count.
+ *
+ * WHY IT EXISTS. `BIND_HOST` is fixed at module load, so an install that boots in the open state
+ * with a non-loopback `TT_HOST` never binds loopback at all. Store `personal` there and the peer
+ * guard — correctly — refuses every peer that can physically reach the socket, including the
+ * person who just answered the question. The process serves nobody, from anywhere, for the rest
+ * of its life, while `tt` has already printed a `http://localhost:<port>` that will not connect.
+ * The next restart does not rescue it either: the shape is stored by then, so the boot refusal
+ * finally fires and the process exits 1.
+ *
+ * SO THE REFUSAL LANDS AT THE QUESTION. It is the same rule the boot refusal makes — the personal
+ * shape has no login, so it may only be reached from this machine — delivered at the one moment a
+ * human is present to read it, instead of on a console nobody is watching one dead process later.
+ *
+ * A FIXED STRING, and that is a choice worth naming: it could have interpolated `BIND_HOST` the
+ * way `shapeSwitchRefusal` above interpolates its count, and it deliberately does not.
+ * `setShape` surfaces this verbatim as a toast, `client/src/i18n.ts` translates these by exact
+ * string, and an interpolated value makes the sentence untranslatable — which is precisely why
+ * `shapeSwitchRefusal` has no Norwegian and `SECOND_USER_REFUSAL` does. The address adds nothing
+ * the person cannot read off their own `TT_HOST`, and `unset TT_HOST` is the recovery either way.
+ */
+const NON_LOOPBACK_BIND_REFUSAL =
+  'cannot switch to the personal shape: it has no login (DD-015), so it may only be reached from this machine — but TT_HOST binds this server to an address that is not loopback, so a personal install here would answer nobody at all, including you. Recover with:  unset TT_HOST  and restart, or stay on the team shape.';
 
 /** Is the effective shape one that permits only a single user? @returns {boolean} */
 function singleUserShape() {
@@ -147,12 +171,51 @@ if (singleUserShape() && HOST && !isLoopbackHost(HOST)) {
   process.exit(1);
 }
 /**
- * The address `app.listen` binds. Under `personal` it is loopback, always — the refusal above
- * has already rejected every TT_HOST that is not, so an explicit loopback TT_HOST is honoured
- * (`::1`, say) and an absent one means `127.0.0.1`. Under `team` an absent TT_HOST keeps the
- * historical every-interface bind exactly as it was.
+ * The address `app.listen` binds, resolved ONCE at module load — which is the whole of SB-162.
+ *
+ * > **WITHDRAWN — DD-024 Amendment 1, site 4.** This comment used to say *"Under `personal` it is
+ * > loopback, always — the refusal above has already rejected every TT_HOST that is not."* That
+ * > is true only of an install that was `personal` AT MODULE LOAD. DD-024 moves the shape
+ * > question after boot, so on the path it makes standard `singleUserShape()` is false here, the
+ * > `team` branch is taken, and the refusal above never ran. This is the comment that sat on the
+ * > constant carrying the bug.
+ *
+ * What is actually true, in the three cases:
+ *
+ *   • **`personal` at module load** — loopback, always. An explicit loopback TT_HOST is honoured
+ *     (`::1`, say) and an absent one means `127.0.0.1`. Here the refusal above really has run.
+ *   • **Open state, TT_HOST unset** — `undefined`, every interface, LOOPBACK AMONG THEM. The
+ *     shape becomes `personal` seconds later and the peer guard below refuses the LAN while the
+ *     person keeps working over `localhost`. This is the common install and it works.
+ *   • **Open state, TT_HOST set non-loopback** — that address, and loopback is NEVER BOUND. Every
+ *     peer that can physically reach this socket is then non-loopback, so the peer guard below
+ *     would refuse all of them and the process would serve nobody, from anywhere, for the rest of
+ *     its life. That is why the shape transition itself is refused — see `bindRefusesLoopback`.
+ *
+ * NOT RE-EVALUATED, and deliberately (DD-024 clause 4): a runtime `close()` + `listen()` can fail
+ * into having no socket at all. The next restart is what corrects the bind.
  */
 const BIND_HOST = singleUserShape() ? HOST || '127.0.0.1' : HOST || undefined;
+/**
+ * Can this process still be reached over loopback at all?
+ *
+ * DD-024 AMENDMENT 1'S PREDICATE, verbatim: `BIND_HOST != null && !isLoopbackHost(BIND_HOST)`.
+ *
+ * `undefined` MUST NOT REFUSE, and it is the case a wrong reading breaks. `undefined` is
+ * `TT_HOST` unset — the every-interface bind, loopback included — which is Terje's own
+ * configuration, the common install, and exactly what the peer guard below was built for. A
+ * predicate that refused it would refuse every first run there is: three guards in this cluster
+ * could not fire, and a fourth that fires on everything is the same defect with the sign flipped.
+ *
+ * REUSES `isLoopbackHost` — the operator-supplied-value predicate, applied to a bind address
+ * exactly as the boot refusal above applies it. DD-024 rules that the loopback predicates must
+ * not be folded together; this adds a CALLER, not a fourth predicate. If this ever becomes its
+ * own loopback function it has done the thing that ruling forbids.
+ * @returns {boolean}
+ */
+function bindRefusesLoopback() {
+  return BIND_HOST != null && !isLoopbackHost(BIND_HOST);
+}
 
 db.seedIfEmpty();
 
@@ -294,9 +357,18 @@ const app = express();
 // IT COVERS THE WHOLE APP, not `/api` — hence its position, ahead of the body parser, every
 // route and the static handler. Serving the client to the LAN while refusing the API would hand
 // out an app that cannot talk to anything, and it is the same bytes-to-the-wrong-network
-// question either way. Someone who genuinely wants a LAN-reachable personal instance is ALREADY
-// refused: the boot guard above exits 1 on a non-loopback `TT_HOST` under `personal`, so
-// refusing everything here is the consistent reading of a rule that already exists.
+// question either way. That sentence carries the scope on its own.
+//
+// > WITHDRAWN — DD-024 Amendment 1, site 3. This block used to add: *"Someone who genuinely wants
+// > a LAN-reachable personal instance is ALREADY refused: the boot guard above exits 1 on a
+// > non-loopback `TT_HOST` under `personal`."* FALSE ON EXACTLY THE PATH THIS GUARD IS FOR. That
+// > boot guard is `singleUserShape() && HOST && !isLoopbackHost(HOST)`, and `singleUserShape()`
+// > is false at module load whenever the shape is answered after boot — which DD-024 makes
+// > standard. Such a person is admitted at boot and, before Amendment 1, bricked one request
+// > later: loopback never bound, so this guard refused every peer that could reach the socket and
+// > the process served nobody. Found by Reviewer on this branch. The hole is closed at the
+// > TRANSITION now (`NON_LOOPBACK_BIND_REFUSAL`), not here — this guard's scope is unchanged, and
+// > the withdrawal is NOT licence to narrow it to `/api`.
 //
 // AHEAD OF `express.json` deliberately: a refused caller should not get 4mb of body buffered on
 // its behalf first.
@@ -1057,6 +1129,13 @@ app.put('/api/state', requireUser, (req, res) => {
   if (body.settings && body.settings.shape === 'personal' && store.getSettings().shape !== 'personal') {
     const users = db.listUsers().length;
     if (users > 1) return res.status(403).json({ error: shapeSwitchRefusal(users) });
+    // DD-024 Amendment 1: and refuse when this process can no longer be reached over loopback.
+    // Inside the same compare-not-reject block as the guard above, not beside it — the client
+    // re-sends the whole settings object, so an unconditional check here would 403 every
+    // keystroke of an install that is ALREADY personal, and `useServerSync` re-queues any
+    // non-409 failure every 4 s forever. The refusal is about the TRANSITION, and this block is
+    // already the place that knows a transition is happening.
+    if (bindRefusesLoopback()) return res.status(403).json({ error: NON_LOOPBACK_BIND_REFUSAL });
   }
   // SB-056 / DD-008: committing is a CAPABILITY of the shape, and under `personal` there is
   // nowhere to persist a commit — the ledger belongs in weekly notes, which are phase 3.
@@ -1204,6 +1283,15 @@ app.post('/api/shape', requireUser, requireAdmin, (req, res) => {
   if (shape === 'personal' && activeShape() !== 'personal') {
     const users = db.listUsers().length;
     if (users > 1) return res.status(403).json({ error: shapeSwitchRefusal(users) });
+    // DD-024 Amendment 1, the third refusal — and it is here for the reason the comment above
+    // gives about the other two: a second door into one decision, never a second decision. This
+    // is the door DD-024's first run will use, so a check on the PUT alone would leave the
+    // standard path uncovered. TASK-069's `/api/first-run` inherits all three when it is built.
+    //
+    // The `activeShape() !== 'personal'` gate is what keeps this from firing on an install that
+    // is already personal — where it could not be true anyway, since such an install passed the
+    // boot refusal and therefore binds loopback.
+    if (bindRefusesLoopback()) return res.status(403).json({ error: NON_LOOPBACK_BIND_REFUSAL });
   }
   // NO `bumpCatalogVersion()`, and that is a considered omission rather than a forgotten line.
   //

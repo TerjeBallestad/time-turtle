@@ -78,9 +78,18 @@ export function session(port) {
  * POLL IT, never read it once: `startServer` resolves as soon as `/api/me` answers, and that can
  * beat lines printed from the `app.listen` callback. Lines printed at module top level — which is
  * where the shape banner lives — are already there, but a caller cannot tell which is which.
+ *
+ * `readyHost` IS THE ADDRESS THE READINESS PROBE ASKS, and it defaults to `localhost` because
+ * that is where every server here has ever listened. SB-162's `TT_HOST=<routable>` case is the
+ * first that does NOT: with a non-loopback `TT_HOST` the process never binds loopback at all, so
+ * the default probe would time out on a server that started perfectly and report "did not become
+ * ready" for a boot that did. Additive and default-preserving — no existing caller passes it.
+ * @param {Record<string,string>} env
+ * @param {{ readyHost?: string }} [opts]
  * @returns {Promise<{port: number, child: any, output: () => string}>}
  */
-export async function startServer(env) {
+export async function startServer(env, opts) {
+  const readyHost = (opts && opts.readyHost) || 'localhost';
   const port = await freePort();
   const child = spawn('node', [SERVER], {
     env: { ...process.env, PORT: String(port), TT_SEED_DEMO: '1', TT_ADMIN_PASSWORD: 'testpw', ...env },
@@ -97,14 +106,14 @@ export async function startServer(env) {
   for (let i = 0; i < 100; i++) {
     if (exited !== null) throw new Error(`server on ${port} exited with code ${exited} before becoming ready`);
     try {
-      const res = await fetch(`http://localhost:${port}/api/me`);
+      const res = await fetch(`http://${readyHost}:${port}/api/me`);
       if (res.status) return { port, child, output: () => out };
     } catch {
       /* not up yet */
     }
     await new Promise((r) => setTimeout(r, 100));
   }
-  throw new Error(`server on ${port} did not become ready`);
+  throw new Error(`server on ${readyHost}:${port} did not become ready`);
 }
 
 export function stopServer(child) {
