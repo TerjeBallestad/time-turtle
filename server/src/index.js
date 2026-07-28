@@ -3,7 +3,7 @@ import express from 'express';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
-import { PORT, HOST, MD_DIR_LOCKED, isLoopbackHost, isLoopbackHostHeader } from './config.js';
+import { PORT, HOST, MD_DIR_LOCKED, isLoopbackHost, isLoopbackHostHeader, isLoopbackPeer } from './config.js';
 import { shapeTarget, activeShape, shapeLocked } from './backend.js';
 import { verifyPassword, makeToken, readSessionCookie, sessionCookie, clearCookie } from './auth.js';
 // SB-056: the split is at the import site on purpose. `db` is IDENTITY ONLY here — users,
@@ -85,6 +85,46 @@ const SECOND_USER_REFUSAL =
 /** @param {number} count how many users are already stored */
 const shapeSwitchRefusal = (count) =>
   `cannot switch to the personal shape: a vault belongs to one person and this install has ${count} users (DD-006). Delete the others first, or stay on the team shape.`;
+/**
+ * DD-024 Amendment 1 §3: storing `personal` on a process bound to a non-loopback address.
+ *
+ * The boot guard's own recovery line, because it is the same recovery — but it cannot be the boot
+ * guard, which fires only when the shape is ALREADY `personal` at module load. Under DD-024 the
+ * common path is the other one.
+ */
+const BIND_REFUSAL =
+  'cannot store the personal shape on this process: it is bound to a non-loopback address, and the personal shape has no login (DD-015), so it would serve an unauthenticated timesheet to that network — or, once it refuses every non-loopback peer, to nobody at all. Recover with:  unset TT_HOST';
+/**
+ * EVERY REASON A SHAPE MAY NOT BE STORED, worded once — a shape-transition door is a second door
+ * into one decision, never a second decision. Three doors call this: `POST /api/first-run`,
+ * `POST /api/shape` and `PUT /api/state`. A door that refuses less than its siblings is a bypass,
+ * and three inlined copies of a growing list is how one comes to refuse less.
+ *
+ * ORDER MATTERS and is the order the existing doors already applied: the lock first (DC-002, it is
+ * env-only and beats any write), then DD-006's one-person rule, then the bind.
+ *
+ * THE BIND REFUSAL IS THE NEW ONE (DD-024 Amendment 1 §3) and its predicate is exact. `BIND_HOST`
+ * `undefined` — the ordinary install with no `TT_HOST` — must NOT refuse, or every first run
+ * breaks: an unset `TT_HOST` binds every interface, loopback among them, and DD-024 clause 4's
+ * per-request peer refusal is sufficient there. What it catches is `TT_HOST` SET to a routable
+ * address: loopback is then never bound at all, so after the answer the process serves NOBODY from
+ * ANYWHERE for the life of the process. That is worse than a refusal and it is silent.
+ *
+ * `isLoopbackHost` is reused rather than joined by a fourth predicate — it reads an
+ * operator-supplied value, which is exactly what `BIND_HOST` is.
+ * @param {string} shape the shape the caller wants stored @returns {string | null} the refusal, or null
+ */
+function shapeStoreRefusal(shape) {
+  if (shapeLocked()) return 'the instance shape is locked by server configuration (TT_SHAPE_LOCK)';
+  // DD-006 consequence 1, direction 2. Compared against the EFFECTIVE shape rather than the stored
+  // one, because that is the shape the caller is actually moving away from.
+  if (shape === 'personal' && activeShape() !== 'personal') {
+    const users = db.listUsers().length;
+    if (users > 1) return shapeSwitchRefusal(users);
+  }
+  if (shape === 'personal' && BIND_HOST != null && !isLoopbackHost(BIND_HOST)) return BIND_REFUSAL;
+  return null;
+}
 
 /** Is the effective shape one that permits only a single user? @returns {boolean} */
 function singleUserShape() {
@@ -1115,6 +1155,93 @@ app.put('/api/state', requireUser, (req, res) => {
     // should learn about it, not the next reload.
     vaultQuarantined: vaultQuarantinedNotes(),
   });
+});
+
+// ---- DD-024 clause 1: the first run, answered before the login it removes ----
+//
+// DD-015 said "ask, at first admin login". DD-024 amends exactly that clause, because it does not
+// survive the shape it was written to introduce: in the open state the effective shape is `team`,
+// `team` carries `identity: true`, so `GET /api/state` 401s and the client renders `<Login>` —
+// and the gate that REMOVES the login is reachable only by clearing the login, with a password
+// printed once into a detached log file the person it is for has no reason to open.
+//
+// So these two routes sit OUTSIDE `requireUser`. Nothing else does, and nothing else should: every
+// future route hung here has to re-earn the gate below rather than inherit it. That is DD-024's
+// own stated cost 1, and it is the cheapest wrong move available to a later session.
+//
+// DELIBERATELY NARROW (DD-024 deviation 1). `/api/state` is untouched and still 401s in the open
+// state. Widening it would make every field it carries unauthenticated for the sake of one boolean.
+const FIRST_RUN_CLOSED = 'the first run is over: this install has already answered what it is';
+/**
+ * Is the install in DD-015's OPEN STATE — the one configuration where the shape question has two
+ * real answers and nobody has given one?
+ *
+ * The first two conditions of `shapeQuestionOpen`, and deliberately not a third copy of them: the
+ * role condition drops out because there is no resolved user here, which is the entire point of
+ * this surface. Re-derived per request rather than cached at boot, so an install that stores a
+ * shape — or grows a second user — leaves the open state immediately rather than at the next
+ * restart.
+ * @returns {boolean}
+ */
+function firstRunOpen() {
+  return shapeTarget().source === 'default' && db.listUsers().length === 1;
+}
+/**
+ * Is this caller allowed to see the first-run surface at all?
+ *
+ * BOTH ADDRESS CHECKS, and the socket one is the load-bearing half. In the open state `BIND_HOST`
+ * is `undefined` (see its comment above) so the server answers on EVERY INTERFACE — loopback is
+ * not implied by anything here. SB-136's Host check alone does not survive that: `curl -H 'Host:
+ * localhost' http://<lan-ip>:<port>/…` from any machine on the same wifi passes it, which is
+ * SB-162, measured. The Host check stays anyway, because it stops a different attack — DNS
+ * rebinding in the user's own browser arrives OVER LOOPBACK and is invisible to a peer check.
+ * @param {Request} req @returns {boolean}
+ */
+function firstRunCaller(req) {
+  return isLoopbackPeer(req.socket.remoteAddress) && isLoopbackHostHeader(req.headers.host);
+}
+/**
+ * 404 — the same answer an unknown route gets, never a 403.
+ *
+ * A 403 confirms the surface EXISTS, which tells a scanner where to come back to once the install
+ * is in a state it likes. Nothing about the caller is reflected back either.
+ * @param {Response} res
+ */
+const notFound = (res) => res.status(404).json({ error: 'not found' });
+
+// GET is readable from loopback FOREVER, and answers `open: false` once the question is
+// answered — it does not start 404ing. The client needs a definite answer to decide whether to
+// render the first run or `<Login>`, and "the route vanished" and "the server is down" are the
+// same bytes to a browser. Only the PEER gate produces a 404 here, because that is the caller who
+// must not learn the surface exists. Task 3 (SB-140) adds the vault prefill to this same payload,
+// so the vault step costs no second round trip.
+app.get('/api/first-run', (req, res) => {
+  if (!firstRunCaller(req)) return notFound(res);
+  res.json({ open: firstRunOpen() });
+});
+
+// POST is PERMANENTLY CLOSED once the question is answered — 409, not 404, because a loopback
+// caller that just lost a race is entitled to know why rather than to think the route moved.
+app.post('/api/first-run', (req, res) => {
+  if (!firstRunCaller(req)) return notFound(res);
+  if (!firstRunOpen()) return res.status(409).json({ error: FIRST_RUN_CLOSED });
+  const { shape } = req.body || {};
+  if (!TT.SHAPES.includes(shape))
+    return res.status(400).json({ error: 'shape must be one of ' + TT.SHAPES.join(', ') });
+  // THE SAME REFUSAL LIST THE OTHER TWO DOORS CARRY (DD-024 Amendment 1 §3). This is a third door
+  // into one decision, never a third decision — `POST /api/shape` and `PUT /api/state` apply these
+  // in this order and so does this. A door that refuses less than its siblings is a bypass.
+  const refusal = shapeStoreRefusal(shape);
+  if (refusal) return res.status(403).json({ error: refusal });
+  // ONE PARTIAL `putSettings`, deliberately. SB-133 is the standing finding that a whole-settings
+  // PUT flips an env-only `personal` install to `team`; this route must not be a second instance
+  // of it. `putSettings` writes only the keys present and stamps the DD-016 cutover itself for
+  // `personal`, so nothing that can store the shape can skip the stamp. Task 3 adds
+  // `vaultPaths: { root }` to this same write.
+  store.transaction(() => {
+    store.putSettings({ shape });
+  });
+  res.json({ ok: true, shape });
 });
 
 // ---- SB-098 / SB-139: the deliberate shape-choosing gesture ----

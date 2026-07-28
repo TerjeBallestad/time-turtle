@@ -126,6 +126,47 @@ export function isLoopbackHostHeader(raw) {
   }
   return name === 'localhost' || name === '::1' || name === '::ffff:127.0.0.1' || IPV4_LOOPBACK.test(name);
 }
+// ---- DD-024 clause 1 / SB-162: the address the request actually came FROM ----
+//
+// A THIRD loopback predicate, and the file now has three on purpose. `isLoopbackHost` reads an
+// OPERATOR-SUPPLIED `TT_HOST`; `isLoopbackHostHeader` reads an ATTACKER-SUPPLIED header; this one
+// reads a KERNEL-SUPPLIED peer address. Three sources, three trust levels, three functions — and
+// the note at the top of `isLoopbackHostHeader` about not folding predicates together applies here
+// with the same force. Folding this into either of the others would make one function answer
+// questions with different answers.
+//
+// WHY IT HAS TO EXIST AT ALL, and it is not defence in depth. Under DD-024 the shape question is
+// asked AFTER boot, so an install in the open state has `activeShape() === 'team'`, `BIND_HOST`
+// is `undefined`, and the server is listening on EVERY INTERFACE while it serves a surface that
+// takes no credential. Loopback is not implied by anything in that state. SB-162 is the measured
+// proof that the Host header cannot stand in for this: `curl -H 'Host: localhost'
+// http://<lan-ip>:<port>/api/state` returned a full admin session from another machine on the wifi.
+//
+// The Host header still stops what this cannot — DNS rebinding in the user's own browser arrives
+// over loopback, so the peer address is loopback and only the header gives it away. Neither guard
+// replaces the other and deleting either re-opens an attack the other never covered.
+//
+// UNLIKE THE HEADER PREDICATE, THE INPUT HERE IS NOT FORGEABLE. `req.socket.remoteAddress` comes
+// from the kernel, and `server/src/` sets no `trust proxy` and reads no `X-Forwarded-*` anywhere,
+// so no header can move it. The strictness below therefore buys correctness rather than safety —
+// a hostname cannot appear here — but it is written strictly anyway so that reading one predicate
+// never teaches a wrong lesson about the other two.
+//
+// Node reports an IPv4 peer on a dual-stack socket as `::ffff:127.0.0.1`, which is why the mapped
+// form is matched rather than assumed away.
+/**
+ * Whether a request's PEER ADDRESS is this machine itself.
+ * @param {unknown} raw `req.socket.remoteAddress` @returns {boolean}
+ */
+export function isLoopbackPeer(raw) {
+  const value = String(raw ?? '')
+    .trim()
+    .toLowerCase();
+  if (!value) return false; // a socket with no peer address is not one we can vouch for
+  const mapped = value.startsWith('::ffff:') ? value.slice(7) : value;
+  return value === '::1' || IPV4_LOOPBACK.test(mapped);
+}
+
 export const ADMIN_EMAIL = process.env.TT_ADMIN_EMAIL || 'admin@timeturtle.local';
 export const ADMIN_PASSWORD = process.env.TT_ADMIN_PASSWORD || 'turtle';
 export const SEED_DEMO = process.env.TT_SEED_DEMO !== '0';
