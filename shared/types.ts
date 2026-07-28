@@ -559,76 +559,10 @@ export type VaultCatalogQuarantineReason =
   | 'catalog-unknown-section';
 
 /**
- * SDD-003: the refusals that only the instance MANIFEST can produce (`Time Turtle.md`).
- *
- * Derived from the runtime array in shared/core.js on the SB-109 discipline, not restated here —
- * see `VaultBlockQuarantineReason` above for why a scraped union is a guard that lies about
- * punctuation. Its goldens live in tests/manifest.test.js, which is also where its completeness
- * guard sits, following the same split SB-058 made for the catalog: a flat union would make each
- * guard demand goldens the other file owns.
- *
- * DELIBERATELY SHORT. Everything the manifest shares with a daily block keeps the BLOCK spelling
- * and is not duplicated — `crlf-line-endings`, `malformed-revision`, `multiple-revisions` and
- * `digest-mismatch` mean on this file exactly what they mean on a block.
- */
-export type VaultManifestQuarantineReason = (typeof import('./core.js').VAULT_MANIFEST_QUARANTINE_REASONS)[number];
-
-/**
  * Every refusal TT's vault codecs can produce — what a boot scan records and surfaces, and the
  * one type it may switch on.
  */
-export type VaultQuarantineReason =
-  VaultBlockQuarantineReason | VaultCatalogQuarantineReason | VaultManifestQuarantineReason;
-
-/**
- * SDD-003: the instance manifest — `Time Turtle.md` at `Settings.vaultPaths.catalog`.
- *
- * Under the personal shape this is the instance. SQLite is a per-machine cache rebuilt from these
- * bytes, so every field here is VAULT property: it describes the vault, never the machine that
- * happens to be reading it. `shape`, `mdDir` and `vaultPaths` are deliberately absent — they are
- * how TT FINDS this file, and putting them in it is a bootstrap loop (the same exclusion SB-058's
- * catalog settings allowlist makes).
- */
-export interface VaultManifest {
-  /** the note's H1. Defaults to `Time Turtle`; a human who renames it keeps their name. */
-  title: string;
-  /**
-   * DD-016's cutover, now living in the vault rather than in a per-machine `vaultCutover` settings
-   * row. An ISO instant; null means the manifest names none and the boot ladder must decide.
-   */
-  cutover: string | null;
-  /**
-   * The heading TT's block sits under in a daily note. VAULT property rather than machine
-   * property: two machines disagreeing about it write two blocks into one note.
-   */
-  timeLogHeading: string | null;
-  /**
-   * A `Settings.vaultTimeSeparator` VALUE NAME (`unicode` / `ascii` / `hyphen`), never raw
-   * characters — arbitrary characters must not be able to reach a table cell and split their own
-   * row. An unrecognised name is carried verbatim and resolved by `TT.timeSeparator`'s fallback.
-   */
-  timeSeparator: string | null;
-  /**
-   * Header-region lines this build does not know, verbatim and in order. Under the personal shape
-   * this file IS the database, so a newer TT's header dropped by an older TT's read-write cycle is
-   * data loss with nothing behind it to restore from.
-   */
-  extraHeaders: string[];
-  /** the catalog, the settings format 2 owns, and any pre-vault archive days — via `TT.parseMd`. */
-  catalog: Catalog;
-  /** the trailing anchor's counter, or null when the file carries no revision line. */
-  revision: number | null;
-  /** the trailing anchor's payload digest, or null when the line carries none (unverified). */
-  digest: string | null;
-}
-
-/**
- * SDD-003: a manifest read. `verified` is DD-009's three-case discipline, whole-file — true only
- * when a digest was present AND matched. A digest-less manifest parses unverified rather than
- * refused; a digest that is present and wrong is a quarantine and hands back no model at all.
- */
-export type VaultManifestParseResult =
-  VaultQuarantine | { quarantine: false; manifest: VaultManifest; verified: boolean };
+export type VaultQuarantineReason = VaultBlockQuarantineReason | VaultCatalogQuarantineReason;
 
 /**
  * The block was refused. `reason` is a stable code SB-057's boot scan can record and
@@ -1411,22 +1345,6 @@ export interface TTModule {
    * No DD-012 adoption: a missing section is reported, never claimed.
    */
   writeVaultCatalog(md: string, catalog: Partial<VaultCatalog>, opts?: { revision?: number }): VaultCatalogWriteResult;
-  /**
-   * SDD-003: the instance manifest's bytes — a format-2 document with a title line, the header
-   * extension (`cutover`, `timeLogHeading`, `timeSeparator`), any carried unknown headers, and one
-   * trailing whole-file `revision: N · digest` line. ALWAYS writes a digest; the digest-less shape
-   * is a read-side concession to a file TT did not write, never an emitter option. The revision is
-   * not bumped here — serializing is not committing.
-   */
-  serializeManifest(manifest: VaultManifest): string;
-  /**
-   * SDD-003: read the instance manifest, or refuse. A refusal hands back the reason and NO model:
-   * `TT.rateOf` resolves project → client → rate, so a manifest that kept its projects and dropped
-   * its clients would invoice every hour at 0 with no error anywhere.
-   */
-  parseManifest(md: string): VaultManifestParseResult;
-  /** The manifest's H1 when the file does not carry one of its own. */
-  MANIFEST_TITLE: string;
   serializeMd(state: Catalog): string;
   newId(): string;
   parseMd(md: string): Catalog;
