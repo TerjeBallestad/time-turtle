@@ -26,8 +26,11 @@ pm claim <ID> --as "<command>: <short label>"
 - **Release the moment your phase ends** — `pm release <ID>` — so the next phase can claim it. A plan releases when it files, not when it stops thinking; an abandoned attempt releases immediately. Closing a ticket releases automatically.
 - An unreleased claim reads as work-in-progress that nobody is doing. Claims self-expire after 4h, but don't rely on that.
 - Nothing to claim (a bare description with no PM item) → skip it.
+- **Claim before you edit a ticket body, too.** `pm patch --body` is an unguarded full replace — no `--base-hash`, no if-updated-at — so a patch built from a stale read drops another writer's edit at exit 0 with no warning. Re-read the body immediately before patching, then grep the read-back for your own text _and_ for text you did not intend to touch.
 
 Refer to tickets by name, never bare ID, so a reader knows what you're talking about without a lookup.
+
+**Withdrawing or correcting a finding:** put a superseding block at the **top of the ticket body**, quoting the retired wording. Never leave the correction in a comment — comments are append-only, so the withdrawn text always comes first and a cold reader can satisfy it before reaching the correction. Full rule and the measured failure modes: `~/.buzz/AGENTS.md` Rule 11 (the authoritative copy — do not restate it here).
 
 ## Git
 
