@@ -1,6 +1,7 @@
 import React from 'react';
 import TT from '../i18n';
-import styles from './ShapeChoice.module.css';
+import styles from './onboarding.module.css';
+import { OnboardingCard } from './OnboardingCard';
 import type { Shape } from '../../../shared/types';
 
 /**
@@ -50,40 +51,34 @@ export function ShapeChoice({ onAnswer }: { onAnswer: (shape: Shape) => void }) 
     onAnswer(shape);
   };
   return (
-    <div className={styles.screen} data-tt="shape-choice">
-      <div className={styles.card}>
-        <div className={styles.brand}>
-          <span className={styles.brandName}>Time Turtle</span>
-        </div>
-        <p className={styles.question}>{TT.t('Whose hours will this Time Turtle keep?')}</p>
-        <div className={styles.options}>
-          {/* `personal` FIRST, deliberately. It is the answer this question exists for — a team
+    <OnboardingCard tag="shape-choice" question={TT.t('Whose hours will this Time Turtle keep?')}>
+      <div className={styles.options}>
+        {/* `personal` FIRST, deliberately. It is the answer this question exists for — a team
               install almost never reaches this screen, because more than one user has already
               answered by existing (DD-015). */}
-          <button
-            className={styles.option}
-            disabled={busy}
-            data-tt="shape-choice-personal"
-            onClick={() => answer('personal')}
-          >
-            <div className={styles.optionLabel}>{TT.t('My own Obsidian-backed timesheet')}</div>
-            <div className={styles.optionBody}>
-              {TT.t(
-                'One person, no sign-in. Your Obsidian vault keeps the hours — Time Turtle writes them into your daily notes and reads back the edits you make there.',
-              )}
-            </div>
-          </button>
-          <button className={styles.option} disabled={busy} data-tt="shape-choice-team" onClick={() => answer('team')}>
-            <div className={styles.optionLabel}>{TT.t('Team')}</div>
-            <div className={styles.optionBody}>
-              {TT.t(
-                'Several people, each signing in, with roles and a review step before hours are invoiced. The hours live in Time Turtle’s own SQLite database, and every save is mirrored to markdown.',
-              )}
-            </div>
-          </button>
-        </div>
-        <div className={styles.note}>{TT.t('Asked once. You can change the answer later under Settings → Vault.')}</div>
+        <button
+          className={styles.option}
+          disabled={busy}
+          data-tt="shape-choice-personal"
+          onClick={() => answer('personal')}
+        >
+          <div className={styles.optionLabel}>{TT.t('My own Obsidian-backed timesheet')}</div>
+          <div className={styles.optionBody}>
+            {TT.t(
+              'One person, no sign-in. Your Obsidian vault keeps the hours — Time Turtle writes them into your daily notes and reads back the edits you make there.',
+            )}
+          </div>
+        </button>
+        <button className={styles.option} disabled={busy} data-tt="shape-choice-team" onClick={() => answer('team')}>
+          <div className={styles.optionLabel}>{TT.t('Team')}</div>
+          <div className={styles.optionBody}>
+            {TT.t(
+              'Several people, each signing in, with roles and a review step before hours are invoiced. The hours live in Time Turtle’s own SQLite database, and every save is mirrored to markdown.',
+            )}
+          </div>
+        </button>
       </div>
-    </div>
+      <div className={styles.note}>{TT.t('Asked once. You can change the answer later under Settings → Vault.')}</div>
+    </OnboardingCard>
   );
 }

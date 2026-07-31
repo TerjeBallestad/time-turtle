@@ -1,11 +1,12 @@
 import React from 'react';
 import TT from '../i18n';
 import { Button, Input } from '../ds';
-import styles from './ShapeChoice.module.css';
+import styles from './onboarding.module.css';
 import { ShapeChoice } from './ShapeChoice';
+import { OnboardingCard } from './OnboardingCard';
 import { api } from '../api';
 import type { ApiError } from '../api';
-import type { Shape, FirstRunResponse } from '../../../shared/types';
+import type { Shape, FirstRunResponse, FirstRunRequest } from '../../../shared/types';
 
 /**
  * DD-024 / SB-158: the five minutes a person actually meets, and the screen that stands where
@@ -45,7 +46,7 @@ export function FirstRun({ info, onDone }: { info: FirstRunResponse; onDone: () 
   const [busy, setBusy] = React.useState(false);
   const [err, setErr] = React.useState<string | null>(null);
 
-  const submit = (answer: { shape: Shape; vaultRoot?: string; demo?: boolean }) => {
+  const submit = (answer: FirstRunRequest) => {
     if (busy) return;
     setBusy(true);
     setErr(null);
@@ -53,9 +54,21 @@ export function FirstRun({ info, onDone }: { info: FirstRunResponse; onDone: () 
       .answerFirstRun(answer)
       .then(onDone)
       .catch((e: ApiError) => {
-        // The server's own sentence, verbatim — a refused vault path NAMES the path, which is the
-        // typo the person cannot otherwise see, and a 409 says the question was answered elsewhere.
-        setErr(e.message);
+        // THE CLIENT OWNS THIS SENTENCE (DD-018 ruling 6), and until the end-gate review it did
+        // not: `e.message` put the server's English on screen, so the one string a Norwegian could
+        // reach on this flow was the refusal — on the screen where a person is most likely to be
+        // wrong. The refusal has to NAME THE PATH, which is the typo they cannot otherwise see, and
+        // the path is one the client sent, so it does not need the server to say it back.
+        //
+        // 400 on this route means one thing from this screen: the folder is not there. The shape is
+        // always one of `TT.SHAPES` here because a button chose it. Anything else — a 409 saying
+        // the question was answered elsewhere, a 403 refusal, a 500 — keeps the server's own
+        // sentence, which is the house pattern for a refusal the client cannot re-derive.
+        setErr(
+          e.status === 400 && answer.vaultRoot
+            ? TT.t('There is no folder at') + ' ' + answer.vaultRoot
+            : TT.t(e.message),
+        );
         setBusy(false);
       });
   };
@@ -72,7 +85,7 @@ export function FirstRun({ info, onDone }: { info: FirstRunResponse; onDone: () 
 
   if (shape === 'personal')
     return (
-      <Screen question={TT.t('Which vault keeps these hours?')}>
+      <OnboardingCard tag="first-run" question={TT.t('Which vault keeps these hours?')}>
         {/* A registry with more than one vault in it: offer them, rather than making somebody
             retype a path they can see in Obsidian. A vault whose folder is no longer on disk is
             still OFFERED and flagged — an unmounted drive is still the vault they mean. */}
@@ -96,6 +109,17 @@ export function FirstRun({ info, onDone }: { info: FirstRunResponse; onDone: () 
             ))}
           </div>
         )}
+        {/* MECHANISM_DEVIATION, recorded here by PLAN-016's end-gate review because it had not been
+            recorded anywhere. TASK-071 specified the no-registry fallback as "a vault NAME field
+            over the fixed iCloud prefix — never a raw path box", from Terje's own words. This is a
+            raw path box whose PLACEHOLDER is the prefix.
+
+            WHY IT WAS NOT SILENTLY KEPT AND NOT SILENTLY CHANGED: composing prefix + name is the
+            better screen for the case it was specified for, and it makes the step UNANSWERABLE for
+            a vault that lives anywhere else — outside iCloud, on an external disk, in a plain
+            `~/Obsidian`. The spec does not say what that person types, and inventing an escape
+            hatch ("my vault is somewhere else") is a design decision, not an implementation one.
+            So it is surfaced on the gate (SB-175) rather than decided here. */}
         <div className={styles.field}>
           <Input
             autoFocus={true}
@@ -114,7 +138,11 @@ export function FirstRun({ info, onDone }: { info: FirstRunResponse; onDone: () 
           <code>{(root || '…') + '/' + TT.VAULT_PATHS_DEFAULT.daily}</code>{' '}
           {TT.t('and read back the edits you make there. You can change any of this later under Settings → Vault.')}
         </div>
-        {err && <div className={styles.err}>{err}</div>}
+        {err && (
+          <div className={styles.err} data-tt="first-run-error">
+            {err}
+          </div>
+        )}
         <Button
           variant="primary"
           className={styles.submit}
@@ -125,11 +153,11 @@ export function FirstRun({ info, onDone }: { info: FirstRunResponse; onDone: () 
           {TT.t('Keep my hours in this vault')}
         </Button>
         <BackLink disabled={busy} onClick={() => chooseStep(null)} />
-      </Screen>
+      </OnboardingCard>
     );
 
   return (
-    <Screen question={TT.t('Start with something in it?')}>
+    <OnboardingCard tag="first-run" question={TT.t('Start with something in it?')}>
       <label className={styles.check} data-tt="first-run-demo-toggle">
         <input type="checkbox" checked={demo} disabled={busy} onChange={(e) => setDemo(e.target.checked)} />
         <span>
@@ -138,7 +166,11 @@ export function FirstRun({ info, onDone }: { info: FirstRunResponse; onDone: () 
           )}
         </span>
       </label>
-      {err && <div className={styles.err}>{err}</div>}
+      {err && (
+        <div className={styles.err} data-tt="first-run-error">
+          {err}
+        </div>
+      )}
       {/* DD-018 ruling 5: the button says which of the two things it is about to do. `OK` under a
           checkbox makes the person re-read the checkbox to find out what they just agreed to. */}
       <Button
@@ -151,22 +183,7 @@ export function FirstRun({ info, onDone }: { info: FirstRunResponse; onDone: () 
         {demo ? TT.t('Add the example hours and start') : TT.t('Start with an empty timesheet')}
       </Button>
       <BackLink disabled={busy} onClick={() => chooseStep(null)} />
-    </Screen>
-  );
-}
-
-/** The card the first-run steps share with the question — one screen, three beats. */
-function Screen({ question, children }: { question: string; children: React.ReactNode }) {
-  return (
-    <div className={styles.screen} data-tt="first-run">
-      <div className={styles.card}>
-        <div className={styles.brand}>
-          <span className={styles.brandName}>Time Turtle</span>
-        </div>
-        <p className={styles.question}>{question}</p>
-        {children}
-      </div>
-    </div>
+    </OnboardingCard>
   );
 }
 

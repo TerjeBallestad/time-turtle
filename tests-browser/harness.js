@@ -61,18 +61,21 @@ export async function startApp(opts = {}) {
       // case sets its own password, which is also what keeps the hint out of their way.
       ...(opts.defaultPassword ? {} : { TT_ADMIN_PASSWORD: ADMIN_PASSWORD }),
       ...(opts.shape ? { TT_SHAPE: opts.shape } : {}),
-      // DD-024 / SB-140: NEVER the real Obsidian registry. Unset it unless a case supplies a
-      // fixture — an inherited one would put this machine's actual vault paths on the vault step.
+      // DD-024 / SB-140: NEVER the real Obsidian registry, in either branch of this line. Without
+      // a fixture it is forced at a path that does not exist, so `readObsidianVaults` returns [] and
+      // the vault step falls back to typing a path — an INHERITED value would put this machine's
+      // actual vault paths on a test's screen. `obsidianRegistry` names a fixture instead, which is
+      // the only way to reach the registry-backed half of that step (the prefill and the pick-list)
+      // from this rung. One caller today: first-run.test.js's registry case.
       TT_OBSIDIAN_REGISTRY: opts.obsidianRegistry || join(dataDir, 'no-such-obsidian.json'),
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
-  // KEPT, not discarded (DD-024 / SB-140): the boot prints `vault sync is idle: no vault folder is
-  // configured` when a `personal` install has no root, and "the first run did not actually finish
-  // the install" is exactly what that line means. A case that asserts the vault step worked can
-  // read it back instead of taking the client's word.
-  const stdout = [];
-  child.stdout.on('data', (d) => stdout.push(String(d)));
+  // Drained, not read. The line this once captured for — `vault sync is idle: no vault folder is
+  // configured` — is a BOOT line, and under DD-024 the shape is answered after boot, so it cannot
+  // print in this flow at all (tests-browser/first-run.test.js says so where it matters). Nothing
+  // reads stdout here, so nothing pretends to.
+  child.stdout.on('data', () => {});
   child.stderr.on('data', (d) => process.stderr.write(`[server:${port}] ${d}`));
   let exited = null;
   child.on('exit', (code) => {
@@ -132,7 +135,7 @@ export async function startApp(opts = {}) {
   //
   // `onboarding: true` stops HERE, with the question on screen and unanswered, for the tests whose
   // subject is the first run itself.
-  if (opts.onboarding) return { port, child, dataDir, mdDir, vaultDir, browser, page, pageErrors, stdout };
+  if (opts.onboarding) return { port, child, dataDir, mdDir, vaultDir, browser, page, pageErrors };
   if (!opts.shape) {
     // ANSWERING `Team` IS THE TRAP HALF. The open state resolves to an effective `team`, so this is
     // the answer a compare-first gesture would silently swallow (SB-133's early return) — leaving
@@ -160,7 +163,7 @@ export async function startApp(opts = {}) {
   await page.locator('text=Settings').first().click();
   await page.locator('button:has-text("+ client")').first().waitFor({ timeout: 15000 });
 
-  return { port, child, dataDir, mdDir, vaultDir, browser, page, pageErrors, stdout };
+  return { port, child, dataDir, mdDir, vaultDir, browser, page, pageErrors };
 }
 
 /**

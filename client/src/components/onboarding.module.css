@@ -1,6 +1,11 @@
-/* SB-098 item 4: the first-run question. Modelled on Login.module.css, because this is the
-   screen that stands where the login screen would have stood on a fresh install — and under
-   the `personal` answer, the screen that replaces it for good. */
+/* SB-098 item 4 / DD-024: THE ONBOARDING SCREEN — every beat of it. Modelled on Login.module.css,
+   because this is the screen that stands where the login screen would have stood on a fresh
+   install, and under the `personal` answer the screen that replaces it for good.
+
+   NAMED FOR THE GROUP, not for one component, and that is this repo's rule for a stylesheet with
+   more than one owner (`shared.module.css`, `cells.module.css`, `settings.module.css`). It was
+   `ShapeChoice.module.css` until DD-024 gave it a second component: `FirstRun.tsx` reached into
+   another component's private module, and half the classes here belonged to the reacher. */
 .screen {
   position: fixed;
   inset: 0;

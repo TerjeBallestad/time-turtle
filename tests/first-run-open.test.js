@@ -357,6 +357,49 @@ describe('DD-024 clause 1: the gate is the peer socket, not the Host header', ()
     await stopServer(server.child);
   }, 60000);
 
+  // ## Verified red-green: 2026-07-31, TRANSCRIBED. Added by PLAN-016's end-gate review. DD-024
+  //   clause 1 prices this route class on being "narrow and SELF-CLOSING", and only the POST was
+  //   closing: the GET went on serving every Obsidian vault path on the machine, re-read from disk,
+  //   to any unauthenticated loopback caller for the life of the install. Mutation — the `open ?`
+  //   guards removed from the payload, i.e. the route as task 4 left it:
+  //     FAIL  what it still says once the question is over is only what the login screen needs
+  //           AssertionError: an answered install still reports the machine's vault list:
+  //           expected [ { path: '/tmp/…', … } ] to have a length of +0 but got 1
+  it('what it still says once the question is over is only what the login screen needs', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'tt-first-run-narrow-'));
+    mkdirSync(join(dir, 'a-vault'));
+    const registry = join(dir, 'obsidian.json');
+    writeFileSync(registry, JSON.stringify({ vaults: { a: { path: join(dir, 'a-vault'), ts: 1, open: true } } }));
+    // `TT_ADMIN_PASSWORD: ''` so the seeded admin carries the published default — the hint is the
+    // one field that must SURVIVE the answer, and a server with its own password cannot show that.
+    const server = await startServer({
+      ...open('first-run-narrow'),
+      TT_ADMIN_PASSWORD: '',
+      TT_OBSIDIAN_REGISTRY: registry,
+    });
+
+    // WHILE OPEN it offers the vault, which is the whole point of carrying it.
+    const before = await bare(server.port, '/api/first-run');
+    expect(before.json.open).toBe(true);
+    expect(before.json.vaults).toHaveLength(1);
+    expect(before.json.vaultPrefix).toBeTruthy();
+
+    expect((await postFirstRun(server.port, { shape: 'team' })).status).toBe(200);
+
+    // AFTER the answer the prefill has no consumer — there is no vault step left to run — so it
+    // stops being said. `defaultLogin` is the one field that survives, because the moment it is
+    // needed IS the moment `open` is false: `team` closes the first run and lands the person on
+    // `<Login>`.
+    const after = await bare(server.port, '/api/first-run');
+    expect(after.status).toBe(200);
+    expect(after.json.open).toBe(false);
+    expect(after.json.vaults, "an answered install still reports the machine's vault list").toHaveLength(0);
+    expect(after.json.vaultPrefix).toBe('');
+    expect(after.json.defaultLogin).not.toBeNull();
+
+    await stopServer(server.child);
+  }, 60000);
+
   it('the LAN caller cannot ANSWER the question either', async () => {
     // Read-only is not the claim. A LAN caller that could POST would choose the shape of an
     // install it does not own — and under `personal` that install then serves without a login.

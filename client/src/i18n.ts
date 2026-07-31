@@ -145,6 +145,15 @@ const NO: Record<string, string> = {
     'og leser tilbake endringene du gjør der. Du kan endre alt dette senere under Innstillinger → Hvelv.',
   'Keep my hours in this vault': 'Hold timene mine i dette hvelvet',
   '← Back to the question': '← Tilbake til spørsmålet',
+  // The two refusals this flow can reach, added by PLAN-016's end-gate review — without them the
+  // ONE string a Norwegian could meet on the whole first run was the error, on the screen where a
+  // person is most likely to be wrong. The path is appended by the client, which sent it, so this
+  // key is the fixed half only (the same split the interpolated server refusals above use).
+  'There is no folder at': 'Det finnes ingen mappe på',
+  // The English side is server/src/index.js's FIRST_RUN_CLOSED VERBATIM — same discipline as the
+  // capability refusals at the top of this file. If you edit one, edit the other in the same commit.
+  'the first run is over: this install has already answered what it is':
+    'førstegangsoppsettet er over: denne installasjonen har allerede svart på hva den er',
   // DD-024 clause 3 / SB-159: the demo step. Opt-in, off by default, and the button says which of
   // the two things it is about to do (DD-018 ruling 5) — never `OK`, which would make a person
   // re-read the checkbox to find out what they just agreed to.

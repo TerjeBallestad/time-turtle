@@ -17,7 +17,8 @@
 //
 // ## Verified red-green: 2026-07-31 — see the stanza above each case.
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { readFileSync, existsSync } from 'node:fs';
+import { readFileSync, existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { startApp, stopApp, until, ADMIN_EMAIL, PUBLISHED_PASSWORD } from './harness.js';
 
@@ -42,17 +43,19 @@ describe('DD-024: a fresh install answers the question before it is asked for a 
 
   // ## Verified red-green: 2026-07-31, TRANSCRIBED. THE PRE-DD-024 BEHAVIOUR, restored — App.tsx's
   //   401 branch put back to a bare `<Login onLogin={…} />` with no first-run probe, i.e. SB-158's
-  //   finding exactly. 8 fail across this file and onboarding-shape.test.js, because the whole
-  //   surface goes with it, and it fails as the SYMPTOM rather than as a flag: a login form the
-  //   person has no password for is the only thing on screen.
+  //   finding exactly. RE-MEASURED 2026-07-31 after the Norwegian case was added — 9 fail, every
+  //   case in this file and every one in onboarding-shape.test.js, because the whole surface goes
+  //   with it. It fails as the SYMPTOM rather than as a flag: a login form the person has no
+  //   password for is the only thing on screen.
   //     FAIL  the first screen is the question, and there is no login form on it
   //           TimeoutError: locator.waitFor: Timeout 15000ms exceeded.
   //           waiting for locator('[data-tt="shape-choice"]') to be visible
+  //     FAIL  a Norwegian browser meets the whole flow in Norwegian
   //     FAIL  a fresh install is asked, in shape words, and cannot get past it
   //     FAIL  answering "Team" … / the install becomes personal … / the vault step cannot be
   //           skipped … / the hours a person logs land in their vault / the question and Settings
   //           → Vault … / a person who answers `Team` is told the password …
-  //           all: waiting for locator('[data-tt="shape-choice-team"]') to be visible
+  //           the rest: waiting for locator('[data-tt="shape-choice-team"]') to be visible
   it('the first screen is the question, and there is no login form on it', async () => {
     // `shape-choice` is step 1 and `first-run` is the card the two later steps share — the flow
     // reuses the question component rather than restating its words, so the anchors differ by step.
@@ -74,10 +77,15 @@ describe('DD-024: a fresh install answers the question before it is asked for a 
   //     FAIL  a Norwegian browser meets the whole flow in Norwegian
   //           AssertionError: the first-run question rendered in English to a Norwegian browser:
   //           expected 'Time Turtle\n\nWhose hours will this …' to contain 'Hvem sine timer'
-  //   SECOND MUTATION, the three vault-step keys deleted from `i18n.ts` — i.e. an English string
-  //   shipped with no Norwegian pair, which `TT.t` swallows silently by keying ON the English:
+  //   SECOND MUTATION, the vault-step keys deleted from `i18n.ts` — i.e. an English string shipped
+  //   with no Norwegian pair, which `TT.t` swallows silently by keying ON the English:
   //     FAIL  … AssertionError: expected 'Time Turtle\n\nWhich vault keeps thes…' to contain
   //           'Hvilket hvelv'
+  //   THIRD MUTATION, the same for the REFUSAL key alone — the string this case was extended to
+  //   cover during the end-gate review, because it is the one a person typing a path actually
+  //   reads and it was the last English sentence on the flow:
+  //     FAIL  … AssertionError: the refusal reached a Norwegian screen in English:
+  //           expected 'There is no folder at /no/such/vault' to contain 'Det finnes ingen mappe på'
   it('a Norwegian browser meets the whole flow in Norwegian', async () => {
     // A SECOND CONTEXT, not a second server: the language of a pre-session screen is a property of
     // the BROWSER, because there is no session yet to hold a preference. This is the only signal a
@@ -104,6 +112,22 @@ describe('DD-024: a fresh install answers the question before it is asked for a 
     expect(vault).toContain('Hvilket hvelv');
     expect(vault).toContain('Hold timene mine');
     expect(vault).not.toContain('Which vault');
+
+    // AND THE REFUSAL, which is the string a person is most likely to actually read on this screen
+    // — they are the ones typing the path. It was the LAST English string on the whole flow until
+    // the end-gate review moved the sentence from the server's response to the client.
+    await page.locator('[data-tt="first-run-vault-root"]').fill('/no/such/vault');
+    await page.locator('[data-tt="first-run-vault-submit"]').click();
+    // The REFUSAL element, not the card: the card already carries the path in its effect line
+    // ("…skriver timene dine inn i /no/such/vault/Calendar/Daily"), so waiting on the card text
+    // matches before the round trip even leaves.
+    const refusal = page.locator('[data-tt="first-run-error"]');
+    await refusal.waitFor({ timeout: 15000 });
+    const shown = await refusal.innerText();
+    expect(shown, 'the refusal never named the path').toContain('/no/such/vault');
+    expect(shown, 'the refusal reached a Norwegian screen in English').toContain('Det finnes ingen mappe på');
+    expect(shown).not.toContain('no folder at');
+
     expect(errors).toEqual([]);
     await context.close();
   }, 120000);
@@ -122,14 +146,14 @@ describe('DD-024 / SB-140: answering `personal` finishes the install', () => {
 
   // ## Verified red-green: 2026-07-31, TRANSCRIBED. THE STEP MADE SKIPPABLE — the vault submit's
   //   `disabled={!root.trim() || busy}` weakened to `disabled={busy}`, which is the plausible
-  //   version of this screen and the one SB-140 exists to forbid. 3 of 5 fail — this case on its
+  //   version of this screen and the one SB-140 exists to forbid. 3 of 6 fail — this case on its
   //   first assertion, and the two after it because the flow never reaches the app:
   //     FAIL  the vault step cannot be skipped, and a path that is not there is refused by name
   //           AssertionError: the vault step could be completed with no vault named:
   //           expected false to be true // Object.is equality
   //   SECOND MUTATION, the route's `directoryExists` validation removed (task 4's guard): the same
   //   case fails one assertion later — the typo is ACCEPTED, the first run ends, and the install is
-  //   left pointing at a folder that does not exist. 2 of 5:
+  //   left pointing at a folder that does not exist. 2 of 6:
   //     FAIL  the vault step cannot be skipped, and a path that is not there is refused by name
   //           AssertionError: expected false to be true // Object.is equality
   //     FAIL  the hours a person logs land in their vault
@@ -176,10 +200,11 @@ describe('DD-024 / SB-140: answering `personal` finishes the install', () => {
   // ## Verified red-green: 2026-07-31, TRANSCRIBED. THE HALF-FINISHED INSTALL — `FirstRun`'s submit
   //   changed to post `{ shape: 'personal' }` with the root dropped, which is the state SB-140
   //   describes in as many words: the person answered, the answer stored, and the install they were
-  //   sold is an ordinary local timesheet. The case above stays green (the step still cannot be
-  //   skipped on screen), and THIS one fails, which is the split that matters:
-  //   2 of 5 — the un-skippable case goes too, because a refusal that never arrives leaves the
-  //   `personal` answer sitting on the vault step:
+  //   sold is an ordinary local timesheet. RE-MEASURED 2026-07-31 — 2 of 6, and the earlier claim
+  //   that the case above "stays green" was WRONG: it goes red too, on its LAST assertion rather
+  //   than its first, because a root that never travels means the refusal it expects never arrives.
+  //     FAIL  the vault step cannot be skipped, and a path that is not there is refused by name
+  //           AssertionError: expected false to be true // Object.is equality
   //     FAIL  the hours a person logs land in their vault
   //           AssertionError: no daily note was ever written to the vault: expected false to be true
   //
@@ -233,6 +258,75 @@ describe('DD-024 / SB-140: answering `personal` finishes the install', () => {
   }, 120000);
 });
 
+// The registry-backed half of the vault step — the prefill and the pick-list. Every OTHER case in
+// this file runs with no registry (the harness forces a path that does not exist, so nothing can
+// read this machine's real vaults), which means without this case the easy path is the untested one
+// — and it is the path Terje's own second machine takes, because his registry exists.
+describe('DD-024 / SB-140: a machine that has Obsidian vaults registered', () => {
+  let app = null;
+  let vaults = null;
+  beforeAll(async () => {
+    // A FIXTURE, never `~/Library/Application Support/obsidian/obsidian.json`. Two vaults, and the
+    // OPEN one is written second so the offered order cannot be insertion order by accident.
+    const dir = mkdtempSync(join(tmpdir(), 'tt-browser-registry-'));
+    vaults = { closed: join(dir, 'Ideaverse'), open: join(dir, 'ballestad') };
+    mkdirSync(vaults.closed);
+    mkdirSync(vaults.open);
+    const registry = join(dir, 'obsidian.json');
+    writeFileSync(
+      registry,
+      JSON.stringify({
+        vaults: { a: { path: vaults.closed, ts: 2 }, b: { path: vaults.open, ts: 1, open: true } },
+      }),
+    );
+    app = await startApp({ onboarding: true, obsidianRegistry: registry });
+  }, 120000);
+  afterAll(async () => {
+    await stopApp(app);
+  });
+
+  // ## Verified red-green: 2026-07-31, TRANSCRIBED. THE PREFILL DROPPED — `useState(info.vaults[0]
+  //   ?.path ?? '')` weakened to `useState('')`, i.e. the registry read shipped and reached nobody,
+  //   which is SB-063's shape and the reason SB-140 asked for a registry at all:
+  //   1 of 7, and nothing else moves — every other case runs with no registry at all:
+  //     FAIL  is offered them, with the one open in Obsidian already filled in
+  //           AssertionError: the vault step made a person type a path Obsidian already knows:
+  //           expected '' to be '/var/folders/qd/2zxnlvp14c994jtxqr34t…' // Object.is equality
+  it('is offered them, with the one open in Obsidian already filled in', async () => {
+    await app.page.locator('[data-tt="shape-choice-personal"]').click();
+    const root = app.page.locator('[data-tt="first-run-vault-root"]');
+    await root.waitFor({ timeout: 15000 });
+
+    // PREFILLED, and with the OPEN vault rather than the most recently used one — `vaults[0]` is
+    // the server's answer to "which one did you mean", and this is the rung that proves a person
+    // sees it rather than that a route returned it.
+    expect(await root.inputValue(), 'the vault step made a person type a path Obsidian already knows').toBe(
+      vaults.open,
+    );
+
+    // Both are OFFERED, open first, and the filled one is the one marked as chosen.
+    const options = app.page.locator('[data-tt="first-run-vault-option"]');
+    expect(await options.count()).toBe(2);
+    expect((await options.nth(0).innerText()).trim().split('\n')[0]).toBe('ballestad');
+    expect((await options.nth(1).innerText()).trim().split('\n')[0]).toBe('Ideaverse');
+    expect(await options.nth(0).getAttribute('aria-pressed')).toBe('true');
+
+    // Picking the other one MOVES the field and the mark — a click that filled nothing visible
+    // would leave a person unable to tell which vault they had chosen.
+    await options.nth(1).click();
+    await expect.poll(() => root.inputValue()).toBe(vaults.closed);
+    expect(await options.nth(1).getAttribute('aria-pressed')).toBe('true');
+    expect(await options.nth(0).getAttribute('aria-pressed')).toBe('false');
+
+    // And it answers: the offered path is one the server accepts without editing.
+    await app.page.locator('[data-tt="first-run-vault-submit"]').click();
+    await app.page.locator('[data-tt="first-run"]').waitFor({ state: 'detached', timeout: 15000 });
+    const state = await stateFromPage(app.page);
+    expect(state.settings.vaultPaths.root).toBe(vaults.closed);
+    expect(app.pageErrors).toEqual([]);
+  }, 180000);
+});
+
 describe('DD-024 clause 2: the wall answering `Team` lands you on', () => {
   let app = null;
   beforeAll(async () => {
@@ -246,7 +340,7 @@ describe('DD-024 clause 2: the wall answering `Team` lands you on', () => {
 
   // ## Verified red-green: 2026-07-31, TRANSCRIBED. THE NOTE REMOVED — `<Login>`'s `defaultLogin`
   //   block deleted, i.e. the wall this plan built and did not close — 1 of 1 fails:
-  //   1 of 5, and nothing else moves:
+  //   1 of 6, and nothing else moves:
   //     FAIL  a person who answers `Team` is told the password nobody ever showed them
   //           TimeoutError: locator.waitFor: Timeout 15000ms exceeded.
   //           waiting for locator('[data-tt="login-default-credentials"]') to be visible

@@ -108,37 +108,40 @@ const shapeSwitchRefusal = (count) =>
 const BIND_REFUSAL =
   'cannot store the personal shape on this process: it is bound to a non-loopback address, and the personal shape has no login (DD-015), so it would serve an unauthenticated timesheet to that network — or, once it refuses every non-loopback peer, to nobody at all. Recover with:  unset TT_HOST';
 /**
- * EVERY REASON A SHAPE MAY NOT BE STORED, worded once — a shape-transition door is a second door
- * into one decision, never a second decision. Three doors call this: `POST /api/first-run`,
- * `POST /api/shape` and `PUT /api/state`. A door that refuses less than its siblings is a bypass,
- * and three inlined copies of a growing list is how one comes to refuse less.
+ * DD-024 Amendment 1 §3: may this process store `personal` AT ALL, given what it is bound to?
  *
- * ORDER MATTERS and is the order the existing doors already applied: the lock first (DC-002, it is
- * env-only and beats any write), then DD-006's one-person rule, then the bind.
- *
- * THE BIND REFUSAL IS THE NEW ONE (DD-024 Amendment 1 §3) and its predicate is exact. `BIND_HOST`
- * `undefined` — the ordinary install with no `TT_HOST` — must NOT refuse, or every first run
- * breaks: an unset `TT_HOST` binds every interface, loopback among them, and DD-024 clause 4's
- * per-request peer refusal is sufficient there. What it catches is `TT_HOST` SET to a routable
- * address: loopback is then never bound at all, so after the answer the process serves NOBODY from
- * ANYWHERE for the life of the process. That is worse than a refusal and it is silent.
+ * ITS PREDICATE IS EXACT. `BIND_HOST` `undefined` — the ordinary install with no `TT_HOST` — must
+ * NOT refuse, or every first run breaks: an unset `TT_HOST` binds every interface, loopback among
+ * them, and DD-024 clause 4's per-request peer refusal is sufficient there. What it catches is
+ * `TT_HOST` SET to a routable address: loopback is then never bound at all, so after the answer the
+ * process serves NOBODY from ANYWHERE for the life of the process. That is worse than a refusal and
+ * it is silent.
  *
  * `isLoopbackHost` is reused rather than joined by a fourth predicate — it reads an
  * operator-supplied value, which is exactly what `BIND_HOST` is.
  *
- * THE BIND CLAUSE IS ITS OWN FUNCTION rather than a line in here, because the three doors do not
+ * IT IS ITS OWN FUNCTION rather than a line in `shapeStoreRefusal`, because the three doors do not
  * share refusal SEMANTICS even though they share the rules. `PUT /api/state` is compare-not-reject
  * — the client re-sends the whole settings object on every debounce and `useServerSync` re-queues
  * any non-409 forever, so a blanket refusal there is a permanent toast loop — while the two POST
- * doors refuse outright. That door composes `bindRefusal` inside its own change detection; these
- * two take the whole list.
+ * doors refuse outright. That door composes THIS function inside its own change detection; the two
+ * POST doors take the whole list below.
  * @param {string} shape the shape the caller wants stored @returns {string | null} the refusal, or null
  */
-/** @param {string} shape the shape the caller wants stored @returns {string | null} */
 function bindRefusal(shape) {
   return shape === 'personal' && BIND_HOST != null && !isLoopbackHost(BIND_HOST) ? BIND_REFUSAL : null;
 }
-/** @param {string} shape the shape the caller wants stored @returns {string | null} */
+/**
+ * EVERY REASON A SHAPE MAY NOT BE STORED, worded once — a shape-transition door is a second door
+ * into one decision, never a second decision. Three doors call this: `POST /api/first-run`,
+ * `POST /api/shape` and `PUT /api/state` (the last through `bindRefusal` alone, for the reason
+ * above). A door that refuses less than its siblings is a bypass, and three inlined copies of a
+ * growing list is how one comes to refuse less.
+ *
+ * ORDER MATTERS and is the order the existing doors already applied: the lock first (DC-002, it is
+ * env-only and beats any write), then DD-006's one-person rule, then the bind.
+ * @param {string} shape the shape the caller wants stored @returns {string | null} the refusal, or null
+ */
 function shapeStoreRefusal(shape) {
   if (shapeLocked()) return 'the instance shape is locked by server configuration (TT_SHAPE_LOCK)';
   // DD-006 consequence 1, direction 2. Compared against the EFFECTIVE shape rather than the stored
@@ -174,10 +177,16 @@ function singleUserShape() {
  *
  * Resolved SERVER-SIDE, like every other shape decision. The client renders the question; it
  * does not get to decide whether it is being asked.
+ *
+ * THE FIRST TWO CONDITIONS ARE `firstRunOpen()`, CALLED RATHER THAN RESTATED (declared far below,
+ * next to the routes it gates — a function declaration, so the hoist is real and not a trick). They
+ * were a second copy until the end-gate review: DD-024's credential-free surface and this modal are
+ * two views of ONE open state, and a copy is how they come to disagree about whether the question
+ * is owed. Only the role condition belongs to this one, because only this one has a resolved user.
  * @param {User} user @returns {boolean}
  */
 function shapeQuestionOpen(user) {
-  return shapeTarget().source === 'default' && db.listUsers().length === 1 && user.role === 'admin';
+  return firstRunOpen() && user.role === 'admin';
 }
 
 // ---- SB-098 / DD-015: the loopback bind, and it is NOT best-effort ----
@@ -383,7 +392,13 @@ const app = express();
 // challenge in front of it — a colleague typing an IP is what a company install is FOR.
 const PEER_REFUSAL = 'this Time Turtle is a personal install: it answers only the machine it runs on.';
 app.use((req, res, next) => {
-  if (singleUserShape() && !isLoopbackPeer(req.socket.remoteAddress)) {
+  // THE CHEAP TERM FIRST, and the order is not style. This middleware is registered ahead of the
+  // routes AND the static handler, so it runs for every JS chunk, every stylesheet and the
+  // background image — while `singleUserShape()` reaches `getStoredShape()`, a synchronous SQLite
+  // read. Peer-first means a loopback caller never touches the database, and on a personal install
+  // every caller is a loopback caller. Both terms are pure, so the conjunction is unchanged, and
+  // the shape is still resolved PER REQUEST rather than cached, which is the property that matters.
+  if (!isLoopbackPeer(req.socket.remoteAddress) && singleUserShape()) {
     // Nothing about the caller is reflected back, including the address it came from.
     return res.status(403).json({ error: PEER_REFUSAL });
   }
@@ -1295,10 +1310,17 @@ function firstRunCaller(req) {
   return isLoopbackPeer(req.socket.remoteAddress) && isLoopbackHostHeader(req.headers.host);
 }
 /**
- * 404 — the same answer an unknown route gets, never a 403.
+ * 404 — the same STATUS an unknown route gets, never a 403.
  *
  * A 403 confirms the surface EXISTS, which tells a scanner where to come back to once the install
  * is in a state it likes. Nothing about the caller is reflected back either.
+ *
+ * THE STATUS, NOT THE BYTES, and the end-gate review is why that word is now precise. The SPA
+ * fallback excludes `/api/`, so an unknown `/api/*` path falls through to Express's default handler
+ * and answers an HTML `Cannot GET …` body — this one answers JSON. A scanner comparing bodies can
+ * still tell them apart. Deliberately NOT closed by delegating to `next()`: that would put the
+ * string `first-run` back into the body, which is the one thing this refusal exists to withhold
+ * (`tests/first-run-open.test.js` asserts it is absent).
  * @param {Response} res
  */
 const notFound = (res) => res.status(404).json({ error: 'not found' });
@@ -1331,23 +1353,33 @@ function defaultLoginHint() {
 // answered — it does not start 404ing. The client needs a definite answer to decide whether to
 // render the first run or `<Login>`, and "the route vanished" and "the server is down" are the
 // same bytes to a browser. Only the PEER gate produces a 404 here, because that is the caller who
-// must not learn the surface exists. Task 3 (SB-140) adds the vault prefill to this same payload,
-// so the vault step costs no second round trip.
+// must not learn the surface exists.
+//
+// WHAT THE ROUTE STILL SAYS ONCE THE QUESTION IS OVER IS DELIBERATELY THIN, and the end-gate review
+// is what made it thin. DD-024 clause 1 prices this route class on being "narrow and self-closing",
+// so the payload closes field by field even though the route does not:
+//
+//   • `vaults` / `vaultPrefix` — ONLY WHILE OPEN. They exist to prefill the vault step, which no
+//     longer runs, and an answered `team` install has no vault at all. Left unconditional they were
+//     a permanent unauthenticated read of every Obsidian vault path on the machine, re-read from
+//     disk on every request, for the life of the install. Nothing consumed them and nothing missed
+//     them; that is the whole argument for gating them.
+//   • `defaultLogin` — needed exactly WHEN `open` is false, which is why the route answers at all
+//     past the answer: `team` closes the first run and lands the person on `<Login>`. It is a
+//     published constant (DD-004), loopback-only, and it retires itself the moment the password
+//     changes. One probe on the 401 path decides both — first run or login, and if login, whether
+//     the starting password still works.
 app.get('/api/first-run', (req, res) => {
   if (!firstRunCaller(req)) return notFound(res);
+  const open = firstRunOpen();
   // SB-140: the vault prefill rides HERE rather than on a second endpoint. The vault step is one
   // beat of one flow, and a second round trip is a second thing that can be slow or fail on the
   // first screen a person ever sees. `readObsidianVaults` never throws — an absent or malformed
-  // registry is an empty list, and the client falls back to a vault NAME over `vaultPrefix`.
-  //
-  // DD-024 clause 2 rides here too, and that is why this route keeps answering after the question
-  // is over: the `team` answer CLOSES the first run and lands the person on `<Login>`, so the one
-  // moment the hint is needed is the moment `open` is already false. One probe on the 401 path
-  // decides both — first run or login, and if login, whether the published password still works.
+  // registry is an empty list, and the client falls back to typing a path.
   res.json({
-    open: firstRunOpen(),
-    vaults: readObsidianVaults(),
-    vaultPrefix: ICLOUD_VAULT_PREFIX,
+    open,
+    vaults: open ? readObsidianVaults() : [],
+    vaultPrefix: open ? ICLOUD_VAULT_PREFIX : '',
     defaultLogin: defaultLoginHint(),
   });
 });

@@ -61,7 +61,7 @@ function lanAddress() {
 }
 
 /** One hand-written HTTP/1.1 request to a chosen address with a chosen `Host`. */
-function rawRequest(port, { connectTo = '127.0.0.1', method = 'GET', path = '/api/state', host, body } = {}) {
+function rawRequest(port, { connectTo = '127.0.0.1', method = 'GET', path = '/api/state', host, body, cookie } = {}) {
   return new Promise((ok, fail) => {
     const socket = connect(port, connectTo);
     socket.setTimeout(10000, () => {
@@ -69,6 +69,7 @@ function rawRequest(port, { connectTo = '127.0.0.1', method = 'GET', path = '/ap
       fail(new Error(`raw ${method} ${path} to ${connectTo} (Host: ${host}) timed out`));
     });
     const lines = [`${method} ${path} HTTP/1.1`, `Host: ${host ?? `localhost:${port}`}`];
+    if (cookie) lines.push(`Cookie: ${cookie}`);
     if (body !== undefined) {
       lines.push('Content-Type: application/json');
       lines.push(`Content-Length: ${Buffer.byteLength(body)}`);
@@ -298,6 +299,56 @@ describe('DD-024 Amendment 1: storing `personal` on a routable bind is refused',
     });
     expect(viaShapeDoor.status).toBe(403);
     expect(viaShapeDoor.raw).toMatch(/unset TT_HOST/);
+
+    await stopServer(server.child);
+  }, 60000);
+
+  // ## Verified red-green: 2026-07-31, TRANSCRIBED. Added by PLAN-016's end-gate review, which
+  //   found this door IMPLEMENTED AND UNASSERTED. Mutation: the `bindRefusal('personal')` block
+  //   deleted from `PUT /api/state`. The case above stays green — it is the OTHER door — which is
+  //   the whole reason this one is not a duplicate of it:
+  //     FAIL  and the THIRD door too, where the refusal is composed differently
+  //           AssertionError: PUT /api/state stored `personal` on a routable bind:
+  //           expected 200 to be 403
+  it('and the THIRD door too, where the refusal is composed differently', async () => {
+    // DD-024 Amendment 1 §3 names three doors. This is the one whose refusal sits INSIDE the
+    // route's change detection rather than beside the locks, because `useServerSync` re-queues any
+    // non-409 forever and a ride-along refusal would be a permanent toast loop. That asymmetry is
+    // exactly what a future "simplify these three to look alike" would erase, and until this case
+    // existed nothing would have noticed.
+    const lan = lanAddress();
+    const server = await startServer({ ...open('peer-bind-put'), TT_HOST: lan }, { readyHost: lan });
+
+    const login = await rawRequest(server.port, {
+      connectTo: lan,
+      method: 'POST',
+      path: '/api/auth/login',
+      host: `localhost:${server.port}`,
+      body: JSON.stringify({ email: 'admin@timeturtle.local', password: 'testpw' }),
+    });
+    expect(login.status).toBe(200);
+    const cookie = /set-cookie:\s*([^;\r\n]+)/i.exec(login.raw)[1];
+
+    const put = await rawRequest(server.port, {
+      connectTo: lan,
+      method: 'PUT',
+      path: '/api/state',
+      host: `localhost:${server.port}`,
+      cookie,
+      body: JSON.stringify({ settings: { shape: 'personal' } }),
+    });
+    expect(put.status, 'PUT /api/state stored `personal` on a routable bind').toBe(403);
+    expect(put.raw).toMatch(/unset TT_HOST/);
+
+    // And it really refused rather than merely answered oddly: the shape did not move.
+    const after = await rawRequest(server.port, {
+      connectTo: lan,
+      path: '/api/state',
+      host: `localhost:${server.port}`,
+      cookie,
+    });
+    expect(after.status).toBe(200);
+    expect(after.json.shape).toBe('team');
 
     await stopServer(server.child);
   }, 60000);

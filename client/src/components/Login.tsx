@@ -3,6 +3,7 @@ import TT from '../i18n';
 import { Button, FormRow, Input } from '../ds';
 import styles from './Login.module.css';
 import { api } from '../api';
+import type { FirstRunResponse } from '../../../shared/types';
 
 interface LoginProps {
   onLogin: () => void;
@@ -12,7 +13,7 @@ interface LoginProps {
    * been changed, an operator set their own `TT_ADMIN_PASSWORD`, or the probe 404'd because this
    * browser is not on the machine the server runs on.
    */
-  defaultLogin: { email: string; password: string } | null;
+  defaultLogin: FirstRunResponse['defaultLogin'];
 }
 
 /**

@@ -147,9 +147,10 @@ describe('the directory check that stands in front of a stored vault root', () =
 });
 
 describe('the fallback prefix', () => {
-  it('names the macOS iCloud location a vault NAME is composed onto', () => {
-    // Exported so the client shows it as fixed text beside the name field rather than restating
-    // it — one home for a path that appears in a sentence a person reads.
+  it('names the macOS iCloud location Obsidian keeps vaults under', () => {
+    // Exported so the client can put it in front of a person without restating it. It reaches the
+    // screen as the vault field's placeholder rather than as fixed text beside a NAME field — see
+    // the recorded deviation in FirstRun.tsx and in this module's own header.
     expect(ICLOUD_VAULT_PREFIX).toMatch(/Library\/Mobile Documents\/iCloud~md~obsidian\/Documents$/);
   });
 });
