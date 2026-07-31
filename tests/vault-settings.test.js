@@ -45,9 +45,6 @@ describe('Settings.vaultPaths', () => {
       daily: 'Journal/Days',
       weekly: 'Journal/Weeks',
       catalog: 'Meta/Catalog.md',
-      // SB-057: the heading is CONFIGURATION, never a constant — renaming it is the whole
-      // reason it is a field, so a test that never renames it proves nothing about that.
-      timeLogHeading: 'Timelogg',
     };
     expect(
       (await admin('PUT', '/api/state', { settings: { ...state.json.settings, vaultPaths: wanted } })).status,
@@ -58,6 +55,31 @@ describe('Settings.vaultPaths', () => {
     const second = await startServer({ TT_DATA_DIR: data, TT_MD_DIR: md });
     admin = await adminOn(second.port);
     expect((await admin('GET', '/api/state')).json.settings.vaultPaths).toEqual(wanted);
+    await stopServer(second.child);
+  }, 40000);
+
+  // DD-026 clause 5. The heading used to round-trip as `vaultPaths.timeLogHeading` and the case
+  // above proved it there; it is a settings key of its own now, so the same claim is made here
+  // rather than dropped. Renaming it is the whole reason it is configurable, so a test that never
+  // renames it proves nothing about that.
+  it('the time-log heading round-trips as a SETTING, and survives a restart', async () => {
+    const { data, md } = dataDir('vault-heading');
+    const first = await startServer({ TT_DATA_DIR: data, TT_MD_DIR: md });
+    let admin = await adminOn(first.port);
+    expect((await admin('GET', '/api/state')).json.settings.timeLogHeading).toBe(TT.TIME_LOG_HEADING_DEFAULT);
+    const state = await admin('GET', '/api/state');
+    expect(
+      (await admin('PUT', '/api/state', { settings: { ...state.json.settings, timeLogHeading: 'Timelogg' } })).status,
+    ).toBe(200);
+    expect((await admin('GET', '/api/state')).json.settings.timeLogHeading).toBe('Timelogg');
+    // and it is NOT a path — a heading written into `vaultPaths` is one the other machine never
+    // sees, which is two blocks in one note
+    expect((await admin('GET', '/api/state')).json.settings.vaultPaths).not.toHaveProperty('timeLogHeading');
+    await stopServer(first.child);
+
+    const second = await startServer({ TT_DATA_DIR: data, TT_MD_DIR: md });
+    admin = await adminOn(second.port);
+    expect((await admin('GET', '/api/state')).json.settings.timeLogHeading).toBe('Timelogg');
     await stopServer(second.child);
   }, 40000);
 

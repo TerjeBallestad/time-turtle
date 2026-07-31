@@ -136,7 +136,7 @@ describe('DD-017 §3: a personal week that predates the vault', () => {
     // below the browser: a green api test cannot see an input that is absent.
     //
     // CASE A, asserted rather than assumed. The week the nav lands on is the one BEFORE today, so
-    // its days are all in the past — but `vaultCutover` is stamped as a UTC instant while
+    // its days are all in the past — but the Shape stamp is written as a UTC instant while
     // `Entry.date` is a local day (SB-147), so on the one weekday where last week's Sunday IS the
     // cutover day, that Sunday is editable and keeps its add-row. That is the straddling week
     // DD-017's mock does not cover, working: the line renders because SOME day qualifies, and the

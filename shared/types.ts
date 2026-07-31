@@ -206,10 +206,12 @@ export interface ShapeCapabilities {
  * SB-058 own everything that opens a file under these paths, and may extend this shape
  * ADDITIVELY. `root` empty means the vault has not been chosen yet.
  *
- * `timeLogHeading` is the heading TT's block sits under in a daily note, and SB-057 established
- * that it is CONFIGURATION and never a constant: rename or translate that heading and TT's
- * parse boundary moves with it, which is why `TT.locateVaultBlock` is already parameterised on
- * it rather than matching a literal `## Time Log`.
+ * FOUR PATHS AND NOTHING ELSE. `timeLogHeading` used to be the fifth and is not (DD-026 clause 5):
+ * this object is HOW A MACHINE FINDS THE VAULT, and two machines legitimately hold different
+ * absolute paths to one iCloud folder, which is exactly why disagreement here costs nothing. Two
+ * machines disagreeing about the HEADING put two blocks in one note, so it is vault property and
+ * it lives in the Catalog. It is still configuration and never a constant — `Settings.timeLogHeading`
+ * is its home, and `TT.locateVaultBlock` stays parameterised on it.
  */
 export interface VaultPaths {
   /** absolute path of the Obsidian vault; '' until chosen */
@@ -220,8 +222,6 @@ export interface VaultPaths {
   weekly: string;
   /** the catalog note (SB-058), relative to `root` */
   catalog: string;
-  /** the heading TT's time block sits under in a daily note */
-  timeLogHeading: string;
 }
 
 export interface Settings {
@@ -257,9 +257,16 @@ export interface Settings {
    * enforcement exists still records when it happened.
    *
    * An ISO instant rather than a bare day: DD-016 words it as an instant, and a day-grained
-   * comparison against `Entry.date` is `vaultCutover.slice(0, 10)`.
+   * comparison against `Entry.date` is `shapeStamp.slice(0, 10)`.
    */
-  vaultCutover?: string;
+  shapeStamp?: string;
+  /**
+   * DD-026 clause 5: the heading TT's block sits under in a daily note. It LEFT `vaultPaths` —
+   * that object is how a MACHINE finds the vault, and this is vault property, because two machines
+   * disagreeing about it put two blocks in one note. Its authority is the Catalog; the SQLite row
+   * is the derived index, exactly as `currency` and `language` already are.
+   */
+  timeLogHeading?: string;
   /**
    * SB-056: where inside the vault TT reads and writes. INSTANCE-LOCAL for the same reason as
    * `shape` — these paths are how TT FINDS the catalog note, so serializing them INTO it
@@ -317,7 +324,7 @@ export interface CommitSegment {
  */
 export interface VaultRuleContext {
   shape?: string | null;
-  vaultCutover?: string | null;
+  cutover?: string | null;
   commits?: CommitSegment[] | null;
   admin?: boolean;
 }
@@ -1160,6 +1167,8 @@ export interface TTModule {
   SHAPES: Shape[];
   /** SB-056: the default vault paths. The ONE home — SB-057/SB-058 extend the shape additively. */
   VAULT_PATHS_DEFAULT: VaultPaths;
+  /** the heading TT's block sits under when no Catalog has said otherwise (DD-026 clause 5) */
+  TIME_LOG_HEADING_DEFAULT: string;
   /** SB-100: what a shape may do. Consulted at CALL TIME by server guards and client surfaces alike. */
   shapeCapabilities(shape?: string | null): ShapeCapabilities;
   /** SB-100 / DD-015: the backend this shape DERIVES. Never selected; unknown → the safe `sqlite`. */
@@ -1400,7 +1409,7 @@ export interface TTModule {
   parseVaultCatalogSection(md: string, section: VaultCatalogSectionName): VaultCatalogSectionResult;
   /**
    * SB-058: the settings keys the catalog note carries. An ALLOWLIST, so a key invented later is
-   * excluded by default — `shape`, `vaultPaths`, `mdDir` and `vaultCutover` are instance-local
+   * excluded by default — `shape`, `vaultPaths`, `mdDir` and `shapeStamp` are instance-local
    * and must never reach the note, because the first three are how TT FINDS it.
    */
   VAULT_CATALOG_SETTING_KEYS: string[];

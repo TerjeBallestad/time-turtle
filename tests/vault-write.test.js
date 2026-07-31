@@ -18,7 +18,7 @@ import TT from '../shared/core.js';
 import { startServer, stopServer, stopAllServers, adminOn, containsRow } from './util.js';
 
 const HEADING = 'Time Log';
-/** Dates are relative to today, because `vaultCutover` is stamped at first boot. */
+/** Dates are relative to today, because `cutover` is stamped at first boot. */
 const TODAY = TT.todayStr();
 const TOMORROW = TT.addDays(TODAY, 1);
 
@@ -65,7 +65,7 @@ describe('the vault writer (api)', () => {
     const state = await admin('GET', '/api/state');
     // the shape, asserted on the wire — without it every assertion below is vacuous
     expect(state.json.shape).toBe('personal');
-    expect(state.json.settings.vaultCutover).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    expect(state.json.settings.shapeStamp).toMatch(/^\d{4}-\d{2}-\d{2}T/);
     // ONLY `vaultPaths`. Echoing the whole settings object back would store `shape: 'team'` —
     // `getSettings().shape` DEFAULTS to team when nothing is stored, even on an install whose
     // EFFECTIVE shape is `personal` via TT_SHAPE — and a stored setting beats the env. That is a
@@ -357,8 +357,8 @@ describe('the vault writer: a day from before the vault (DD-016)', () => {
     admin = await adminOn(personal.port);
     const state = await admin('GET', '/api/state');
     expect(state.json.shape).toBe('personal'); // without this every assertion below is vacuous
-    expect(state.json.settings.vaultCutover).toMatch(/^\d{4}-\d{2}-\d{2}T/);
-    expect(OLD < state.json.settings.vaultCutover.slice(0, 10)).toBe(true);
+    expect(state.json.settings.shapeStamp).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    expect(OLD < state.json.settings.shapeStamp.slice(0, 10)).toBe(true);
     expect(
       (
         await admin('PUT', '/api/state', {
@@ -484,7 +484,7 @@ describe('the vault writer: a committed segment stays whole (DD-017 §2)', () =>
     // below derives `cutoverDay` from the stamp itself rather than assuming which one it is.
     // (That skew is a real pre-existing defect in DD-016's stamp and is filed separately; it is
     // not this case's subject and this case must not depend on which side of it we run.)
-    expect(state.json.settings.vaultCutover).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    expect(state.json.settings.shapeStamp).toMatch(/^\d{4}-\d{2}-\d{2}T/);
     expect(state.json.commits.map((c) => c.key)).toEqual([segment.key]); // the pre-switch ledger survived
     const put = await admin('PUT', '/api/state', {
       settings: { vaultPaths: { root: vault, daily: 'Calendar/Daily' } },
@@ -510,7 +510,7 @@ describe('the vault writer: a committed segment stays whole (DD-017 §2)', () =>
     });
     expect(res.status, JSON.stringify(res.json)).toBe(200);
 
-    const cutoverDay = state.json.settings.vaultCutover.slice(0, 10);
+    const cutoverDay = state.json.settings.shapeStamp.slice(0, 10);
     const postCutover = segment.dates.filter((date) => date >= cutoverDay);
     const preCutover = segment.dates.filter((date) => date < cutoverDay);
     // THE LOAD-BEARING GUARD. If this set is empty the case is vacuous — every remaining
@@ -546,7 +546,7 @@ describe('the vault writer: a committed segment stays whole (DD-017 §2)', () =>
     // The other direction of case (2)'s (a)/(b) split, at the ledger clause: a real note on a
     // post-cutover day inside the frozen segment is adoptable on its face — heading, well-formed
     // table — and DD-012 adoption must still not fire on its behalf.
-    const cutoverDay = (await admin('GET', '/api/state')).json.settings.vaultCutover.slice(0, 10);
+    const cutoverDay = (await admin('GET', '/api/state')).json.settings.shapeStamp.slice(0, 10);
     const day = segment.dates.filter((date) => date >= cutoverDay)[0];
     const his = `# ${day}\n\n## ${HEADING}\n\n| Time | Task |\n|---|---|\n| 08:00→09:00 | his own morning |\n\n## Captures\n\nmine\n`;
     writeFileSync(notePath(day), his);

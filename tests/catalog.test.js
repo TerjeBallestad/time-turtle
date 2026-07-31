@@ -528,25 +528,36 @@ describe('catalog note — Task templates and Settings (SB-058 task 2)', () => {
     // `backend` is `shape`'s pre-SB-100 spelling and is on the list for the same reason SB-100's
     // rename window needs it: a note written before the rename must not be able to smuggle it in
     // either, and asserting on both spellings is what stops this test going quietly green.
-    const FORBIDDEN = ['shape', 'backend', 'vaultPaths', 'mdDir', 'vaultCutover'];
+    const FORBIDDEN = ['shape', 'backend', 'vaultPaths', 'mdDir', 'shapeStamp'];
 
     it('none of them is a key the note owns', () => {
       for (const key of FORBIDDEN) expect(TT.VAULT_CATALOG_SETTING_KEYS).not.toContain(key);
-      // the allowlist is exactly the three the note DOES own
-      expect(TT.VAULT_CATALOG_SETTING_KEYS).toEqual(['currency', 'language', 'vaultTimeSeparator']);
+      // The allowlist is exactly the five the note DOES own. It was three until DD-026 clause 5
+      // ruled on which side of the line each fact sits: `cutover` and `timeLogHeading` joined,
+      // because two machines disagreeing about either would DAMAGE THE VAULT — one freezes the
+      // other's hours, the other puts two blocks in one note. The three above them are there for a
+      // weaker reason (they follow the person between machines), and clause 5 says so out loud.
+      expect(TT.VAULT_CATALOG_SETTING_KEYS).toEqual([
+        'currency',
+        'language',
+        'vaultTimeSeparator',
+        'cutover',
+        'timeLogHeading',
+      ]);
     });
 
     it('none of them survives TT.vaultCatalogSettingRows — the one place rows are built', () => {
       // The bootstrap loop, stated as bytes: `shape`, `vaultPaths` and `mdDir` are how TT FINDS
-      // this note, and `vaultCutover` is per-instance by DD-017 — "the date THIS instance's vault
-      // history begins". All four stay in SQLite under BOTH shapes.
+      // this note, so a note that could set one of them could point TT at a different note or turn
+      // the vault off. `shapeStamp` is on the list for a different reason — it is a fact about the
+      // MACHINE (DD-026 clause 1), and it is the renamed row that used to hold both facts at once.
       const settings = {
         currency: 'kr',
         language: 'en',
         shape: 'personal',
         backend: 'vault',
         mdDir: '/Users/x/Inbox',
-        vaultCutover: '2026-07-26T00:00:00.000Z',
+        shapeStamp: '2026-07-26T00:00:00.000Z',
         vaultPaths: { root: '/Users/x/Vault', daily: 'Calendar/Daily', catalog: 'Time Turtle/Catalog.md' },
       };
       const rows = TT.vaultCatalogSettingRows(settings);
@@ -558,6 +569,14 @@ describe('catalog note — Task templates and Settings (SB-058 task 2)', () => {
       for (const key of FORBIDDEN) expect(md).not.toContain(key);
       for (const value of ['personal', 'vault', '/Users/x/Inbox', '2026-07-26', 'Calendar/Daily'])
         expect(md).not.toContain(value);
+    });
+
+    it('the OLD spelling of the stamp cannot smuggle it in either', () => {
+      // The same discipline the `backend` entry above exists for: an install upgraded across the
+      // rename must not be able to write the stamp under the name it used to have. Neither name is
+      // on the allowlist, so neither reaches a row.
+      const rows = TT.vaultCatalogSettingRows({ vaultCutover: '2026-07-26T00:00:00.000Z', currency: 'kr' });
+      expect(rows).toEqual([{ key: 'currency', value: 'kr' }]);
     });
 
     it('…and the guarantee stops there — going around that function DOES reach the bytes', () => {

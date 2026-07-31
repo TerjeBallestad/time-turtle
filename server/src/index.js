@@ -298,19 +298,24 @@ db.seedIfEmpty();
       `[time-turtle] inferred shape: team — this data dir holds ${db.listUsers().length} users, which answers it (DD-015)`,
     );
   }
-  // DD-016, the cutover: the instant this install became `personal`. Stamped for the EFFECTIVE
-  // shape rather than only for a stored one, because `TT_SHAPE=personal` reaches the same live
-  // vault without ever writing a setting — and an unstamped vault store has no pre-cutover
-  // history at all, i.e. every entry eligible, which is DD-016's hazard inverted.
+  // THE SHAPE STAMP (TERM-021, DD-026 clause 1): the instant this install stored its shape.
+  // Stamped for the EFFECTIVE shape rather than only for a stored one, because `TT_SHAPE=personal`
+  // reaches the same live vault without ever writing a setting.
   //
   // It stamps the DATE, not the shape: the row written here must never turn an env choice into
   // a stored one, or TT_SHAPE would stop being how you change your mind.
   //
-  // Idempotent and first-stamp-wins. ENFORCING it — no vault write, no DD-012 adoption for
-  // entries dated before it — is SB-057's, because that is where a vault write first exists.
+  // IT IS NOT THE CUTOVER, and this banner used to say it was. DD-026 clause 1 split one settings
+  // key into two facts: the day THIS VAULT holds TT history from, which is vault property and
+  // lives in the Catalog, and the instant THIS INSTALL stored its shape, which is this. On Terje's
+  // own machine the two disagreed by a day and froze 10.5 hours the vault itself said TT owned.
+  // So the line says what the value IS and no longer claims it decides which entries reach the
+  // vault — after PLAN-017 task 4, no rule that decides whether a day is writable may read it.
+  //
+  // Idempotent and first-stamp-wins.
   if (target.shape === 'personal') {
-    const at = store.stampVaultCutover();
-    console.log(`[time-turtle] vault cutover: ${at} — entries dated before it stay in SQLite (DD-016)`);
+    const at = store.stampShape();
+    console.log(`[time-turtle] shape stamp: ${at} — when this install stored its shape (DD-026)`);
 
     // ---- PLAN-013 / SB-115 / DD-018: what this boot just STRANDED ----
     //
@@ -858,7 +863,10 @@ function frozenEntryRefusal(userId, incoming) {
   /** The same context `vault-write.js` builds. No `admin` — the personal branch never reads it. */
   const ctx = {
     shape: 'personal',
-    vaultCutover: store.getSettings().vaultCutover,
+    // The rule context's field is `cutover`, and at PLAN-017 task 3 it is still fed the renamed
+    // SQLite row — a deliberate intermediate so each commit builds. Task 4 points it at the
+    // Catalog, which is where DD-026 clause 1 requires the answer to come from.
+    cutover: store.getSettings().shapeStamp,
     commits: store.getCommits(userId),
   };
   /** @param {any[] | undefined} entries @returns {string[]} the frozen rows, canonical and sorted */

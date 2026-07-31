@@ -357,7 +357,7 @@ describe('the checkpoint on the real write path', () => {
   beforeEach(() => {
     vaultRoot = newVaultRepo();
     db.putSettings({ shape: 'personal', vaultPaths: { root: vaultRoot, daily: 'Calendar/Daily' } });
-    db.db.exec("INSERT INTO settings (key, value) VALUES ('vaultCutover', '2020-01-01T00:00:00.000Z') ON CONFLICT(key) DO UPDATE SET value = excluded.value"); // prettier-ignore
+    db.db.exec("INSERT INTO settings (key, value) VALUES ('shapeStamp', '2020-01-01T00:00:00.000Z') ON CONFLICT(key) DO UPDATE SET value = excluded.value"); // prettier-ignore
     for (const row of db.listVaultIndex()) db.deleteVaultIndex(row.path);
     db.putEntries(userId, []);
     sync.forgetOwnWrites();

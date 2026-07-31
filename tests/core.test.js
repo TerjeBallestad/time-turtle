@@ -832,10 +832,10 @@ describe('the read-only rule (DD-017 §1)', () => {
 
   // Named rows, so a failure prints WHICH row rather than `[object Object]`.
   // expected = [preCutover, frozenSegment, readOnlyDay]
-  const row = (shape, vaultCutover, commits, admin, date, expected) => ({
-    name: `${shape} / cutover ${vaultCutover || '(never stamped)'} / ${commits.length ? 'ledger' : 'no ledger'} / ${admin ? 'admin' : 'employee'} / ${date}`,
+  const row = (shape, cutover, commits, admin, date, expected) => ({
+    name: `${shape} / cutover ${cutover || '(never stamped)'} / ${commits.length ? 'ledger' : 'no ledger'} / ${admin ? 'admin' : 'employee'} / ${date}`,
     shape,
-    vaultCutover,
+    cutover,
     commits,
     admin,
     date,
@@ -867,8 +867,8 @@ describe('the read-only rule (DD-017 §1)', () => {
     row(null, CUTOVER, COMMITS, false, AFTER, [false, false, true]),
   ];
 
-  it.each(ROWS)('$name', ({ shape, vaultCutover, commits, admin, date, expected }) => {
-    const ctx = { shape, vaultCutover, commits, admin };
+  it.each(ROWS)('$name', ({ shape, cutover, commits, admin, date, expected }) => {
+    const ctx = { shape, cutover, commits, admin };
     expect([TT.preCutover(date, ctx), TT.frozenSegment(date, ctx), TT.readOnlyDay(date, ctx)]).toEqual(expected);
   });
 
@@ -878,8 +878,8 @@ describe('the read-only rule (DD-017 §1)', () => {
     // divergence the one-home discipline exists to prevent.
     const personalRows = ROWS.filter((r) => r.shape === 'personal');
     expect(personalRows.length).toBeGreaterThan(0);
-    for (const { shape, vaultCutover, commits, admin, date, name } of personalRows) {
-      const ctx = { shape, vaultCutover, commits, admin };
+    for (const { shape, cutover, commits, admin, date, name } of personalRows) {
+      const ctx = { shape, cutover, commits, admin };
       expect(TT.readOnlyDay(date, ctx), name).toBe(!TT.vaultBound({ date }, ctx));
     }
   });
@@ -894,7 +894,7 @@ describe('the read-only rule (DD-017 §1)', () => {
   });
 
   it('vaultBound keeps its exact guards: a non-string date and a missing context are false', () => {
-    const ctx = { shape: 'personal', vaultCutover: CUTOVER, commits: COMMITS };
+    const ctx = { shape: 'personal', cutover: CUTOVER, commits: COMMITS };
     expect(TT.vaultBound(null, ctx)).toBe(false);
     expect(TT.vaultBound({ date: 20260720 }, ctx)).toBe(false);
     expect(TT.vaultBound({ date: AFTER }, undefined)).toBe(false); // no shape → not personal

@@ -57,9 +57,10 @@ export {
   // settings
   getSettings,
   getStoredShape,
-  // SB-100 / DD-016: the cutover stamp. On the seam because SB-057's vault store is the thing
-  // that will READ it — the write filter that keeps pre-cutover entries out of the vault.
-  stampVaultCutover,
+  // SB-100 / DD-026: the SHAPE STAMP (TERM-021) — the instant this install stored its shape. It
+  // was `stampVaultCutover` until PLAN-017 task 3; the day this VAULT holds history from is a
+  // different fact and lives in the Catalog now.
+  stampShape,
   // DD-024 clause 3: the demo seed, now a step the first-run answer can ask for rather than
   // something a boot does. On the seam for the same reason the stamp is — it writes the catalog
   // and entries through the store's own operations, so the vault implementation inherits it.

@@ -22,7 +22,7 @@
 //
 // MUTATES NOTHING, and that is a property with a test rather than a comment: every file in the
 // data dir is hashed before and after a call in tests/shape-preflight.test.js. The two ways to
-// break it are both easy and both silent — `store.stampVaultCutover()` (it WRITES, see
+// break it are both easy and both silent — `store.stampShape()` (it WRITES, see
 // server/src/db.js) and `retireMirrors()` (it RENAMES) — so neither is called from this file.
 import { existsSync } from 'node:fs';
 import TT from '../../shared/core.js';
@@ -33,21 +33,21 @@ import { mirrorCandidates, mirrorPath } from './markdown.js';
 /**
  * THE CUTOVER THAT WOULD BE IN FORCE AFTER THE SWITCH — not necessarily the stored one.
  *
- * `stampVaultCutover` is first-stamp-wins (server/src/db.js): a value already there survives a
+ * `stampShape` is first-stamp-wins (server/src/db.js): a value already there survives a
  * personal → team → personal round trip untouched, which is what keeps the team interlude's days
  * from being re-stranded. So the stored value wins whenever there IS one.
  *
- * On the common `team → personal` path nothing has ever been stamped — `getSettings().vaultCutover`
+ * On the common `team → personal` path nothing has ever been stamped — `getSettings().shapeStamp`
  * is `''` — and `TT.vaultBound` then excludes nothing by date at all, i.e. the preflight would
  * report zero stranded entries for a switch that is about to strand the whole back catalogue.
  * `now` is what the switch itself will stamp a moment later, so `now` is the honest answer.
  *
- * AND WE DO NOT STAMP IT. Calling `store.stampVaultCutover()` here would answer the question by
+ * AND WE DO NOT STAMP IT. Calling `store.stampShape()` here would answer the question by
  * doing the thing — a preflight that mutated something is not a preflight.
  * @returns {string} an ISO instant
  */
 function cutoverInForce() {
-  return store.getSettings().vaultCutover || new Date().toISOString();
+  return store.getSettings().shapeStamp || new Date().toISOString();
 }
 
 /**
@@ -115,7 +115,7 @@ export function personalPreflight(userId) {
   // install, where `TT.vaultBound` returns false for every entry on its first clause (only
   // `personal` has a vault at all) — so passing the live shape reports the entire timesheet as
   // stranded, on every call, and looks perfectly plausible doing it.
-  const ctx = { shape: 'personal', vaultCutover: cutoverInForce(), commits };
+  const ctx = { shape: 'personal', cutover: cutoverInForce(), commits };
 
   // STRANDED IS THE COMPLEMENT OF `TT.vaultBound`, and that predicate is not re-implemented
   // here. `shared/core.js` is its ONE home (its own header says so) and `server/src/vault-write.js`

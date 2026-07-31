@@ -18,7 +18,7 @@
 // an install that has ANSWERED by env or by lock is never re-answered underneath its operator.
 // `source` is what all three cases key off, not the user count alone.
 //
-// THE CUTOVER STAMP. Storing `shape: 'personal'` stamps `Settings.vaultCutover` with the
+// THE CUTOVER STAMP. Storing `shape: 'personal'` stamps `Settings.cutover` with the
 // instant it happened, once, server-side. The vault never receives entries dated before it.
 // ENFORCING that is SB-057's (there is no vault write yet to filter); stamping early is what
 // makes the date honest — a switch that happens before enforcement exists still records when.
@@ -117,7 +117,7 @@ describe('the inference rule (DD-015): more than one user has answered by existi
     // 1. the row is really there.
     expect(storedSetting(data, 'shape')).toBe('team');
     // DD-016 scope: `team` stamps NO cutover. Nothing is read-only, nothing is filtered.
-    expect(storedSetting(data, 'vaultCutover')).toBe(null);
+    expect(storedSetting(data, 'shapeStamp')).toBe(null);
 
     // 2. and it is a decision, not a decoration: a stored value beats TT_SHAPE. Unstamped,
     //    this exact call is the boot refusal (see vault-single-user.test.js direction 3) and
@@ -227,7 +227,7 @@ describe('the cutover stamp (DD-016)', () => {
     const first = await startServer({ TT_DATA_DIR: data, TT_MD_DIR: md });
     let admin = await adminOn(first.port);
     // No cutover on a fresh install: `''` is "it has not happened", the value nobody can mean.
-    expect((await admin('GET', '/api/state')).json.settings.vaultCutover).toBe('');
+    expect((await admin('GET', '/api/state')).json.settings.shapeStamp).toBe('');
 
     const state = await admin('GET', '/api/state');
     const before = Date.now();
@@ -235,7 +235,7 @@ describe('the cutover stamp (DD-016)', () => {
       200,
     );
 
-    const stamped = (await admin('GET', '/api/state')).json.settings.vaultCutover;
+    const stamped = (await admin('GET', '/api/state')).json.settings.shapeStamp;
     const after = Date.now();
     expect(stamped).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/); // an ISO instant
     expectStampedDuring(stamped, before, after); // …and it is NOW, not some default
@@ -253,11 +253,11 @@ describe('the cutover stamp (DD-016)', () => {
     expect(
       (
         await admin('PUT', '/api/state', {
-          settings: { ...moved.json.settings, vaultCutover: '2000-01-01T00:00:00.000Z' },
+          settings: { ...moved.json.settings, cutover: '2000-01-01T00:00:00.000Z' },
         })
       ).status,
     ).toBe(200);
-    expect((await admin('GET', '/api/state')).json.settings.vaultCutover).toBe(stamped);
+    expect((await admin('GET', '/api/state')).json.settings.shapeStamp).toBe(stamped);
 
     // Nor does a round trip through `team` and back re-stamp it. The FIRST cutover is the
     // honest one: re-stamping later would silently re-open history that was already excluded.
@@ -267,13 +267,13 @@ describe('the cutover stamp (DD-016)', () => {
     expect((await admin('PUT', '/api/state', { settings: { ...now.json.settings, shape: 'personal' } })).status).toBe(
       200,
     );
-    expect((await admin('GET', '/api/state')).json.settings.vaultCutover).toBe(stamped);
+    expect((await admin('GET', '/api/state')).json.settings.shapeStamp).toBe(stamped);
     await stopServer(first.child);
 
     // And it survives a restart, because a cutover that forgets itself is not a cutover.
     const second = await startServer({ TT_DATA_DIR: data, TT_MD_DIR: md });
     admin = await adminOn(second.port);
-    expect((await admin('GET', '/api/state')).json.settings.vaultCutover).toBe(stamped);
+    expect((await admin('GET', '/api/state')).json.settings.shapeStamp).toBe(stamped);
     await stopServer(second.child);
   }, 60000);
 
@@ -285,7 +285,7 @@ describe('the cutover stamp (DD-016)', () => {
     const before = Date.now();
     const personal = await startServer({ TT_DATA_DIR: data, TT_MD_DIR: md, TT_SHAPE: 'personal' });
     const admin = await adminOn(personal.port);
-    const stamped = (await admin('GET', '/api/state')).json.settings.vaultCutover;
+    const stamped = (await admin('GET', '/api/state')).json.settings.shapeStamp;
     const after = Date.now();
     expect(stamped).toMatch(/^\d{4}-\d{2}-\d{2}T/);
     expectStampedDuring(stamped, before, after);
@@ -307,8 +307,8 @@ describe('the cutover stamp (DD-016)', () => {
     expect((await admin('PUT', '/api/state', { settings: { ...state.json.settings, currency: 'EUR' } })).status).toBe(
       200,
     );
-    expect((await admin('GET', '/api/state')).json.settings.vaultCutover).toBe('');
+    expect((await admin('GET', '/api/state')).json.settings.shapeStamp).toBe('');
     await stopServer(server.child);
-    expect(storedSetting(data, 'vaultCutover')).toBe(null);
+    expect(storedSetting(data, 'shapeStamp')).toBe(null);
   }, 60000);
 });

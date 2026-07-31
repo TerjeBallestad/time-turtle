@@ -55,7 +55,7 @@ export function WeekView({ state, ui }: ViewProps) {
   // sqlite row, so this reads `committing: true` and nothing changes.
   const committingOff = TT.shapeOffReason('committing', state.shape);
   // SB-102 / DD-017 §3. Two rules, and both of them are about not claiming something untrue.
-  const ctx = { shape: state.shape, vaultCutover: state.settings.vaultCutover, commits: state.commits };
+  const ctx = { shape: state.shape, cutover: state.settings.shapeStamp, commits: state.commits };
   // CASE A, which DD-017's mock does not cover: the cutover is stamped at an instant, so exactly
   // one week in an install's life holds days on both sides of it. The line renders when ANY day
   // of the week is from before the vault, because its stated job is to explain the locked grid

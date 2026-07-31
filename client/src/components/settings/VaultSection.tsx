@@ -188,13 +188,16 @@ export function VaultSection({ state, ui }: SettingsProps) {
             value={paths.catalog}
             onCommit={(catalog) => ui.setVaultPaths({ catalog })}
           />
+          {/* NOT a `vaultPaths` entry any more (DD-026 clause 5). It sits here, among the paths,
+              because that is where a person looks for "which part of which file" — but it is
+              stored as a setting and it travels in the Catalog, so the other machine gets it. */}
           <PathRow
             label={TT.t('Time Log heading')}
-            value={paths.timeLogHeading}
+            value={state.settings.timeLogHeading ?? TT.TIME_LOG_HEADING_DEFAULT}
             hint={TT.t(
               'the heading Time Turtle writes its block under in a daily note — rename it here if you renamed it there.',
             )}
-            onCommit={(timeLogHeading) => ui.setVaultPaths({ timeLogHeading })}
+            onCommit={(heading) => ui.setTimeLogHeading(heading)}
           />
           {/* Under the paths, because that is where "which files" already lives, and a paused note
               is a fact ABOUT those files. Above the separator, because it is the one thing on this

@@ -119,7 +119,7 @@ describe('DD-024 clause 3: a fresh install is empty', () => {
     // BOTH HALVES, and the second is what makes the first mean anything. A count of 0 read alone
     // is 0 for any reason at all — including an install that never became `personal` and so never
     // stamped a cutover to be pre-cutover OF.
-    const cutover = String(state.json.settings.vaultCutover || '');
+    const cutover = String(state.json.settings.shapeStamp || '');
     expect(cutover, 'no cutover was stamped, so this install never became personal').toMatch(/^\d{4}-\d{2}-\d{2}T/);
     expect(state.json.entries.length).toBe(0);
     const cutoverDay = cutover.slice(0, 10);

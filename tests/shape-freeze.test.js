@@ -130,8 +130,8 @@ describe('the personal shape refuses a CHANGE to a frozen day', () => {
     // The shape and the cutover on the wire. Without BOTH, every case below is vacuous: a data
     // dir whose cutover is `''` freezes nothing and every implementation passes.
     expect(state.json.shape).toBe('personal');
-    expect(state.json.settings.vaultCutover).toMatch(/^\d{4}-\d{2}-\d{2}T/);
-    cutoverDay = state.json.settings.vaultCutover.slice(0, 10);
+    expect(state.json.settings.shapeStamp).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    cutoverDay = state.json.settings.shapeStamp.slice(0, 10);
     expect(OLD < cutoverDay, 'the OLD day is not actually before the cutover').toBe(true);
     expect(TODAY >= cutoverDay, 'TODAY is not actually after the cutover').toBe(true);
     expect(FREE >= cutoverDay).toBe(true);

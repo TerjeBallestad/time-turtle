@@ -35,7 +35,7 @@ export function TimeGrid({ date, entries, state, ui, compact }: TimeGridProps) {
   // fixes it, and the rule now lives in one place beside `TT.vaultBound` rather than in this file.
   const ctx = {
     shape: state.shape,
-    vaultCutover: state.settings.vaultCutover,
+    cutover: state.settings.shapeStamp,
     commits: state.commits,
     admin,
   };

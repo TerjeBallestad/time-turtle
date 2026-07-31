@@ -63,6 +63,10 @@ const CATALOG = {
     { key: 'currency', value: 'NOK' },
     { key: 'language', value: 'nb' },
     { key: 'vaultTimeSeparator', value: 'ascii' },
+    // DD-026 clause 5 put the heading in the note (PLAN-017 task 3). A fixture without it is a
+    // note whose Settings section TT would canonically ADD a row to, which is a payload move — so
+    // leaving it out would make the DD-020 c7 skip case test the wrong thing.
+    { key: 'timeLogHeading', value: 'Time Log' },
   ],
 };
 

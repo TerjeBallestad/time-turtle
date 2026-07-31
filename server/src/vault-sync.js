@@ -33,7 +33,7 @@
 //        well-formed TT table and nothing else. On first write TT writes the bottom anchor itself.
 //        Anything else it refuses and leaves alone.
 //
-//    The heading name comes from `Settings.vaultPaths.timeLogHeading` and is never a constant.
+//    The heading name comes from `Settings.timeLogHeading` and is never a constant (DD-026 c5).
 //
 //    THE CONSEQUENCE TERJE SHOULD NOT HAVE TO REDISCOVER: his Templater daily template puts
 //    `## Time Log` in EVERY daily note, so under this rule every daily note is claimable —
@@ -199,12 +199,13 @@ export function vaultSyncConfig() {
     // folder is — `vaultPaths.catalog` is a setting, and a pass that kept reading the old path
     // after the user re-pointed it would be resolving rates out of somebody else's note.
     catalogPath: join(paths.root, paths.catalog || TT.VAULT_PATHS_DEFAULT.catalog),
-    heading: paths.timeLogHeading || TT.VAULT_PATHS_DEFAULT.timeLogHeading,
-    // DD-016 is worded as an INSTANT and `Entry.date` is a day, so the comparison is day-grained —
-    // `stampVaultCutover` stores the finer value precisely so this can choose. `''` (never
-    // stamped) reads as "no cutover", which lets everything through; that only happens outside the
-    // personal shape, where this function has already returned null.
-    cutoverDay: (settings.vaultCutover || '').slice(0, 10),
+    // DD-026 clause 5: the heading is a SETTING now, not a path. Its authority is the Catalog and
+    // the SQLite row is the derived index — the same relationship `currency` has.
+    heading: settings.timeLogHeading || TT.TIME_LOG_HEADING_DEFAULT,
+    // PLAN-017 task 3's deliberate intermediate: this still reads the renamed SQLite row, so the
+    // suite stays green and each commit builds. Task 4 points it at the Catalog's `cutover`, which
+    // is where DD-026 clause 1 requires it to come from.
+    cutoverDay: (settings.shapeStamp || '').slice(0, 10),
     userId: users[0].id,
     // SB-059: the catalog the Project column resolves through. Absent it, a `[[Wikilink]]` cell is
     // carried literally, which is the pre-SB-059 behaviour and never a refusal.

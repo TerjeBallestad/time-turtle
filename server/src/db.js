@@ -249,6 +249,57 @@ function migrateToSdd002() {
 }
 migrateToSdd002();
 
+/**
+ * DD-026 clause 5 / PLAN-017 task 3 — the two settings that changed home, moved for installs
+ * already on disk. Idempotent, and it runs at module load beside the other migrations.
+ *
+ * TWO MOVES, AND NEITHER MAY ORPHAN A VALUE:
+ *
+ *   1. `vaultCutover` → `shapeStamp`. The row keeps its value; only the name changes, because the
+ *      old name says "cutover" about a value that is no longer the Cutover, and leaving it there
+ *      rebuilds the two-meanings-one-word fault DD-026 exists to remove. An install with BOTH
+ *      rows keeps the new one — a re-migration must not walk a newer value backwards.
+ *
+ *   2. `vaultPaths.timeLogHeading` → its own `timeLogHeading` row, then out of the JSON. Terje's
+ *      install has one. A migration that dropped it would silently move TT's block to a heading
+ *      he never chose, in every daily note he owns — and the next write would then create a
+ *      SECOND block under the default heading in notes that already had one.
+ *
+ * The heading move does NOT overwrite an existing `timeLogHeading` row: the Catalog is the
+ * authority for that value, so a row already imported from a note beats a legacy JSON key.
+ */
+export function migrateVaultSettingHomes() {
+  transaction(() => {
+    const read = db.prepare('SELECT value FROM settings WHERE key = ?');
+    const upsert = db.prepare(
+      'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
+    );
+    const legacyStamp = /** @type {{ value: string } | undefined} */ (read.get('vaultCutover'));
+    if (legacyStamp) {
+      const current = /** @type {{ value: string } | undefined} */ (read.get('shapeStamp'));
+      if (!current || !current.value) upsert.run('shapeStamp', legacyStamp.value);
+      db.prepare('DELETE FROM settings WHERE key = ?').run('vaultCutover');
+    }
+    const rawPaths = /** @type {{ value: string } | undefined} */ (read.get('vaultPaths'));
+    if (!rawPaths) return;
+    /** @type {any} */
+    let parsed = null;
+    try {
+      parsed = JSON.parse(rawPaths.value);
+    } catch {
+      return; // unparseable JSON is `parseVaultPaths`' problem, and it already falls back safely
+    }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return;
+    if (typeof parsed.timeLogHeading !== 'string') return;
+    const heading = parsed.timeLogHeading;
+    delete parsed.timeLogHeading;
+    upsert.run('vaultPaths', JSON.stringify(parsed));
+    const held = /** @type {{ value: string } | undefined} */ (read.get('timeLogHeading'));
+    if (!held && heading.trim() !== '') upsert.run('timeLogHeading', heading);
+  });
+}
+migrateVaultSettingHomes();
+
 // ---- settings ----
 // SB-063: `vaultTimeSeparator` is stored like any other key, and defaults to `unicode` on
 // read so an untouched install emits exactly what TT emitted before the setting existed. It
@@ -261,7 +312,7 @@ migrateToSdd002();
 // serialized into the catalog note (SB-058) — they are how TT finds the catalog, so putting
 // them there would be a bootstrap loop. Like `mdDir` it reaches no mirror byte.
 //
-// SB-100 / DD-016: `vaultCutover` rides beside it and is SERVER-OWNED — see putSettings.
+// SB-100 / DD-026: `shapeStamp` rides beside it and is SERVER-OWNED — see putSettings.
 //
 // SB-056: `vaultPaths` is the one settings key that is not a scalar. It rides the same
 // key/value table as ONE JSON value rather than five keys, because it is one decision — where
@@ -295,16 +346,23 @@ export function getSettings() {
     mdDir: '',
     vaultTimeSeparator: 'unicode',
     shape: 'team',
-    // DD-016: `''` is "no cutover has happened", a value nobody can mean — the same trick
-    // `mdDir` uses, and the reason this one does NOT need a getStored* twin.
-    vaultCutover: '',
+    // DD-026 clause 1: the SHAPE STAMP (TERM-021) — the instant THIS INSTALL stored its shape.
+    // `''` is "never stamped", a value nobody can mean, the same trick `mdDir` uses. It was called
+    // a name saying `cutover` until PLAN-017 task 3; the day this VAULT holds history from is a
+    // different fact and lives in the Catalog now.
+    shapeStamp: '',
+    // DD-026 clause 5: the heading TT's block sits under. It left `vaultPaths` — that object is
+    // how a MACHINE finds the vault — and its authority is the Catalog. The row here is the
+    // derived index, the way `currency` and `language` already are.
+    timeLogHeading: TT.TIME_LOG_HEADING_DEFAULT,
     vaultPaths: { ...VAULT_PATHS_DEFAULT },
   };
   for (const row of rows) {
     if (row.key === 'vaultPaths') settings.vaultPaths = parseVaultPaths(row.value);
     else
-      settings[/** @type {'currency'|'language'|'mdDir'|'vaultTimeSeparator'|'shape'|'vaultCutover'} */ (row.key)] =
-        row.value;
+      settings[
+        /** @type {'currency'|'language'|'mdDir'|'vaultTimeSeparator'|'shape'|'shapeStamp'|'timeLogHeading'} */ (row.key)
+      ] = row.value;
   }
   return /** @type {Settings & { mdDir: string }} */ (/** @type {unknown} */ (settings));
 }
@@ -330,29 +388,32 @@ export function getStoredShape() {
   return /** @type {any} */ (row.value);
 }
 /**
- * SB-100 / DD-016: stamp the moment this install became `personal`, if it has not been
- * stamped. Idempotent, and the FIRST stamp always wins — a round trip through `team` and back
- * must not re-stamp, because a later date silently re-opens history that was already excluded.
+ * THE SHAPE STAMP (TERM-021) — stamp the moment this install stored its shape, if it has not been
+ * stamped. Idempotent, and the FIRST stamp always wins.
  *
- * An ISO INSTANT, not a bare day: DD-016 words the cutover as an instant, and SB-057 (which
- * owns the write filter) can take `slice(0, 10)` for a day-grained comparison against
- * `Entry.date`. Storing the coarser value would throw away information SB-057 cannot recover.
+ * IT IS NOT THE CUTOVER, and after DD-026 clause 1 the name says so. It used to be
+ * a `stampVaultCutover` writing a row of the same name, and one settings key held two facts: the
+ * day this VAULT holds TT history from, and the instant this INSTALL stored its shape. On Terje's own
+ * machine those two disagreed by a day and froze 10.5 hours the vault itself said TT owned.
  *
- * Called from two places, because there are two ways into the personal shape: `putSettings`
- * when the shape is stored, and the boot (server/src/index.js) when `TT_SHAPE=personal`
- * supplies it without ever storing anything. An unstamped vault store is one with NO
- * pre-cutover history at all — every entry eligible — which is the hazard inverted.
- * @returns {string} the cutover in force
+ * WHAT IT IS FOR NOW: a diagnostic the boot banner shows, and the date TT proposes when the vault
+ * carries no TT history at all. After task 4, no rule that decides whether a day is writable may
+ * read it. An ISO instant, because a diagnostic loses nothing by being precise.
+ *
+ * Called from two places, because there are two ways into the personal shape: `putSettings` when
+ * the shape is stored, and the boot (server/src/index.js) when `TT_SHAPE=personal` supplies it
+ * without ever storing anything.
+ * @returns {string} the stamp in force
  */
-export function stampVaultCutover() {
+export function stampShape() {
   const row = /** @type {{ value: string } | undefined} */ (
-    db.prepare('SELECT value FROM settings WHERE key = ?').get('vaultCutover')
+    db.prepare('SELECT value FROM settings WHERE key = ?').get('shapeStamp')
   );
   if (row && row.value) return row.value;
   const at = new Date().toISOString();
   db.prepare(
     'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
-  ).run('vaultCutover', at);
+  ).run('shapeStamp', at);
   return at;
 }
 /**
@@ -374,6 +435,11 @@ export function putSettings(settings) {
   );
   for (const key of /** @type {const} */ (['currency', 'language', 'mdDir']))
     if (settings[key] != null) upsert.run(key, String(settings[key]));
+  // DD-026 clause 5. Refused blank for the same reason the Catalog's own validator refuses it: a
+  // blank heading matches every note and none. The vocabulary lives on `CATALOG_SETTING_KEYS`;
+  // this is the same rule, applied where the value enters SQLite.
+  if (typeof settings.timeLogHeading === 'string' && settings.timeLogHeading.trim() !== '')
+    upsert.run('timeLogHeading', settings.timeLogHeading);
   // An enum, not free text like currency: an unrecognised value would read back as junk even
   // though TT.timeSeparator would safely emit `→` for it. The vocabulary lives in core.js.
   if (settings.vaultTimeSeparator != null && TT.TIME_SEPARATOR_VALUES.includes(settings.vaultTimeSeparator))
@@ -383,14 +449,14 @@ export function putSettings(settings) {
   // looking at a stored `persona` believing the vault was live. The vocabulary lives in core.js.
   if (settings.shape != null && TT.SHAPES.includes(settings.shape)) {
     upsert.run('shape', settings.shape);
-    // DD-016: the same save that stores `personal` stamps the cutover. HERE and not in the
+    // DD-016 / DD-026: the same save that stores `personal` stamps the SHAPE. HERE and not in the
     // route, so nothing that can store the shape can skip it.
-    if (settings.shape === 'personal') stampVaultCutover();
+    if (settings.shape === 'personal') stampShape();
   }
-  // `vaultCutover` is deliberately NOT read off `settings`. It is SERVER-OWNED (DD-016): the
-  // client PUTs the whole settings object back on every save, so a stamp a client can move is
-  // a stamp a client can erase — and the date it would erase is the one deciding which of the
-  // user's days may reach the vault at all. See stampVaultCutover.
+  // `shapeStamp` is deliberately NOT read off `settings`. It is SERVER-OWNED: the client PUTs the
+  // whole settings object back on every save, so a stamp a client can move is a stamp a client can
+  // erase. That mattered more when this row decided which days reached the vault; it is still not
+  // a client's to write. See stampShape.
   // SB-056: `vaultPaths` is validated by RECONSTRUCTION rather than by inspection — the stored
   // value is built key by key from the default, taking only known keys whose value is a string.
   // An unknown key is dropped and a non-string is ignored, so nothing a caller invents can end

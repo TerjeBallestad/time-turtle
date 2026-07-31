@@ -136,14 +136,14 @@ function storedSetting(data, key) {
 function expectedFromDb(data, userId) {
   const db = openDb(data);
   try {
-    const cutover = storedSetting(data, 'vaultCutover');
+    const cutover = storedSetting(data, 'shapeStamp');
     const commitRow = db.prepare('SELECT data FROM commits WHERE user_id = ?').get(userId);
     const commits = commitRow ? JSON.parse(commitRow.data) : [];
     const entries = db
       .prepare('SELECT id, date, start, end, project, label, note, billable FROM entries WHERE user_id = ?')
       .all(userId)
       .map((row) => ({ ...row, billable: !!row.billable }));
-    const ctx = { shape: 'personal', vaultCutover: cutover, commits };
+    const ctx = { shape: 'personal', cutover: cutover, commits };
     const stranded = entries.filter((entry) => !TT.vaultBound(entry, ctx));
     const dates = stranded.map((e) => e.date).sort();
     return {
@@ -166,7 +166,7 @@ const STRANDED_RE = /\[time-turtle\]\s+(\d+) entr(?:y|ies) stays? in SQLite and 
 const RANGE_RE = /\[time-turtle\]\s+\((\d{4}-\d{2}-\d{2}) … (\d{4}-\d{2}-\d{2})\)(.*)/;
 const FROZEN_RE = /^; (\d+) commit segments? freezes? with them$/;
 const TOTAL_RE = /\[time-turtle\] (\d+) mirror files? retired in total/;
-const CUTOVER_RE = /\[time-turtle\] vault cutover: (\S+) —/;
+const CUTOVER_RE = /\[time-turtle\] shape stamp: (\S+) —/;
 
 const entry = (id, date, label = 'work') => ({
   id,
@@ -277,7 +277,7 @@ describe('a boot into `personal` says what it stranded before it says what it re
   it('a SECOND boot of the same dir reports the same cutover (first-stamp-wins)', async () => {
     const { data, md, userId } = await seededTeamDir('banner-second');
     const first = await bootPersonal(data, md);
-    const stamped = storedSetting(data, 'vaultCutover');
+    const stamped = storedSetting(data, 'shapeStamp');
 
     // Real time between the boots, so a re-stamping implementation moves the instant measurably.
     await new Promise((r) => setTimeout(r, 1100));
@@ -285,7 +285,7 @@ describe('a boot into `personal` says what it stranded before it says what it re
 
     expect(CUTOVER_RE.exec(second)[1]).toBe(CUTOVER_RE.exec(first)[1]);
     expect(CUTOVER_RE.exec(second)[1]).toBe(stamped);
-    expect(storedSetting(data, 'vaultCutover')).toBe(stamped);
+    expect(storedSetting(data, 'shapeStamp')).toBe(stamped);
     // Same cutover, same arithmetic, and the mirror file is gone now — so the entries lines repeat
     // and the retirement ones do not. Entries stay stranded; a file is only retired once.
     expect(Number(STRANDED_RE.exec(second)[1])).toBe(expectedFromDb(data, userId).count);
@@ -296,7 +296,7 @@ describe('a boot into `personal` says what it stranded before it says what it re
   it('a personal → team → personal round trip does not count the team interlude', async () => {
     const { data, md, userId } = await seededTeamDir('banner-roundtrip');
     const first = await bootPersonal(data, md);
-    const stamped = storedSetting(data, 'vaultCutover');
+    const stamped = storedSetting(data, 'shapeStamp');
 
     // The interlude: boot back into `team` and log a day DURING it, post-cutover.
     const interlude = await startServer({ TT_DATA_DIR: data, TT_MD_DIR: md, TT_SHAPE: 'team' });

@@ -82,7 +82,7 @@ beforeEach(() => {
   db.putSettings({ shape: 'personal', vaultPaths: { root: vaultRoot, daily: 'Calendar/Daily' } });
   // a cutover far enough back that the fixtures are all inside it; the cutover's own behaviour is
   // asserted on its own below
-  db.db.exec("INSERT INTO settings (key, value) VALUES ('vaultCutover', '2020-01-01T00:00:00.000Z') ON CONFLICT(key) DO UPDATE SET value = excluded.value"); // prettier-ignore
+  db.db.exec("INSERT INTO settings (key, value) VALUES ('shapeStamp', '2020-01-01T00:00:00.000Z') ON CONFLICT(key) DO UPDATE SET value = excluded.value"); // prettier-ignore
   for (const row of db.listVaultIndex()) db.deleteVaultIndex(row.path);
   db.putEntries(userId, []);
   sync.forgetOwnWrites();
@@ -293,7 +293,7 @@ describe('the vault sync engine', () => {
   });
 
   it('pre-cutover days are not scanned at all (DD-016 applies to adoption, not only to writes)', async () => {
-    db.db.exec("UPDATE settings SET value = '2026-07-15T09:00:00.000Z' WHERE key = 'vaultCutover'");
+    db.db.exec("UPDATE settings SET value = '2026-07-15T09:00:00.000Z' WHERE key = 'shapeStamp'");
     writeFileSync(join(dailyDir, '2026-07-10.md'), note([entry('old', 540, 600, 'before TT')], 1, '2026-07-10'));
     writeFileSync(join(dailyDir, '2026-07-20.md'), note([entry('new', 540, 600, 'after TT')], 1));
     await sync.scanVault();

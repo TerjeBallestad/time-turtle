@@ -98,7 +98,7 @@ describe('SB-098 item 4: the answer is stored even when it equals the shape alre
     expect(storedSetting(data, 'shape')).toBe('personal');
     // DD-016: whatever can store the shape stamps the cutover, and this channel is no exception —
     // putSettings does it, so no route can skip it.
-    expect(storedSetting(data, 'vaultCutover')).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    expect(storedSetting(data, 'shapeStamp')).toMatch(/^\d{4}-\d{2}-\d{2}T/);
     await stopServer(server.child);
   }, 60000);
 

@@ -94,7 +94,7 @@ beforeEach(() => {
   dailyDir = join(vaultRoot, 'Calendar', 'Daily');
   mkdirSync(dailyDir, { recursive: true });
   db.putSettings({ shape: 'personal', vaultPaths: { root: vaultRoot, daily: 'Calendar/Daily' } });
-  db.db.exec("INSERT INTO settings (key, value) VALUES ('vaultCutover', '2020-01-01T00:00:00.000Z') ON CONFLICT(key) DO UPDATE SET value = excluded.value"); // prettier-ignore
+  db.db.exec("INSERT INTO settings (key, value) VALUES ('shapeStamp', '2020-01-01T00:00:00.000Z') ON CONFLICT(key) DO UPDATE SET value = excluded.value"); // prettier-ignore
   for (const row of db.listVaultIndex()) db.deleteVaultIndex(row.path);
   db.putEntries(userId, []);
   sync.forgetOwnWrites();
@@ -339,7 +339,10 @@ describe('invariant 4 (RESTATED) — what TT may claim', () => {
   });
 
   it('the heading name comes from SETTINGS and is never a constant', async () => {
-    db.putSettings({ vaultPaths: { root: vaultRoot, daily: 'Calendar/Daily', timeLogHeading: 'Tidslogg' } });
+    // DD-026 clause 5 moved the heading OUT of `vaultPaths` and into a setting of its own, whose
+    // authority is the Catalog. What this invariant pins is unchanged: the name is configuration
+    // and never a constant, so renaming it moves TT's parse boundary with it.
+    db.putSettings({ vaultPaths: { root: vaultRoot, daily: 'Calendar/Daily' }, timeLogHeading: 'Tidslogg' });
     const md = around('## Tidslogg\n\n| Time | Task |\n|---|---|\n| 08:00→09:00 | min morgen |');
     writeFileSync(notePath(), md);
     expect((await sync.scanVault()).import).toBe(1);

@@ -66,6 +66,8 @@ export interface UiActions {
   chooseShape: (shape: Shape) => void;
   /** SB-056: where inside the vault TT reads and writes. */
   setVaultPaths: (patch: Partial<VaultPaths>) => void;
+  /** DD-026 clause 5: vault property, so it is a settings key and not a `vaultPaths` entry. */
+  setTimeLogHeading: (heading: string) => void;
   /** SB-063: which characters the vault daily note writes between a start and an end time. */
   setVaultTimeSeparator: (separator: VaultTimeSeparator) => void;
   /**

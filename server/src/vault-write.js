@@ -174,7 +174,7 @@ export function writeVaultEntries(userId, incoming, before) {
   const config = vaultSyncConfig();
   if (!config) return report;
   const settings = db.getSettings();
-  const context = { shape: activeShape(), vaultCutover: settings.vaultCutover, commits: db.getCommits(userId) };
+  const context = { shape: activeShape(), cutover: settings.shapeStamp, commits: db.getCommits(userId) };
   /** @param {string} date @returns {string} */
   const pathFor = (date) => join(config.dailyDir, date + '.md');
   /** @param {string} date @returns {VaultIndexRow | null} */
@@ -633,7 +633,7 @@ export function rewriteVaultDate(userId, date, rev) {
   const config = vaultSyncConfig();
   if (!config) return;
   const settings = db.getSettings();
-  const context = { shape: activeShape(), vaultCutover: settings.vaultCutover, commits: db.getCommits(userId) };
+  const context = { shape: activeShape(), cutover: settings.shapeStamp, commits: db.getCommits(userId) };
   const entries = db.getEntries(userId).filter((entry) => entry.date === date && TT.vaultBound(entry, context));
   const path = join(config.dailyDir, date + '.md');
   /** @type {{ written: string[], skipped: string[], refused: { date: string, reason: string }[] }} */

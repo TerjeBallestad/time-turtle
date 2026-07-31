@@ -426,6 +426,11 @@ export function App() {
       })),
     setVaultTimeSeparator: (separator) =>
       updateState((current) => ({ ...current, settings: { ...current.settings, vaultTimeSeparator: separator } })),
+    // DD-026 clause 5: the heading is a SETTING, not a path. It used to ride `setVaultPaths`, and
+    // `vaultPaths` is how a MACHINE finds the vault — a heading written there is a heading the
+    // other machine never sees, which is two blocks in one note.
+    setTimeLogHeading: (heading) =>
+      updateState((current) => ({ ...current, settings: { ...current.settings, timeLogHeading: heading } })),
     // SB-065/SB-085: consent to overwrite. The server adopts the bytes on disk as its stamp
     // and clears the block; nothing is written until the next save. Deliberately NOT a
     // reload — `load()` hands useServerSync a fresh object for every synced key, which would

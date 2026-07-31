@@ -240,12 +240,10 @@ TT.vaultQuarantineText = (reason) => (reason && VAULT_QUARANTINE_REASONS[reason]
  * DD-012 adoption on its behalf. Three conditions, and each one closes a specific hazard:
  *
  *   1. THE SHAPE. Only `personal` has a vault at all.
- *   2. THE CUTOVER (DD-016). `TT.seedMd()` dates its demo entries relative to FIRST BOOT — `T`,
- *      `T-1`, `T-2`, `T-7`, `T-8`, `T-9` (see the seed below) — so without this a fresh personal
- *      install ADOPTS six of Terje's real daily notes and writes Fjellheim AS demo hours into
- *      them. The cutover is stored as an ISO instant and compared day-grained, because
- *      `Entry.date` is a day; `stampVaultCutover` stores the finer value precisely so this can
- *      choose, and `''` (never stamped) means no history is excluded.
+ *   2. THE CUTOVER (DD-016, rehomed by DD-026). `TT.seedMd()` dates its demo entries relative to
+ *      FIRST BOOT — `T`, `T-1`, `T-2`, `T-7`, `T-8`, `T-9` (see the seed below) — so without this
+ *      a fresh personal install ADOPTS six of Terje's real daily notes and writes Fjellheim AS
+ *      demo hours into them.
  *   3. THE LEDGER (DD-017). `TT.weekSegments` cuts on (ISO week ∩ month) and NEVER on a date, so
  *      committing the current week and then switching mid-week leaves a frozen money snapshot
  *      astride the cutover. A committed segment stays whole: not one of its days reaches a note.
@@ -260,7 +258,7 @@ TT.vaultQuarantineText = (reason) => (reason && VAULT_QUARANTINE_REASONS[reason]
  * retries every 4 s forever, so turning this into a 403 would be a permanent toast loop for
  * anyone with pre-cutover history.
  * @param {Entry} entry
- * @param {{ shape?: string | null, vaultCutover?: string | null, commits?: import('./types.ts').CommitSegment[] }} context
+ * @param {{ shape?: string | null, cutover?: string | null, commits?: import('./types.ts').CommitSegment[] }} context
  * @returns {boolean}
  */
 TT.vaultBound = function (entry, context) {
@@ -302,16 +300,18 @@ TT.committedOn = function (date, commits) {
 /**
  * IS THIS DAY OLDER THAN THE VAULT? — `vaultBound`'s cutover clause (DD-016), on its own.
  *
- * Day-grained on purpose: `vaultCutover` is stored as an ISO instant so this can choose, and
- * `Entry.date` is a day. `''` (never stamped) excludes no history at all. Only `personal` has a
- * cutover — under `team` there is no vault to predate.
+ * Day-grained, and after DD-026 clause 6 the VALUE is a day too — `YYYY-MM-DD`, validated by the
+ * Catalog's own allowlist, never an instant. The `slice` survives one task longer than the instant
+ * does: at PLAN-017 task 3 this still reads the renamed SQLite row, and task 4 points it at the
+ * Catalog. `''` (no Cutover) excludes no history at all. Only `personal` has a cutover — under
+ * `team` there is no vault to predate.
  * @param {string} date @param {VaultRuleContext} context @returns {boolean}
  */
 TT.preCutover = function (date, context) {
   const ctx = context || {};
   if (ctx.shape !== 'personal') return false;
   if (typeof date !== 'string') return false;
-  const cutoverDay = String(ctx.vaultCutover || '').slice(0, 10);
+  const cutoverDay = String(ctx.cutover || '').slice(0, 10);
   return cutoverDay !== '' && date < cutoverDay;
 };
 
@@ -358,7 +358,16 @@ TT.readOnlyDay = function (date, context) {
  * Where inside the vault TT reads and writes, when nothing has been chosen. HERE, not in
  * server/src/db.js and not in the client's fallback, because SB-057/SB-058 extend this shape
  * ADDITIVELY: the moment they add a key, a second copy silently produces a `VaultPaths` missing
- * it. `timeLogHeading` is a setting with a default and never a constant (SB-057).
+ * it.
+ *
+ * FOUR PATHS AND NOTHING ELSE (DD-026 clause 5, PLAN-017 task 3). `timeLogHeading` used to live
+ * here and does not any more: this object is HOW A MACHINE FINDS THE VAULT, and two machines
+ * legitimately hold different absolute paths to one iCloud folder. The heading is not that. Two
+ * machines disagreeing about the heading put TWO blocks in one note, so it is vault property and
+ * it lives in the Catalog with the rates.
+ *
+ * The move is not circular: TT needs `root` and `catalog` to open the note, and the heading only
+ * matters afterwards, when it reads daily notes.
  * @type {import('./types.ts').VaultPaths}
  */
 TT.VAULT_PATHS_DEFAULT = {
@@ -366,8 +375,12 @@ TT.VAULT_PATHS_DEFAULT = {
   daily: 'Calendar/Daily',
   weekly: 'Calendar/Weekly',
   catalog: 'Time Turtle/Catalog.md',
-  timeLogHeading: 'Time Log',
 };
+/**
+ * The heading TT's block sits under when no Catalog has said otherwise. A DEFAULT and never a
+ * constant: `Settings.timeLogHeading` overrides it, and the Catalog is where that value comes from.
+ */
+TT.TIME_LOG_HEADING_DEFAULT = 'Time Log';
 
 // WHY a capability is off, worded ONCE. The server puts this in the 403 body and the client
 // puts it on screen where the verb used to be, so the two cannot drift in what they claim —
@@ -2385,8 +2398,12 @@ const CATALOG_SECTIONS = {
   //
   // FOUR SETTINGS STAY IN SQLITE UNDER BOTH SHAPES and must never be serialized here. Three of
   // them — `shape` (`backend` before SB-100), `vaultPaths` and `mdDir` — are how TT FINDS this
-  // note, so putting them in it is a bootstrap loop. `vaultCutover` joins them under DD-017: it
-  // means "the date THIS instance's vault history begins", which is per-instance by definition.
+  // note, so putting them in it is a bootstrap loop. `shapeStamp` joins them under DD-026 clause
+  // 1: it is the instant THIS INSTALL stored its shape, which is a fact about the machine.
+  //
+  // AND THE FOURTH USED TO BE THE CUTOVER, under a name that said so. DD-026 split that one key
+  // into two facts: the day this VAULT holds history from is vault property and is now the
+  // `cutover` ROW below; the instant this install stored its shape kept SQLite and lost the name.
   // The exclusion is proved by a test asserting on BOTH spellings of the renamed axis, so it
   // cannot go quietly green.
   //
@@ -2576,15 +2593,36 @@ const CATALOG_SETTING_KEYS = {
   currency: () => true,
   language: () => true,
   vaultTimeSeparator: (value) => TT.TIME_SEPARATOR_VALUES.includes(value),
+  // ---- DD-026 clause 5's two vault properties (PLAN-017 task 3) ----
+  //
+  // THE CUTOVER (TERM-020) — the day from which THIS VAULT holds TT history. `YYYY-MM-DD` and
+  // NOTHING ELSE, which is clause 6 enforced rather than described: an instant compared against a
+  // local `Entry.date` is SB-147, and a value that cannot be an instant cannot have that bug. The
+  // validator is the one place that vocabulary lives, so a caller cannot spell it differently.
+  cutover: (value) => VAULT_CUTOVER_RE.test(value),
+  // THE TIME-LOG HEADING — vault property by clause 5's own test: two machines disagreeing about
+  // it put TWO blocks in one note. A blank one is refused because it matches every note and none.
+  timeLogHeading: (value) => typeof value === 'string' && value.trim() !== '',
 };
+/**
+ * A Cutover, exactly. Anchored at both ends and two digits per field, so `2026-7-27` and
+ * `2026-07-27T12:48:47.681Z` are both refused rather than half-read.
+ */
+const VAULT_CUTOVER_RE = /^\d{4}-\d{2}-\d{2}$/;
 /**
  * The settings keys the catalog note carries, as a list. The ONE home of that vocabulary, the way
  * `TT.SHAPES` and `TT.TIME_SEPARATOR_VALUES` are the one home of theirs.
  *
  * What is NOT on it is the load-bearing half, and it is an allowlist rather than a denylist on
- * purpose: `shape` (`backend` before SB-100), `vaultPaths`, `mdDir` and `vaultCutover` stay in
+ * purpose: `shape` (`backend` before SB-100), `vaultPaths`, `mdDir` and `shapeStamp` stay in
  * SQLite under both shapes, and an allowlist means a settings key invented later is excluded by
  * default instead of included by omission.
+ *
+ * `shapeStamp` IS THE RENAMED ROW, and the rename is why it is still excluded rather than
+ * promoted (DD-026 clause 1). The two were one settings key holding two facts: the day this VAULT
+ * holds history from, which is vault property, and the instant this INSTALL stored its shape,
+ * which is about the machine. The first moved onto this list as `cutover`. The second kept its
+ * home and lost the name that made it look like the first.
  */
 TT.VAULT_CATALOG_SETTING_KEYS = Object.keys(CATALOG_SETTING_KEYS);
 /**
@@ -2613,7 +2651,7 @@ TT.vaultCatalogSettings = function (rows) {
  *
  * THE INSTANCE-LOCAL EXCLUSION IS ENFORCED HERE, AND THE SCOPE OF THAT IS EXACTLY ONE FUNCTION —
  * this one. A `Settings` object handed to it cannot put `shape`, `vaultPaths`, `mdDir` or
- * `vaultCutover` into the note, because the keys are taken from `CATALOG_SETTING_KEYS` rather than
+ * `shapeStamp` into the note, because the keys are taken from `CATALOG_SETTING_KEYS` rather than
  * from the object.
  *
  * IT IS NOT A BYTE-BOUNDARY GUARANTEE, and an earlier version of this comment wrongly claimed it

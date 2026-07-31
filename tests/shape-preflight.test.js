@@ -14,7 +14,7 @@
 //      `team` install, and asserts the count is strictly LESS than the entry count. A suite that
 //      only ever asks from a `personal` install cannot see this bug at all.
 //   2. THE CUTOVER `''`. On the common team → personal path nothing has been stamped, and
-//      `getSettings().vaultCutover` is `''`, which excludes nothing by date. `stored || now` is
+//      `getSettings().cutover` is `''`, which excludes nothing by date. `stored || now` is
 //      the rule; `stored` alone reports zero stranded for a switch about to strand everything.
 //   3. A MUTATION. `stampVaultCutover()` writes and `retireMirrors()` renames, and either one
 //      called from a preflight is invisible in the payload. Only the before/after digest sees it.
@@ -207,8 +207,8 @@ function dbVaultIndex(data) {
  * write filter uses, fed this dir's own rows and the cutover the server would have been looking
  * at. `shape: 'personal'` because that is the TARGET being asked about.
  */
-function strandedFromDb(data, userId, vaultCutover) {
-  const ctx = { shape: 'personal', vaultCutover, commits: dbCommits(data, userId) };
+function strandedFromDb(data, userId, cutover) {
+  const ctx = { shape: 'personal', cutover, commits: dbCommits(data, userId) };
   return dbEntries(data, userId).filter((entry) => !TT.vaultBound(entry, ctx));
 }
 
@@ -272,7 +272,7 @@ async function stampedTeamInstall(admin) {
     200,
   );
   state = await admin('GET', '/api/state');
-  const cutover = state.json.settings.vaultCutover;
+  const cutover = state.json.settings.shapeStamp;
   expect(cutover).toMatch(/^\d{4}-\d{2}-\d{2}T/);
   expect((await admin('PUT', '/api/state', { settings: { ...state.json.settings, shape: 'team' } })).status).toBe(200);
   expect((await admin('GET', '/api/state')).json.shape).toBe('team');
@@ -346,7 +346,7 @@ describe('GET /api/shape/preflight?to=personal — the payload DD-018 names', ()
     await stopServer(server.child);
 
     // The cutover the server used is the STORED one, and it really is stored.
-    expect(storedSetting(data, 'vaultCutover')).toBe(cutover);
+    expect(storedSetting(data, 'shapeStamp')).toBe(cutover);
 
     const expected = strandedFromDb(data, userId, cutover);
     const dates = expected.map((e) => e.date).sort();
@@ -368,7 +368,7 @@ describe('GET /api/shape/preflight?to=personal — the payload DD-018 names', ()
   }, 60000);
 
   it('uses `now` as the cutover when nothing has ever been stamped', async () => {
-    // The team → personal path nobody has been down yet: `getSettings().vaultCutover` is `''`,
+    // The team → personal path nobody has been down yet: `getSettings().cutover` is `''`,
     // and `''` excludes NOTHING by date. An implementation that passes the stored value straight
     // through reports zero stranded entries for the switch that strands the whole back catalogue.
     const { data, md } = dataDir('preflight-unstamped');
@@ -386,7 +386,7 @@ describe('GET /api/shape/preflight?to=personal — the payload DD-018 names', ()
     await stopServer(server.child);
 
     // Nothing was stamped by the read — the whole point of `stored || now` over `stampVaultCutover()`.
-    expect(storedSetting(data, 'vaultCutover')).toBe(null);
+    expect(storedSetting(data, 'shapeStamp')).toBe(null);
 
     const dates = dbEntries(data, userId)
       .map((e) => e.date)
@@ -487,7 +487,7 @@ describe('DD-017: a committed segment freezes WHOLE, so the ledger wins over the
     const after = await admin('GET', '/api/shape/preflight?to=personal');
     await stopServer(server.child);
 
-    expect(storedSetting(data, 'vaultCutover')).toBe(first);
+    expect(storedSetting(data, 'shapeStamp')).toBe(first);
     expect(after.json.entries).toEqual(before.json.entries);
     expect(after.json.commits).toEqual(before.json.commits);
 
@@ -753,7 +753,7 @@ describe('the preflight mutates nothing', () => {
     await stopServer(seeding.child);
     const seeded = digestDir(data);
     expect(seeded).toContain('timesheet-admin.md'); // there IS a mirror file to accidentally retire
-    expect(storedSetting(data, 'vaultCutover')).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    expect(storedSetting(data, 'shapeStamp')).toMatch(/^\d{4}-\d{2}-\d{2}T/);
 
     // 2. THE CONTROL: a boot that calls nothing. If this is not inert the comparison below is
     //    between two equally-dirty states and proves nothing.
