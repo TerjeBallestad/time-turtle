@@ -453,6 +453,15 @@ export interface VaultQuarantinedNote {
   reason: string;
   /** when this note FIRST quarantined; sticky, so it does not look new on every scan pass */
   detectedAt: string | null;
+  /**
+   * PLAN-017: which catalog section the refusal came from, when the note is the Catalog. Null for
+   * a daily note, which has exactly one block and therefore nothing to disambiguate.
+   *
+   * It is on the wire rather than folded into `reason` because the catalog's reasons are shared
+   * with the daily block (`unknown-header`, `row-cell-count`, `digest-mismatch`) and a refusal
+   * naming neither the day nor the section is one a person cannot go and look at.
+   */
+  section?: string | null;
 }
 
 // ---- vault block (SB-055 / SB-045) ----
@@ -675,6 +684,13 @@ export interface VaultCatalogSectionParse {
   rows: Client[] | Project[] | Task[] | VaultCatalogSettingRow[];
   /** propagated from the locator — see `VaultBlockRegion.verified` (DD-009) */
   verified: boolean;
+  /**
+   * `TT.vaultPayloadDigest` over this section's payload lines — the number the anchor carries when
+   * it carries one, and the number it WOULD carry when it does not. Always present, deliberately:
+   * a digest-less section is unverified, not undescribable, and the arbiter has to be able to ask
+   * "did the payload move" about it too.
+   */
+  payloadDigest: string;
 }
 
 export type VaultCatalogSectionResult = VaultCatalogSectionParse | VaultCatalogQuarantine;
@@ -704,6 +720,15 @@ export interface VaultCatalog {
   revision: number;
   /** every section's DD-009 digest was present and matched — see `VaultBlockRegion.verified` */
   verified: boolean;
+  /**
+   * ONE digest over the four sections' own digests, in `CATALOG_ORDER` — the catalog's answer to
+   * the arbiter's one question, "at the same revision, did the payload move?".
+   *
+   * A DERIVED SINGLE NUMBER. The index records this beside the whole-file hash and never records
+   * the four (DD-020 c3): the per-section digests stay self-describing inside the note, which is
+   * what keeps DD-009's corruption detection true across an index rebuild.
+   */
+  payloadDigest: string;
 }
 
 export type VaultCatalogParseResult = VaultCatalog | VaultCatalogQuarantine;
@@ -736,7 +761,14 @@ export type VaultIndexState = 'known' | 'unknown' | 'quarantined';
 export interface VaultIndexRow {
   /** absolute path of the daily note */
   path: string;
-  /** the note's calendar date, `YYYY-MM-DD` */
+  /**
+   * The note's calendar date, `YYYY-MM-DD`.
+   *
+   * `''` FOR THE CATALOG (PLAN-017), and that is the honest value rather than a placeholder: the
+   * Catalog holds state that is not a day (TERM-004), so there is no date it could carry. Every
+   * date-keyed reader — `getVaultIndexByDate`, the writer's `rowForDate` — asks for a real day and
+   * therefore never matches it.
+   */
   date: string;
   state: VaultIndexState;
   /** the block's revision counter as TT last saw it, or null when TT has never parsed it */
@@ -756,6 +788,12 @@ export interface VaultIndexRow {
   /** the block's DD-009 digest was present and matched; null when TT has not parsed the file */
   verified: boolean | null;
   quarantineReason: VaultQuarantineReason | VaultArbitrationReason | null;
+  /**
+   * PLAN-017: which catalog section the refusal came from. Null for a daily note and for every
+   * state other than `quarantined` — tied to the state exactly the way `quarantineReason` is, so a
+   * recovered note cannot carry a stale section.
+   */
+  quarantineSection?: string | null;
   /**
    * When this path FIRST quarantined — sticky, and set only by `putVaultIndex`. `seenAt` moves on
    * every scan pass including the cheap skip, so it answers "when did TT last look", which is a

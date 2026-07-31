@@ -827,12 +827,38 @@ describe('catalog note — the whole note (SB-058 task 3)', () => {
       expect(res.md).not.toContain('`revision:');
     });
 
-    it('a section absent altogether is `no-heading` for that section', () => {
+    // SUPERSEDED BY DD-020 CONSEQUENCE 1, built by PLAN-017 task 1. This golden used to assert
+    // that ONE absent section quarantined the whole note as `no-heading`. That was PLAN-011's
+    // behaviour and DD-020 ruled against it in the same sprint: reads are subset-tolerant, because
+    // otherwise the day TT gains a fifth section every catalog already in a vault quarantines on
+    // upgrade — with the recovery being a hand edit to the money file. The assertion is rewritten
+    // to the ruled behaviour, not deleted, and the section-level contract below is untouched:
+    // `parseVaultCatalogSection` still reports `no-heading` for the section that is not there.
+    it('a section absent altogether reads as zero rows, and the section-level call still says why', () => {
       const withoutTasks = NOTE.replace(TT.serializeVaultCatalogSection('tasks', CATALOG.tasks, { revision: 3 }) + '\n\n', ''); // prettier-ignore
       const parsed = TT.parseVaultCatalog(withoutTasks);
+      expect(parsed.quarantine).toBe(false);
+      expect(parsed.tasks).toEqual([]);
+      // the sections that ARE there are unaffected — tolerance is not partial parsing
+      expect(parsed.clients).toEqual(CATALOG.clients);
+      expect(parsed.revision).toBe(3);
+      // and the section-level parse still names it, which is what the writer's backfill reads
+      const section = TT.parseVaultCatalogSection(withoutTasks, 'tasks');
+      expect(section.quarantine).toBe(true);
+      expect(section.reason).toBe('no-heading');
+      expect(section.section).toBe('tasks');
+    });
+
+    it('ZERO of the four headings is refused — absent is not empty (DD-020 c2)', () => {
+      // The guard against a mistyped `vaultPaths.catalog` landing on an innocent note. Subset
+      // tolerance stops here: four absences is not a subset, it is a different note, and reporting
+      // it as an empty catalog is how the first write puts four tables into somebody's shopping list.
+      const stranger = '# Groceries\n\n- milk\n- coffee\n';
+      const parsed = TT.parseVaultCatalog(stranger);
       expect(parsed.quarantine).toBe(true);
       expect(parsed.reason).toBe('no-heading');
-      expect(parsed.section).toBe('tasks');
+      expect(parsed.section).toBe(null); // a fact about the NOTE, not about whichever was looked for first
+      expect(TT.writeVaultCatalog(stranger, CATALOG).md).toBe(stranger); // and not one byte written
     });
 
     it('the OUTPUT is gated too — bytes TT could not read back are refused, not written', () => {

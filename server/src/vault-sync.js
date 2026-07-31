@@ -83,7 +83,7 @@
 // plainly and there is deliberately no second mechanism behind it.
 import { statSync, readFileSync, readdirSync, watch } from 'node:fs';
 import { readFile as readFileAsync } from 'node:fs/promises';
-import { join, basename } from 'node:path';
+import { join, basename, dirname } from 'node:path';
 import TT from '../../shared/core.js';
 // db.js DIRECTLY, and not through `store.js` — this module is INSIDE the seam, not a caller of it.
 // `store.js` dispatches the vault implementation, so going back through it would be a cycle
@@ -99,7 +99,7 @@ import TT from '../../shared/core.js';
 import * as db from './db.js';
 import { listUsers } from './db.js';
 import { activeBackend } from './backend.js';
-import { arbitrate, describeVaultFile, fileSha } from './vault-arbitrate.js';
+import { arbitrate, describeVaultCatalogFile, describeVaultFile, fileSha } from './vault-arbitrate.js';
 import { sweepVaultTemps } from './vault-fs.js';
 
 /** @typedef {import('../../shared/types.ts').Entry} Entry */
@@ -159,6 +159,18 @@ let rewriter = () => {};
 export function setVaultRewriter(fn) {
   rewriter = typeof fn === 'function' ? fn : () => {};
 }
+/** @type {(rev: number) => void} */
+let catalogRewriter = () => {};
+/**
+ * The same seam for the Catalog (PLAN-017). Registered rather than imported, so the dependency
+ * still runs one way, and a no-op default so the READ path is complete and correct on its own —
+ * which is exactly the state task 1 leaves the tree in, deliberately: it reads the note and
+ * declines to write it.
+ * @param {(rev: number) => void} fn
+ */
+export function setVaultCatalogRewriter(fn) {
+  catalogRewriter = typeof fn === 'function' ? fn : () => {};
+}
 
 // ---- configuration ----
 /**
@@ -169,7 +181,7 @@ export function setVaultRewriter(fn) {
  *
  * `null` means "there is nothing to sync": not the `personal` shape, or no vault root configured.
  * A missing root is emphatically NOT "scan from the current directory".
- * @returns {{ root: string, dailyDir: string, heading: string, cutoverDay: string, userId: number, projects: import('../../shared/types.ts').Project[], timeSeparator: any } | null}
+ * @returns {{ root: string, dailyDir: string, catalogPath: string, heading: string, cutoverDay: string, userId: number, projects: import('../../shared/types.ts').Project[], timeSeparator: any } | null}
  */
 export function vaultSyncConfig() {
   if (activeBackend() !== 'vault') return null;
@@ -183,6 +195,10 @@ export function vaultSyncConfig() {
     // whole vault worktree, and a checkpoint of `Calendar/Daily` is not a checkpoint of the vault.
     root: paths.root,
     dailyDir: join(paths.root, paths.daily),
+    // PLAN-017 task 1: the Catalog note, resolved on every pass for the same reason the daily
+    // folder is — `vaultPaths.catalog` is a setting, and a pass that kept reading the old path
+    // after the user re-pointed it would be resolving rates out of somebody else's note.
+    catalogPath: join(paths.root, paths.catalog || TT.VAULT_PATHS_DEFAULT.catalog),
     heading: paths.timeLogHeading || TT.VAULT_PATHS_DEFAULT.timeLogHeading,
     // DD-016 is worded as an INSTANT and `Entry.date` is a day, so the comparison is day-grained —
     // `stampVaultCutover` stores the finer value precisely so this can choose. `''` (never
@@ -272,17 +288,16 @@ export async function readVaultNote(path, io) {
 
 // ---- applying a verdict ----
 /**
- * The index row a verdict leaves behind, plus — for the two importing verdicts — the entries it
- * puts into the index and the version bump that tells the client.
+ * The index row a verdict leaves behind, and the one place its defaults are written. Shared by the
+ * daily note and the Catalog (PLAN-017 task 1) so a field added to the row cannot be remembered on
+ * one path and forgotten on the other.
  *
- * NOTHING HERE DELETES AN ENTRY ON A VERDICT OF `unknown`. That is invariant 1 on the write side:
- * the row keeps its `rev`, its digest and every entry TT already holds, and only `state` and
- * `seenAt` move. A day TT could not read is a day TT knows nothing new about — never an empty one.
- * @param {string} path @param {string} date
- * @param {import('../../shared/types.ts').VaultArbitrationVerdict} verdict
- * @param {{ userId: number, sha?: string | null, payloadDigest?: string | null, parse?: any }} ctx
+ * NOTHING HERE DELETES ANYTHING ON A VERDICT OF `unknown`. That is invariant 1 on the write side:
+ * the row keeps its `rev`, its digest and everything TT already holds, and only `state` and
+ * `seenAt` move. A file TT could not read is one TT knows nothing new about — never an empty one.
+ * @param {string} path @param {string} date `''` for the Catalog, which is not a day (TERM-004)
  */
-export function applyVerdict(path, date, verdict, ctx) {
+function indexWriterFor(path, date) {
   const existing = db.getVaultIndex(path);
   const seenAt = new Date().toISOString();
   /** @param {Partial<VaultIndexRow>} over */
@@ -297,11 +312,24 @@ export function applyVerdict(path, date, verdict, ctx) {
         fileSha: existing ? existing.fileSha : null,
         verified: existing ? existing.verified : null,
         quarantineReason: null,
+        quarantineSection: null,
         seenAt,
         writtenAt: existing ? existing.writtenAt : null,
         ...over,
       }),
     );
+  return { existing, write };
+}
+
+/**
+ * What one daily note's verdict does — the index row it leaves behind, plus, for the two importing
+ * verdicts, the entries it puts into the index and the version bump that tells the client.
+ * @param {string} path @param {string} date
+ * @param {import('../../shared/types.ts').VaultArbitrationVerdict} verdict
+ * @param {{ userId: number, sha?: string | null, payloadDigest?: string | null, parse?: any }} ctx
+ */
+export function applyVerdict(path, date, verdict, ctx) {
+  const { existing, write } = indexWriterFor(path, date);
 
   switch (verdict.verdict) {
     case 'skip':
@@ -392,32 +420,145 @@ function importEntries(userId, date, entries) {
   });
 }
 
-// ---- the pass ----
+// ---- the catalog (PLAN-017 task 1, DD-020) ----
 /**
- * Look at one daily note and do whatever it deserves. The whole engine, for one path.
- * @param {string} path @param {string} date
+ * What one Catalog verdict does. The daily note's `applyVerdict` one file over, over a different
+ * store: clients, projects and task templates instead of entries, and the `catalog` version
+ * counter instead of `entries`.
+ *
+ * THE `date` IS `''` AND THAT IS THE HONEST VALUE. The Catalog holds state that is not a day
+ * (TERM-004), so there is no date it could carry, and every date-keyed reader asks for a real day.
+ * @param {string} path @param {import('../../shared/types.ts').VaultArbitrationVerdict} verdict
+ * @param {{ userId: number, sha?: string | null, file?: any }} ctx
+ */
+export function applyCatalogVerdict(path, verdict, ctx) {
+  const { existing, write } = indexWriterFor(path, '');
+  const parse = ctx.file ? ctx.file.parse : null;
+
+  switch (verdict.verdict) {
+    case 'skip':
+      write({ state: existing ? existing.state : 'known', fileSha: ctx.sha ?? (existing && existing.fileSha) });
+      return;
+    case 'unknown':
+      write({ state: 'unknown' });
+      return;
+    case 'quarantine':
+      // The SECTION rides with the reason. A catalog refusal shares most of its vocabulary with a
+      // daily block (`unknown-header`, `row-cell-count`, `digest-mismatch`), so a reason naming
+      // neither a day nor a section is one a person cannot go and look at.
+      write({
+        state: 'quarantined',
+        quarantineReason: verdict.reason ?? null,
+        quarantineSection: parse ? parse.section : null,
+        fileSha: ctx.sha ?? null,
+      });
+      return;
+    case 'import':
+    case 'import-and-rewrite': {
+      importCatalog(ctx.userId, parse && parse.catalog);
+      // The same honesty rule the daily note follows: the row records the revision that is ON DISK
+      // right now, never the one a rewrite is about to move it to. See `applyVerdict`.
+      write({
+        state: 'known',
+        rev: parse && parse.revision != null ? parse.revision : (verdict.rev ?? null),
+        payloadDigest: ctx.file ? ctx.file.payloadDigest : null,
+        fileSha: ctx.sha ?? null,
+        verified: parse ? !!parse.verified : null,
+      });
+      if (verdict.verdict === 'import-and-rewrite' && verdict.rev != null) catalogRewriter(verdict.rev);
+      return;
+    }
+    case 'rewrite-from-index':
+      write({ state: existing ? existing.state : 'known', fileSha: ctx.sha ?? (existing && existing.fileSha) });
+      if (verdict.rev != null) catalogRewriter(verdict.rev);
+      return;
+    default:
+      return;
+  }
+}
+
+/**
+ * Put the note's catalog into SQLite — DD-006's derived index, filled from the file that IS the
+ * database under `personal`.
+ *
+ * THE SETTINGS ROWS GO THROUGH `TT.vaultCatalogSettings` AND NOTHING ELSE. It is the allowlist
+ * projection: a key this TT does not know is carried on the rows and re-emitted, never applied.
+ * Handing `Object.fromEntries(rows)` to `putSettings` instead would let a note reach in and set
+ * `shape`, `vaultPaths` or `mdDir` — the three settings that say how TT FINDS this note.
+ *
+ * ONE TRANSACTION, because a catalog that landed its projects and not its clients resolves every
+ * rate to 0 with no error anywhere. Whole-catalog atomicity is what the codec refuses partial
+ * parses for; it would mean nothing if the apply were piecemeal.
+ * @param {number} userId @param {import('../../shared/types.ts').VaultCatalog | null} catalog
+ */
+function importCatalog(userId, catalog) {
+  if (!catalog) return;
+  db.transaction(() => {
+    db.putClients(catalog.clients || []);
+    db.putProjects(catalog.projects || []);
+    db.putTasks(userId, catalog.tasks || []);
+    db.putSettings(TT.vaultCatalogSettings(catalog.settings || []));
+    // DC-001: without the bump an open tab keeps its stale catalog and PUTs it straight back over
+    // what was just imported — the same trap `importEntries` closes for a day's rows.
+    db.bumpCatalogVersion();
+  });
+}
+
+/**
+ * Look at the Catalog note and do whatever it deserves. The same pass a daily note gets.
  * @param {ReturnType<typeof vaultSyncConfig>} config
  * @param {{ stat?: (p: string) => any, readFile?: (p: string) => Promise<string>, timeoutMs?: number, viaWatcher?: boolean }} [io]
  * @returns {Promise<string>} the verdict applied, for logging and for tests
  */
-export async function syncVaultPath(path, date, config, io) {
+export async function syncVaultCatalog(config, io) {
   if (!config) return 'skip';
+  return passVaultFile(
+    config.catalogPath,
+    describeVaultCatalogFile,
+    (verdict, ctx) =>
+      applyCatalogVerdict(config.catalogPath, verdict, { userId: config.userId, sha: ctx.sha, file: ctx.file }),
+    io,
+  );
+}
+
+// ---- the pass ----
+/**
+ * THE PER-FILE PASS, WRITTEN ONCE (PLAN-017 task 1). Two notes go through it — a daily note and
+ * the Catalog — and every step of it is the same for both, for the same reasons: `statSync`
+ * classifies for free, a dataless file is recorded and NOT read, a read has a timeout, the
+ * whole-file sha takes the cheap exit, and only then is anything parsed.
+ *
+ * It was one function serving one note before this task. It is a parameterised one now rather
+ * than a copy, because the copy is where the two drift: the dataless branch, the timeout and the
+ * echo guard are three separate opportunities for the catalog to quietly stop honouring an
+ * invariant the daily note still honours, and nothing would fail.
+ *
+ * WHAT DIFFERS BETWEEN THE TWO IS EXACTLY TWO FUNCTIONS — how the bytes are described to the
+ * arbiter (`describe`), and what a verdict does to the index and the store (`apply`). Everything
+ * else here is the invariants, and the invariants are not per-note.
+ * @param {string} path
+ * @param {(text: string) => any} describe
+ * @param {(verdict: import('../../shared/types.ts').VaultArbitrationVerdict, ctx: { sha?: string | null, file?: any }) => void} apply
+ * @param {{ stat?: (p: string) => any, readFile?: (p: string) => Promise<string>, timeoutMs?: number, viaWatcher?: boolean }} [io]
+ * @returns {Promise<string>} the verdict applied, for logging and for tests
+ */
+async function passVaultFile(path, describe, apply, io) {
   const found = classifyVaultFile(path, io && io.stat);
   // absent → `unknown`, never a deletion. The file may be mid-sync, or on the other machine only.
   if (!found.exists) {
-    applyVerdict(path, date, { verdict: 'unknown' }, { userId: config.userId });
+    apply({ verdict: 'unknown' }, {});
     return 'unknown';
   }
   // DATALESS: classify, record, and DO NOT READ. The real-eviction evidence for this branch lives
   // in SB-052 and in task 1's measurements — a temp directory cannot be made dataless, so the test
   // for it injects the stat and asserts that ZERO reads happen.
   if (found.dataless) {
-    applyVerdict(path, date, { verdict: 'unknown' }, { userId: config.userId });
+    apply({ verdict: 'unknown' }, {});
     return 'unknown';
   }
   const read = await readVaultNote(path, io);
   if (!read.readable || read.text == null) {
-    applyVerdict(path, date, { verdict: 'unknown' }, { userId: config.userId });
+    apply({ verdict: 'unknown' }, {});
     return 'unknown';
   }
   const sha = fileSha(read.text);
@@ -428,16 +569,34 @@ export async function syncVaultPath(path, date, config, io) {
     const own = echo.get(path);
     if (own && own.sha === sha) return 'echo';
   }
-  const file = describeVaultFile(read.text, { heading: config.heading, date, projects: config.projects });
+  const file = describe(read.text);
   const index = db.getVaultIndex(path);
   const verdict = arbitrate({ file, index });
-  applyVerdict(path, date, verdict, {
-    userId: config.userId,
-    sha,
-    payloadDigest: file.payloadDigest,
-    parse: file.parse,
-  });
+  apply(verdict, { sha, file });
   return verdict.verdict;
+}
+
+/**
+ * Look at one daily note and do whatever it deserves. The whole engine, for one path.
+ * @param {string} path @param {string} date
+ * @param {ReturnType<typeof vaultSyncConfig>} config
+ * @param {{ stat?: (p: string) => any, readFile?: (p: string) => Promise<string>, timeoutMs?: number, viaWatcher?: boolean }} [io]
+ * @returns {Promise<string>} the verdict applied, for logging and for tests
+ */
+export async function syncVaultPath(path, date, config, io) {
+  if (!config) return 'skip';
+  return passVaultFile(
+    path,
+    (text) => describeVaultFile(text, { heading: config.heading, date, projects: config.projects }),
+    (verdict, ctx) =>
+      applyVerdict(path, date, verdict, {
+        userId: config.userId,
+        sha: ctx.sha,
+        payloadDigest: ctx.file ? ctx.file.payloadDigest : null,
+        parse: ctx.file ? ctx.file.parse : undefined,
+      }),
+    io,
+  );
 }
 
 /**
@@ -449,6 +608,18 @@ export async function syncVaultPath(path, date, config, io) {
 export async function scanVault(io) {
   /** @type {Record<string, number>} */
   const counts = {};
+  const first = vaultSyncConfig();
+  if (!first) return counts;
+  // THE CATALOG FIRST, and the order is load-bearing rather than tidy: the note carries the
+  // Projects table a daily note's `[[Wikilink]]` cell resolves through (SB-059), so reading it
+  // after the days would resolve this pass's cells against the previous pass's catalog.
+  //
+  // COUNTED UNDER ITS OWN KEY, never folded into the daily verdict counts. `counts.unknown === 3`
+  // has meant "three days TT could not read" since SB-057, and quietly making it mean "…or the
+  // catalog" would move every existing reading of that number by one without anything failing.
+  counts['catalog:' + (await syncVaultCatalog(first, io))] = 1;
+  // RE-RESOLVED after the catalog pass, for the same reason the catalog runs first: the import
+  // that just landed may have replaced the Projects table this loop resolves cells against.
   const config = vaultSyncConfig();
   if (!config) return counts;
   /** @type {string[]} */
@@ -473,6 +644,8 @@ export async function scanVault(io) {
 // ---- the triggers ----
 /** @type {import('node:fs').FSWatcher | null} */
 let watcher = null;
+/** @type {import('node:fs').FSWatcher | null} */
+let catalogWatcher = null;
 /** @type {any} */
 let interval = null;
 /** @type {Map<string, any>} */
@@ -492,7 +665,7 @@ export function startVaultSync(opts) {
   // Task 1 measured that a SIGKILL between the write and the rename really does leave a temp
   // behind, and that it stays forever. Once at boot, in the one directory TT writes into.
   sweepVaultTemps(config.dailyDir);
-  pruneVaultIndex(config.dailyDir);
+  pruneVaultIndex(config.dailyDir, config.catalogPath);
   const debounceMs = (opts && opts.debounceMs) || WATCH_DEBOUNCE_MS;
   try {
     watcher = watch(config.dailyDir, (_event, filename) => {
@@ -522,6 +695,35 @@ export function startVaultSync(opts) {
       `[time-turtle] could not watch ${config.dailyDir} (${/** @type {Error} */ (err).message}) — the interval scan still runs`,
     );
   }
+  // THE CATALOG'S OWN WATCHER (PLAN-017 task 1). A second watcher rather than a wider one: the
+  // Catalog can sit anywhere `vaultPaths.catalog` points, including the vault ROOT, and watching a
+  // folder recursively to catch one file would hand TT an event for every note in the vault.
+  //
+  // Filtered by basename, because the folder it sits in is not TT's. Same debounce, same reason.
+  const catalogDir = dirname(config.catalogPath);
+  const catalogName = basename(config.catalogPath);
+  try {
+    catalogWatcher = watch(catalogDir, (_event, filename) => {
+      if (!filename || basename(String(filename)) !== catalogName) return;
+      const existing = debounces.get(catalogName);
+      if (existing) clearTimeout(existing);
+      debounces.set(
+        catalogName,
+        setTimeout(() => {
+          debounces.delete(catalogName);
+          const now = vaultSyncConfig();
+          if (!now) return;
+          void syncVaultCatalog(now, { viaWatcher: true }).catch((err) =>
+            console.error('[time-turtle] catalog watch failed:', /** @type {Error} */ (err).message),
+          );
+        }, debounceMs),
+      );
+    });
+  } catch (err) {
+    console.error(
+      `[time-turtle] could not watch ${catalogDir} (${/** @type {Error} */ (err).message}) — the interval scan still reads the catalog`,
+    );
+  }
   interval = setInterval(
     () => {
       void scanVault().catch((err) =>
@@ -545,11 +747,18 @@ export function startVaultSync(opts) {
  *
  * PATH PREFIX, not date: two folders can hold the same day, which is the case `getVaultIndexByDate`
  * exists for, and the row that survives must be the one under the CURRENT folder.
- * @param {string} dailyDir
+ *
+ * THE CATALOG IS EXEMPT BY PATH (PLAN-017 task 1). It lives outside the daily folder by design —
+ * `Time Turtle.md` at the vault root is the live case — so the prefix rule would delete its row on
+ * every boot, and with the row goes the standing quarantine on the one note that resolves every
+ * rate. Re-pointing `vaultPaths.catalog` drops the OLD catalog row for exactly the reason the rule
+ * exists: nothing looks at that path any more.
+ * @param {string} dailyDir @param {string} catalogPath
  */
-function pruneVaultIndex(dailyDir) {
+function pruneVaultIndex(dailyDir, catalogPath) {
   const prefix = dailyDir.endsWith('/') ? dailyDir : dailyDir + '/';
   for (const row of db.listVaultIndex()) {
+    if (row.path === catalogPath) continue;
     if (row.path.startsWith(prefix)) continue;
     db.deleteVaultIndex(row.path);
     console.log(`[time-turtle] vault index: dropped ${row.path} — outside the current daily folder`);
@@ -561,6 +770,10 @@ export function stopVaultSync() {
   if (watcher) {
     watcher.close();
     watcher = null;
+  }
+  if (catalogWatcher) {
+    catalogWatcher.close();
+    catalogWatcher = null;
   }
   if (interval) {
     clearInterval(interval);

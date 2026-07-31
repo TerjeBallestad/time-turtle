@@ -111,7 +111,10 @@ function QuarantinedNotes({ notes }: { notes: VaultQuarantinedNote[] }) {
         <div key={note.path} className={st.vaultQuarantineRow}>
           <div className={st.mirrorBlockPath}>{note.path}</div>
           <div className={st.mirrorBlockMeta}>
-            {note.date}
+            {/* PLAN-017: the Catalog carries no date (TERM-004) and names its SECTION instead —
+                which is what makes a reason it shares with a daily block ('unknown-header',
+                'row-cell-count') something a person can go and look at. */}
+            {note.section || note.date}
             {note.detectedAt ? ' · ' + TT.t('paused') + ' ' + whenLocal(note.detectedAt) : ''}
           </div>
           <div className={st.mirrorBlockBody}>{TT.t(TT.vaultQuarantineText(note.reason))}</div>

@@ -110,6 +110,22 @@ const NO: Record<string, string> = {
     'dette notatet gikk tilbake til en tidligere revisjon med innhold Time Turtle ikke skrev — en gjenoppretting fra historikken, eller en annen redigerer.',
   'this note’s revision is older than the one Time Turtle recorded, and Time Turtle has no record of it — so it cannot tell an out-of-date copy from a deliberate restore.':
     'revisjonen i dette notatet er eldre enn den Time Turtle har notert, og Time Turtle har ingen oppføring av den — så den kan ikke skille en utdatert kopi fra en bevisst gjenoppretting.',
+  // PLAN-017 task 1: the catalog note's own refusals. They reach the same surface as the daily
+  // ones and follow the same rule — the CLAIM matches the English in shared/core.js, not the bytes.
+  'a Rate or Rounding cell is not a number Time Turtle can read, and that cell decides money.':
+    'en Rate- eller Avrundingscelle er ikke et tall Time Turtle kan lese, og den cellen avgjør penger.',
+  'a Billable or Archived cell is neither a check mark nor blank.':
+    'en Fakturerbar- eller Arkivert-celle er verken et hakemerke eller tom.',
+  'a row has no id, so nothing can refer to it or rewrite it.':
+    'en rad har ingen id, så ingenting kan vise til den eller skrive den om.',
+  'two rows in this section carry the same id, so the second one would be invisible.':
+    'to rader i denne seksjonen har samme id, så den andre ville vært usynlig.',
+  'a project names a client this note does not list, which would make every rate on it resolve to nothing.':
+    'et prosjekt viser til en kunde dette notatet ikke lister opp, noe som ville gjort at hver rate på det ikke fant noen verdi.',
+  'the sections of this note carry different revision numbers, so part of it was written by something other than Time Turtle.':
+    'seksjonene i dette notatet har ulike revisjonsnumre, så deler av det er skrevet av noe annet enn Time Turtle.',
+  'Time Turtle was asked for a section of this note that does not exist.':
+    'Time Turtle ble spurt om en seksjon i dette notatet som ikke finnes.',
   // SB-098 item 4: the first-run question (ShapeChoice.tsx). SHAPE LANGUAGE IN BOTH LANGUAGES —
   // never `sqlite`, never `vault` as an engine name. DD-015's point is that an install chooses
   // what it IS and the storage falls out of that, and someone opening Time Turtle for the first

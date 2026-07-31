@@ -91,6 +91,51 @@ export function describeVaultFile(text, opts) {
 }
 
 /**
+ * Turn the CATALOG note's text into what `arbitrate` needs to see — the same three facts a daily
+ * note supplies, read off `TT.parseVaultCatalog` instead of the daily locator (PLAN-017 task 1,
+ * DD-020 consequence 5).
+ *
+ * THE POINT IS THAT `arbitrate` DOES NOT LEARN A NEW ROW. It compares a revision, a payload digest
+ * and a quarantine flag, and the catalog supplies all three:
+ *   • `revision` — the ONE catalog-wide counter. Sections disagreeing about it never reaches the
+ *     matrix at all: it arrives pre-refused as `catalog-revision-mismatch`, the way
+ *     `digest-mismatch` arrives pre-refused from the locator.
+ *   • `payloadDigest` — one number over the four sections' own digests. It is what makes DD-020
+ *     consequence 7 work: prose typed BETWEEN two sections moves the file's sha and moves no
+ *     payload, so the same-revision branch skips instead of rewriting the money file.
+ *   • `adopted` — ALWAYS FALSE, and not an oversight. DD-012 adoption is deliberately off for this
+ *     note (shared/core.js says so at the catalog layer): a `## Clients` heading in some unrelated
+ *     note is not an invitation to claim it.
+ *
+ * The SECTION a refusal came from is not on this shape, because `arbitrate` has no use for it. The
+ * caller reads it off `file.parse.section` when it records the quarantine.
+ *
+ * THE RETURN TYPE IS ITS OWN, not `VaultArbitrationInput['file']`. That one's `parse` is a
+ * `VaultBlockParseResult` — a daily block, with `heading`, `headers` and `entries` — and the
+ * catalog has none of those. `arbitrate` reads five fields and neither type promises more than the
+ * five; claiming the daily shape here would be a lie the compiler would have to be argued out of.
+ * @param {string} text
+ * @returns {{ readable: true, sha: string, payloadDigest: string | null, parse: { quarantine: boolean, reason: any, section: any, adopted: false, revision: number | null, verified: boolean, catalog: import('../../shared/types.ts').VaultCatalog | null } }}
+ */
+export function describeVaultCatalogFile(text) {
+  const parsed = TT.parseVaultCatalog(text);
+  return {
+    readable: true,
+    sha: fileSha(text),
+    payloadDigest: parsed.quarantine ? null : parsed.payloadDigest,
+    parse: {
+      quarantine: !!parsed.quarantine,
+      reason: parsed.quarantine ? parsed.reason : undefined,
+      section: parsed.quarantine ? parsed.section : null,
+      adopted: false,
+      revision: parsed.quarantine ? null : parsed.revision,
+      verified: parsed.quarantine ? false : parsed.verified,
+      catalog: parsed.quarantine ? null : parsed,
+    },
+  };
+}
+
+/**
  * Decide what to do about one daily note.
  *
  * `file.payloadDigest` is `TT.vaultPayloadDigest` over the block's payload lines — the SAME hash

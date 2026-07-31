@@ -187,6 +187,9 @@ addColumnIfMissing('users', 'mirror_slug', "TEXT NOT NULL DEFAULT ''");
 // including the cheap skip, so it answers a different question. Guarded, because a DB created
 // between this plan's task 2 and task 8 already has the table without the column.
 addColumnIfMissing('vault_index', 'quarantined_at', 'TEXT');
+// PLAN-017: which catalog section a refusal came from. Null for every daily note — they have one
+// block, so there is nothing to disambiguate — and null for every state but `quarantined`.
+addColumnIfMissing('vault_index', 'quarantine_section', 'TEXT');
 
 // One-shot v1→v2 data migration (idempotent — guarded by a schema version marker).
 // For every entry: resolve its old task_id against the (old, shared) tasks table and
@@ -716,13 +719,14 @@ function vaultIndexRow(row) {
     fileSha: row.file_sha,
     verified: row.verified == null ? null : !!row.verified,
     quarantineReason: row.quarantine_reason,
+    quarantineSection: row.quarantine_section,
     quarantinedAt: row.quarantined_at,
     seenAt: row.seen_at,
     writtenAt: row.written_at,
   };
 }
 const VAULT_INDEX_SELECT =
-  'SELECT path, date, state, rev, payload_digest, prev_rev, prev_payload_digest, file_sha, verified, quarantine_reason, quarantined_at, seen_at, written_at FROM vault_index';
+  'SELECT path, date, state, rev, payload_digest, prev_rev, prev_payload_digest, file_sha, verified, quarantine_reason, quarantine_section, quarantined_at, seen_at, written_at FROM vault_index';
 
 /** @param {string} path @returns {VaultIndexRow | null} */
 export function getVaultIndex(path) {
@@ -798,14 +802,25 @@ export function putVaultIndex(row) {
         : current && current.quarantineReason
           ? current.quarantineReason
           : null;
+  // The SECTION rides with the reason, under the same rule and for the same reason: a cheap-exit
+  // re-put must not drop it, and a recovered note must not keep it.
+  const quarantineSection =
+    state !== 'quarantined'
+      ? null
+      : row.quarantineSection != null
+        ? String(row.quarantineSection)
+        : current && current.quarantineSection
+          ? current.quarantineSection
+          : null;
   db.prepare(
-    `INSERT INTO vault_index (path, date, state, rev, payload_digest, prev_rev, prev_payload_digest, file_sha, verified, quarantine_reason, quarantined_at, seen_at, written_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `INSERT INTO vault_index (path, date, state, rev, payload_digest, prev_rev, prev_payload_digest, file_sha, verified, quarantine_reason, quarantine_section, quarantined_at, seen_at, written_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(path) DO UPDATE SET
        date = excluded.date, state = excluded.state, rev = excluded.rev,
        payload_digest = excluded.payload_digest, prev_rev = excluded.prev_rev,
        prev_payload_digest = excluded.prev_payload_digest, file_sha = excluded.file_sha,
        verified = excluded.verified, quarantine_reason = excluded.quarantine_reason,
+       quarantine_section = excluded.quarantine_section,
        quarantined_at = excluded.quarantined_at, seen_at = excluded.seen_at,
        written_at = excluded.written_at`,
   ).run(
@@ -819,6 +834,7 @@ export function putVaultIndex(row) {
     row.fileSha == null ? null : String(row.fileSha),
     row.verified == null ? null : row.verified ? 1 : 0,
     quarantineReason,
+    quarantineSection,
     quarantinedAt,
     row.seenAt == null ? null : String(row.seenAt),
     row.writtenAt == null ? null : String(row.writtenAt),

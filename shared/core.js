@@ -168,8 +168,14 @@ TT.backendFor = (shape) => (shape && SHAPE_BACKEND[shape]) || SHAPE_BACKEND.team
 // discipline). A reason the map does not know degrades to a GENERIC line rather than a blank:
 // SB-090 already moved eight goldens onto a new reason name, and a surface that renders nothing
 // for an unfamiliar code is a note that silently stops syncing — which is the failure this whole
-// task exists to prevent. Catalog-only reasons are deliberately absent and take the fallback: no
-// daily-note row can carry one until the catalog is wired to the engine.
+// task exists to prevent.
+//
+// THE CATALOG-ONLY REASONS ARE NOW HERE (PLAN-017 task 1). They used to be deliberately absent,
+// with the note that no row could carry one "until the catalog is wired to the engine" — which is
+// what this task did. `Time Turtle.md` is a file the person opens and reads, so a catalog refusal
+// falling through to the generic line would be the same silent stop on the one note that resolves
+// every rate. Each line says which fact TT could not settle; WHICH SECTION it came from rides
+// beside the reason on `VaultQuarantinedNote.section`, because these reasons are per-section.
 /** @type {Record<string, string>} */
 const VAULT_QUARANTINE_REASONS = {
   'no-heading': 'the Time Log heading is not in this note.',
@@ -195,6 +201,16 @@ const VAULT_QUARANTINE_REASONS = {
     'this note went back to an earlier revision with contents Time Turtle did not write — a restore from history, or another editor.',
   'unprovable-staleness':
     'this note’s revision is older than the one Time Turtle recorded, and Time Turtle has no record of it — so it cannot tell an out-of-date copy from a deliberate restore.',
+  // the catalog note only (shared/core.js `parseVaultCatalog`)
+  'catalog-bad-number': 'a Rate or Rounding cell is not a number Time Turtle can read, and that cell decides money.',
+  'catalog-bad-flag-cell': 'a Billable or Archived cell is neither a check mark nor blank.',
+  'catalog-missing-id': 'a row has no id, so nothing can refer to it or rewrite it.',
+  'catalog-duplicate-id': 'two rows in this section carry the same id, so the second one would be invisible.',
+  'catalog-dangling-client':
+    'a project names a client this note does not list, which would make every rate on it resolve to nothing.',
+  'catalog-revision-mismatch':
+    'the sections of this note carry different revision numbers, so part of it was written by something other than Time Turtle.',
+  'catalog-unknown-section': 'Time Turtle was asked for a section of this note that does not exist.',
 };
 /** The line every quarantine opens with. One home, so the server and the screen cannot drift. */
 TT.VAULT_QUARANTINE_HEADLINE = 'Time Turtle cannot prove it wrote this block, so it has stopped writing to this note.';
@@ -2534,6 +2550,16 @@ TT.parseVaultCatalogSection = function (md, section) {
     headers,
     rows,
     verified: loc.verified,
+    // THE SECTION'S OWN PAYLOAD DIGEST — the same number the anchor carries when the anchor
+    // carries one, and what it WOULD carry when it does not. Computed here rather than read off
+    // `loc.digest` for exactly that reason: a digest-less section is unverified, not undescribable,
+    // and an arbiter comparing "did the payload move" must get an answer for it too.
+    //
+    // Taken through `vaultPayloadDigest` over the located payload lines, which is the one
+    // definition (DD-023 half 2) — never a second hash of the same bytes.
+    payloadDigest: vaultPayloadDigest(
+      [lines[loc.headerLine], lines[loc.separatorLine]].concat(loc.rowLines.map((ln) => lines[ln])),
+    ),
   };
 };
 
@@ -2704,6 +2730,20 @@ TT.serializeVaultCatalog = function (catalog, opts) {
 /**
  * Parse a whole catalog note into a model, or refuse — as ONE unit. Any section quarantining
  * quarantines the note.
+ *
+ * READS ARE SUBSET-TOLERANT (DD-020 consequence 1, built by PLAN-017 task 1). A section whose
+ * HEADING IS ABSENT parses as zero rows, because the alternative is that the day TT gains a fifth
+ * section every catalog already in a vault quarantines on upgrade — with the recovery being a hand
+ * edit to the money file. The writer backfills it at the note's current N.
+ *
+ * AND THE BOUNDARY IS EXACT (DD-020 consequence 2), because it is the whole safety argument:
+ *   • heading ABSENT                    → zero rows, tolerated here, backfilled on the next write
+ *   • heading PRESENT, no revision line → QUARANTINE, unchanged. DD-012 adoption stays off for
+ *     this note, so a `## Clients` table TT did not write is not TT's to claim.
+ *   • ZERO of the four headings present → `no-heading`, refused, `section: null`. This is the
+ *     guard against a mistyped `vaultPaths.catalog` landing on an innocent note: tolerating four
+ *     absences at once would report somebody's shopping list as an empty catalog, and the next
+ *     write would put four tables into it.
  * @param {string} md @returns {import('./types.ts').VaultCatalogParseResult}
  */
 TT.parseVaultCatalog = function (md) {
@@ -2712,9 +2752,15 @@ TT.parseVaultCatalog = function (md) {
   const sections = [];
   for (const section of CATALOG_ORDER) {
     const parsed = TT.parseVaultCatalogSection(input, section);
+    // `no-heading` and nothing else is tolerated, and the narrowness is the point: every other
+    // refusal is about a heading TT CAN see, which means bytes it is being asked to describe.
+    if (parsed.quarantine && parsed.reason === 'no-heading') continue;
     if (parsed.quarantine) return parsed; // named, with its section — no partial catalog escapes
     sections.push(parsed);
   }
+  // Four absences is not a subset, it is a different note. Reported as a fact about the NOTE
+  // (`section: null`) rather than about whichever heading happened to be looked for first.
+  if (!sections.length) return { quarantine: true, reason: 'no-heading', section: null };
   // structural first: a revision disagreement is a fact about the NOTE, and diagnosing a
   // dangling reference inside a note that has plainly been merged would name the wrong problem
   const counter = catalogRevisionOf(sections);
@@ -2727,11 +2773,10 @@ TT.parseVaultCatalog = function (md) {
   /** @param {import('./types.ts').VaultCatalogSectionName} name @returns {any[]} */
   const rowsOf = (name) => {
     const found = sections.find((section) => section.section === name);
-    // unreachable: `sections` was just filled from CATALOG_ORDER, which is these four names. The
-    // narrowing is the point — a section added to the type without being added to CATALOG_ORDER
-    // should stop here rather than hand back an undefined table.
-    if (!found) throw new Error('catalog section not parsed: ' + name);
-    return found.rows;
+    // ABSENT IS ZERO ROWS, not an error — that is subset tolerance arriving at the model. It used
+    // to throw, because before DD-020 consequence 1 an absent section had already refused above and
+    // this state was unreachable.
+    return found ? found.rows : [];
   };
   const clients = /** @type {Client[]} */ (rowsOf(CATALOG_SECTION_NAMES.clients));
   const projects = /** @type {Project[]} */ (rowsOf(CATALOG_SECTION_NAMES.projects));
@@ -2757,6 +2802,19 @@ TT.parseVaultCatalog = function (md) {
     tasks: /** @type {Task[]} */ (rowsOf(CATALOG_SECTION_NAMES.tasks)),
     settings: /** @type {import('./types.ts').VaultCatalogSettingRow[]} */ (rowsOf(CATALOG_SECTION_NAMES.settings)),
     revision: counter.revision,
+    // THE CATALOG'S PAYLOAD DIGEST — one number over the four sections' own digests, in
+    // `CATALOG_ORDER`, so a per-file arbiter can ask the catalog the one question it asks a daily
+    // note: at the same revision, did the payload move?
+    //
+    // A DERIVED SINGLE NUMBER, AND THAT IS THE DIFFERENCE DD-020 c3 DRAWS. The index records this
+    // one value beside the whole-file hash; it never records the four. The four stay
+    // self-describing inside the note, which is what makes DD-009's corruption detection survive an
+    // index rebuild — copying them into the index is what recreates the drift DD-009 avoids.
+    //
+    // Without it, DD-020 c7 has no mechanism: a sentence typed BETWEEN two sections moves the
+    // whole-file hash and moves nothing TT owns, and an arbiter with no payload digest to compare
+    // would rewrite the money file (and take a checkpoint) for it.
+    payloadDigest: vaultDigest(sections.map((section) => section.payloadDigest).join('\n')),
     // one unverified section leaves the NOTE unverified: the catalog is the unit of change, so a
     // partly-verified catalog is not a thing SB-057's arbitration should be offered
     verified: sections.every((section) => section.verified),

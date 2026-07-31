@@ -556,6 +556,9 @@ function vaultQuarantinedNotes() {
       date: row.date,
       reason: String(row.quarantineReason || ''),
       detectedAt: row.quarantinedAt ?? null,
+      // PLAN-017: which catalog section refused. Null for a daily note, which has one block and
+      // therefore nothing to disambiguate.
+      section: row.quarantineSection ?? null,
     }));
 }
 /**

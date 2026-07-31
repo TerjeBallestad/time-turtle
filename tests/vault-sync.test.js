@@ -219,11 +219,15 @@ describe('the vault sync engine', () => {
     expect(db.getEntries(userId)).toEqual([]);
     // and a WARM stat of the same file does read it, so the assertion above is about the branch
     // and not about a scan that never runs
+    //
+    // COUNTED FOR THIS NOTE'S PATH, not for the whole pass (PLAN-017 task 1). The injected stat
+    // answers for EVERY path the scan visits, and the scan now visits the catalog too — so a bare
+    // counter would tally a second file and say nothing more about the branch under test.
     let warmReads = 0;
     await sync.scanVault({
       stat: () => ({ size: 19256, blocks: 40 }),
       readFile: (p) => {
-        warmReads++;
+        if (p === notePath()) warmReads++;
         return Promise.resolve(readFileSync(p, 'utf8'));
       },
     });
