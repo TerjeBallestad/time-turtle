@@ -2,7 +2,6 @@ import React from 'react';
 import TT from '../i18n';
 import styles from './ShapeChoice.module.css';
 import type { Shape } from '../../../shared/types';
-import type { UiActions } from '../types';
 
 /**
  * SB-098 item 4 / DD-015: the first-run question.
@@ -12,10 +11,12 @@ import type { UiActions } from '../types';
  * not exist. The question ships with the shape it promises — the implicit local session, the
  * loopback bind and the absent identity surface all land in this same ticket — or not at all.
  *
- * WHO SEES IT: nobody, almost always. `state.shapeOpen` is resolved server-side and is true only
- * for DD-015's open state — nothing stored, no TT_SHAPE, no TT_SHAPE_LOCK, exactly one user, and
- * that user an admin. Every deployed team install (Terje's is five users) sails past with no
- * modal, because more than one user has answered the question by existing.
+ * WHERE IT RENDERS, amended by DD-024. It is now the FIRST step of `<FirstRun>`, which stands
+ * where the login screen used to stand on a fresh install — SB-158's finding was that the question
+ * could only be reached by clearing a wall that answering it then deletes. `onAnswer` is what makes
+ * one component serve both callers: in the first run it advances to the next step with no round
+ * trip, and in the authenticated fallback (`state.shapeOpen`, App.tsx) it is `ui.chooseShape`,
+ * which posts and reloads. This component knows the words, never the plumbing.
  *
  * IT IS NOT SKIPPABLE, and that is why there is no × and no click-outside-to-close: the two
  * answers ARE the escape. `team` is the safe half — it is the status quo, the repo default and
@@ -23,21 +24,30 @@ import type { UiActions } from '../types';
  * A dismiss would leave the install in the open state and ask again on the next load, which is
  * a worse experience than the question and teaches people to distrust it.
  *
- * THE WORDS ARE SHAPE WORDS. Never `sqlite`, never `vault` as an engine name — DD-015's whole
- * point is that an install chooses what it IS and the storage falls out of that. Someone opening
- * Time Turtle for the first time can answer "is this mine or my company's"; nobody should have to
- * answer "sqlite or vault" to start logging hours.
+ * THE WORDS ARE SHAPE WORDS — WITH ONE ENGINE NAMED, RULED BY TERJE ON SB-153. This comment used
+ * to say "never `sqlite`", and it was overridden rather than eroded. His reasoning: the personal
+ * option already names its engine (an Obsidian vault is the answer, not an implementation detail
+ * of it), so the question was never engine-free — only engine-free on ONE side, which left `Team`
+ * reading as the vague default you pick when you do not understand the other one. Naming SQLite in
+ * the team body makes the two answers symmetric. The rule that survives is the one that mattered:
+ * nobody has to answer "sqlite or vault" — they answer whose hours these are, and each answer then
+ * says plainly where the hours will live.
+ *
+ * `My company’s` → `Team` is the same ruling's other half, and it is a one-word-one-meaning fix:
+ * Settings → Vault has always called this shape `Team`, so the two surfaces named one value with
+ * two words. `tests-browser/first-run.test.js` asserts they agree, which is the only rung that can
+ * see a disagreement between two screens.
  */
-export function ShapeChoice({ ui }: { ui: UiActions }) {
+export function ShapeChoice({ onAnswer }: { onAnswer: (shape: Shape) => void }) {
   const [busy, setBusy] = React.useState(false);
-  // The answer navigates: `chooseShape` reloads the whole session, so the modal disappears
-  // because `shapeOpen` went false. Latching `busy` stops a double click from posting twice
-  // during the round trip — a second POST would be harmless server-side, but a second toast
-  // and a second reload are not what the user asked for.
+  // Latching `busy` stops a double click from answering twice. In the authenticated fallback the
+  // answer navigates (a POST and a session reload), so the second click would cost a second toast
+  // and a second reload; in the first run this component unmounts on the next step, so the latch
+  // simply never matters there.
   const answer = (shape: Shape) => {
     if (busy) return;
     setBusy(true);
-    ui.chooseShape(shape);
+    onAnswer(shape);
   };
   return (
     <div className={styles.screen} data-tt="shape-choice">
@@ -64,10 +74,10 @@ export function ShapeChoice({ ui }: { ui: UiActions }) {
             </div>
           </button>
           <button className={styles.option} disabled={busy} data-tt="shape-choice-team" onClick={() => answer('team')}>
-            <div className={styles.optionLabel}>{TT.t('My company’s')}</div>
+            <div className={styles.optionLabel}>{TT.t('Team')}</div>
             <div className={styles.optionBody}>
               {TT.t(
-                'Several people, each signing in, with roles and a review step before hours are invoiced. Time Turtle keeps the hours and mirrors every save to markdown.',
+                'Several people, each signing in, with roles and a review step before hours are invoiced. The hours live in Time Turtle’s own SQLite database, and every save is mirrored to markdown.',
               )}
             </div>
           </button>

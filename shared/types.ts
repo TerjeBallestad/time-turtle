@@ -1000,6 +1000,64 @@ export interface ShapeChoiceResponse {
   shape: Shape;
   version: StateVersion;
 }
+/** DD-024 / SB-140 — one vault Obsidian has registered on this machine. */
+export interface ObsidianVault {
+  /** absolute path to the vault root, exactly as Obsidian recorded it */
+  path: string;
+  /** the folder name, which is the name Obsidian shows in its vault switcher */
+  name: string;
+  /** the vault was open in Obsidian when the registry was last written */
+  open: boolean;
+  /** the registered path is no longer on disk — still OFFERED, because an unmounted drive or an
+   *  un-synced iCloud folder is still the vault the person means */
+  missing: boolean;
+}
+/**
+ * DD-024 — `GET /api/first-run`. The one surface a fresh install answers WITHOUT a credential,
+ * and the probe the client hangs off a 401 to decide between the first run and `<Login>`.
+ *
+ * It answers to a loopback SOCKET with a loopback Host header and 404s to everyone else, so a
+ * client that gets a 404 here is not on this machine and simply falls through to the login.
+ *
+ * It keeps answering after the question is over (`open: false`) rather than starting to 404 —
+ * "the route vanished" and "the server is down" are the same bytes to a browser, and `defaultLogin`
+ * is needed at exactly the moment `open` is already false.
+ */
+export interface FirstRunResponse {
+  /** the install is in DD-015's open state: nothing stored, no TT_SHAPE, exactly one user */
+  open: boolean;
+  /** every vault Obsidian knows about, open one first — the vault step's prefill */
+  vaults: ObsidianVault[];
+  /** where this platform keeps iCloud-synced vaults, for composing a path when the registry is empty */
+  vaultPrefix: string;
+  /**
+   * DD-024 clause 2: the seeded admin still carries the password this repo publishes, so `<Login>`
+   * may state it. `null` the moment that password changes, and never an operator's own
+   * `TT_ADMIN_PASSWORD` — that is a real secret and never reaches a screen.
+   */
+  defaultLogin: { email: string; password: string } | null;
+}
+/**
+ * DD-024 — `POST /api/first-run`, the answer. One request for the whole flow: the shape, and
+ * whichever second step that shape leads to.
+ *
+ * `vaultRoot` is validated as an existing DIRECTORY before ANYTHING is stored, so a refused answer
+ * stores nothing and can simply be given again. `demo` under `personal` is refused rather than
+ * ignored (DD-024 clause 3) — fabricated hours belong in nobody's real daily notes.
+ */
+export interface FirstRunRequest {
+  shape: Shape;
+  /** `personal` only — the vault root the install will read and write */
+  vaultRoot?: string;
+  /** `team` only — seed the example clients, projects and hours */
+  demo?: boolean;
+}
+/** DD-024 — `POST /api/first-run`'s answer. `demo` is whether content was ACTUALLY seeded. */
+export interface FirstRunAnswerResponse {
+  ok: boolean;
+  shape: Shape;
+  demo: boolean;
+}
 /**
  * SB-065 / SB-085 — POST /api/mirror/acknowledge. `cleared` is false when there was no
  * block to clear (someone else got there first, or the caller guessed); `path` is the

@@ -122,11 +122,44 @@ const NO: Record<string, string> = {
   'My own Obsidian-backed timesheet': 'Min egen Obsidian-baserte timeliste',
   'One person, no sign-in. Your Obsidian vault keeps the hours — Time Turtle writes them into your daily notes and reads back the edits you make there.':
     'Én person, ingen innlogging. Obsidian-hvelvet ditt holder timene — Time Turtle skriver dem inn i dagsnotatene dine og leser tilbake endringene du gjør der.',
-  'My company’s': 'Bedriften min',
-  'Several people, each signing in, with roles and a review step before hours are invoiced. Time Turtle keeps the hours and mirrors every save to markdown.':
-    'Flere personer som logger inn hver for seg, med roller og et godkjenningssteg før timene faktureres. Time Turtle holder timene og speiler hver lagring til markdown.',
+  // SB-153, ruled by Terje: `My company’s` → `Team`, matching the word Settings → Vault has always
+  // used for this value, and the Norwegian follows the same rule — `Lag` is what the Settings
+  // toggle says, so the two surfaces stop naming one value with two words in either language.
+  //
+  // AND THE SQLITE SENTENCE, which is the bigger half of that ruling. It deliberately overrides
+  // this block's own "never `sqlite`" instruction — see the rewritten comment in ShapeChoice.tsx
+  // for his reasoning. `SQLite-database` is a compound of a product name and a Norwegian word,
+  // which is the shape the `Markdown mirror` note above allows: the English word names the thing,
+  // the Norwegian describes it. The word being avoided there is a TERM welded together, not a
+  // product name used as itself.
+  'Several people, each signing in, with roles and a review step before hours are invoiced. The hours live in Time Turtle’s own SQLite database, and every save is mirrored to markdown.':
+    'Flere personer som logger inn hver for seg, med roller og et godkjenningssteg før timene faktureres. Timene bor i Time Turtles egen SQLite-database, og hver lagring speiles til markdown.',
   'Asked once. You can change the answer later under Settings → Vault.':
     'Spørsmålet stilles én gang. Du kan endre svaret senere under Innstillinger → Hvelv.',
+  // DD-024 / SB-140: the vault step. It is the screen that decides whether the install a person was
+  // just sold actually reads and writes their vault, so it says what it will do with the answer.
+  'Which vault keeps these hours?': 'Hvilket hvelv skal holde disse timene?',
+  'not on this machine right now': 'ikke på denne maskinen akkurat nå',
+  'Time Turtle will write your hours into': 'Time Turtle skriver timene dine inn i',
+  'and read back the edits you make there. You can change any of this later under Settings → Vault.':
+    'og leser tilbake endringene du gjør der. Du kan endre alt dette senere under Innstillinger → Hvelv.',
+  'Keep my hours in this vault': 'Hold timene mine i dette hvelvet',
+  '← Back to the question': '← Tilbake til spørsmålet',
+  // DD-024 clause 3 / SB-159: the demo step. Opt-in, off by default, and the button says which of
+  // the two things it is about to do (DD-018 ruling 5) — never `OK`, which would make a person
+  // re-read the checkbox to find out what they just agreed to.
+  'Start with something in it?': 'Starte med noe i den?',
+  'Add a few example clients, projects and a week of logged hours, so the app has something in it while you look around. You can delete them.':
+    'Legg inn et par eksempelkunder, prosjekter og en uke med førte timer, så appen har noe i seg mens du ser deg om. Du kan slette dem.',
+  'Add the example hours and start': 'Legg inn eksempeltimene og start',
+  'Start with an empty timesheet': 'Start med en tom timeliste',
+  // DD-024 clause 2: the starting-password note on the login screen. This plan MOVED the question
+  // in front of the login, so a person who answers `Team` now meets a wall holding a credential
+  // nobody showed them. The wall is this work's, so the note is too.
+  'This install still has its starting password. Sign in as':
+    'Denne installasjonen har fortsatt startpassordet sitt. Logg inn som',
+  'and change it under Settings → Password. This note disappears when you do.':
+    'og bytt det under Innstillinger → Passord. Denne meldingen forsvinner når du gjør det.',
   Vault: 'Hvelv',
   'Instance shape': 'Instansform',
   Team: 'Lag',
@@ -340,6 +373,26 @@ const NO: Record<string, string> = {
 
 TT.lang = 'en';
 TT.t = (s) => (TT.lang === 'no' && NO[s] !== undefined ? NO[s] : s);
+
+/**
+ * DD-024: the language for a screen that renders BEFORE any session — the first run and the login.
+ *
+ * WHY IT EXISTS. `state.settings.language` is the real answer and it needs a session to read, so
+ * every pre-session screen has always rendered English. That was invisible while the only such
+ * screen was a login form with four words on it. This plan puts the whole first run there, and its
+ * task requires both languages — a Norwegian meeting a genuinely fresh install has no stored
+ * preference to read, because the setting that would carry one lives inside the app they have not
+ * reached yet.
+ *
+ * `tt_lang` FIRST: a returning person's own choice, which is what a second install on the same
+ * browser has. The browser's own language is the only signal a first one has. `nb`, `nn` and `no`
+ * are all Norwegian to this app, which has exactly two languages.
+ */
+export function preSessionLang(stored: string | null): string {
+  if (stored) return stored;
+  const nav = typeof navigator === 'undefined' ? '' : navigator.language || '';
+  return /^(nb|nn|no)\b/i.test(nav) ? 'no' : 'en';
+}
 const DAYS: Record<string, string[]> = {
   en: ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'],
   no: ['Søndag', 'Mandag', 'Tirsdag', 'Onsdag', 'Torsdag', 'Fredag', 'Lørdag'],

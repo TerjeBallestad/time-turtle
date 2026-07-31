@@ -12,6 +12,9 @@ import type {
   MirrorBlocksResponse,
   ProjectRenameResponse,
   ShapeChoiceResponse,
+  FirstRunResponse,
+  FirstRunRequest,
+  FirstRunAnswerResponse,
   TeamReportResponse,
   Shape,
   User,
@@ -85,6 +88,17 @@ export const api = {
    * `useServerSync` the way one on `PUT /api/state` would.
    */
   setShape: (shape: Shape) => request<ShapeChoiceResponse>('POST', '/api/shape', { shape }),
+  /**
+   * DD-024 — the first-run probe, and the only call this client makes that EXPECTS to fail. It is
+   * loopback-gated server-side, so a caller that is not on this machine gets a 404 and the app
+   * falls through to `<Login>` exactly as it did before this flow existed.
+   *
+   * NOT `setShape`. That route is behind `requireUser` and requires an admin, which is the wall
+   * this whole plan removes — in the open state there is no session to be an admin in.
+   */
+  firstRun: () => request<FirstRunResponse>('GET', '/api/first-run'),
+  /** DD-024 — answer the first run: the shape, plus whichever second step that shape led to. */
+  answerFirstRun: (answer: FirstRunRequest) => request<FirstRunAnswerResponse>('POST', '/api/first-run', answer),
   /**
    * SB-065: clear a standing mirror refusal. This is NOT a dismiss — it ADOPTS the bytes
    * currently on disk as TT's stamp, which is consent for the next save to overwrite them.

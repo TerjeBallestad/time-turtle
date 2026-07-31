@@ -97,3 +97,87 @@
   text-align: center;
   margin-top: 16px;
 }
+/* ---- DD-024: the two steps that follow the question, on the same card ---- */
+
+/* WHICH ONE IS IN THE FIELD. With two vaults offered and a path box under them, a click that only
+   fills the box leaves nothing on screen saying which was chosen — and the box shows the TAIL of a
+   long path, so it cannot answer that either. */
+.optionOn {
+  border-color: var(--accent);
+  background: rgba(123, 131, 235, 0.12);
+}
+/* The registered path under a vault's name. Mono, because it is a path and every other path on
+   this surface is mono — a proportional path is one a person cannot check a character of. */
+.optionPath {
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-3);
+  margin-top: 4px;
+  word-break: break-all;
+}
+.field {
+  margin-top: 12px;
+}
+.field input {
+  width: 100%;
+  font-family: var(--mono);
+}
+/* The effect line names a path, so the path inside it is mono like every other one here. */
+.note code {
+  font-family: var(--mono);
+  color: var(--text-2);
+  word-break: break-all;
+}
+.check {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  cursor: pointer;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--text-2);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border-2);
+  border-radius: var(--radius-lg);
+  padding: 12px 14px;
+}
+.check:hover {
+  border-color: var(--accent);
+}
+.check input {
+  margin-top: 1px;
+  flex: none;
+  accent-color: var(--accent);
+}
+.err {
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--danger);
+  margin: 10px 0 0;
+}
+.submit {
+  width: 100%;
+  margin-top: 14px;
+}
+/* Back to the question — a footnote, deliberately, because it is not one of the answers. */
+.back {
+  display: block;
+  width: 100%;
+  margin-top: 12px;
+  padding: 0;
+  background: none;
+  border: 0;
+  cursor: pointer;
+  font-family: inherit;
+  font-size: 11px;
+  color: var(--text-3);
+  text-align: center;
+}
+.back:hover:not(:disabled) {
+  color: var(--text-2);
+}
+.back:disabled {
+  opacity: 0.5;
+  cursor: default;
+}

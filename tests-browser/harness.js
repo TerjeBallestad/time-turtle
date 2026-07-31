@@ -23,6 +23,12 @@ const CLIENT_DIST = join(ROOT, 'client', 'dist', 'index.html');
 
 export const ADMIN_EMAIL = 'admin@timeturtle.local';
 export const ADMIN_PASSWORD = 'browserpw';
+/**
+ * DD-024 clause 2: the password `server/src/config.js` publishes, and the only one `<Login>` is
+ * ever allowed to state back. Written here as a literal rather than imported, deliberately — a
+ * test that imports the constant it is checking asserts nothing about the value.
+ */
+export const PUBLISHED_PASSWORD = 'turtle';
 
 /**
  * Spawn a server with its own data + mirror directories on a free port, wait until it answers,
@@ -45,13 +51,28 @@ export async function startApp(opts = {}) {
       PORT: String(port),
       TT_DATA_DIR: dataDir,
       TT_MD_DIR: mdDir,
-      TT_SEED_DEMO: opts.shape === 'personal' ? '0' : '1',
-      TT_ADMIN_PASSWORD: ADMIN_PASSWORD,
+      // `onboarding` cases get NOTHING seeded, and that is not tidiness: DD-024 clause 3 makes the
+      // demo content a step the first run ASKS for, so an onboarding case that boots with demo
+      // hours already in it is not the fresh install it claims to be. Every other case keeps the
+      // boot seed it has always had.
+      TT_SEED_DEMO: opts.shape === 'personal' || opts.onboarding ? '0' : '1',
+      // DD-024 clause 2: `defaultPassword: true` leaves TT_ADMIN_PASSWORD UNSET, so the seeded
+      // admin carries the password this repo publishes and the login hint is in force. Every other
+      // case sets its own password, which is also what keeps the hint out of their way.
+      ...(opts.defaultPassword ? {} : { TT_ADMIN_PASSWORD: ADMIN_PASSWORD }),
       ...(opts.shape ? { TT_SHAPE: opts.shape } : {}),
+      // DD-024 / SB-140: NEVER the real Obsidian registry. Unset it unless a case supplies a
+      // fixture — an inherited one would put this machine's actual vault paths on the vault step.
+      TT_OBSIDIAN_REGISTRY: opts.obsidianRegistry || join(dataDir, 'no-such-obsidian.json'),
     },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
-  child.stdout.on('data', () => {});
+  // KEPT, not discarded (DD-024 / SB-140): the boot prints `vault sync is idle: no vault folder is
+  // configured` when a `personal` install has no root, and "the first run did not actually finish
+  // the install" is exactly what that line means. A case that asserts the vault step worked can
+  // read it back instead of taking the client's word.
+  const stdout = [];
+  child.stdout.on('data', (d) => stdout.push(String(d)));
   child.stderr.on('data', (d) => process.stderr.write(`[server:${port}] ${d}`));
   let exited = null;
   child.on('exit', (code) => {
@@ -97,44 +118,49 @@ export async function startApp(opts = {}) {
 
   await page.goto(`http://localhost:${port}`);
 
-  // SB-098 item 1: under `personal` there IS no sign-in — `requireUser` resolves the single
-  // local user with no cookie, so `/api/state` answers 200 on the first load and the client
-  // never renders the Login screen. Signing in here would hang on a form that does not exist,
-  // which is the harness feeling the feature rather than working around it.
-  if (opts.shape !== 'personal') {
-    await page.locator('input[type=text]').fill(ADMIN_EMAIL);
-    await page.locator('input[type=password]').fill(ADMIN_PASSWORD);
-    await page.locator('button:has-text("Sign in")').click();
-  }
-
-  // SB-098 item 4: a data dir with nothing stored, no TT_SHAPE and one user IS DD-015's open
-  // state, so the first-run question renders and it is NOT skippable. Every default-harness
-  // case therefore meets it, and answering it here is deliberate rather than a workaround:
+  // THE ORDER REVERSED HERE, AND THAT REVERSAL IS THE FEATURE (DD-024 / SB-158). This block used
+  // to sign in first and answer the shape question afterwards. On a fresh install there is no
+  // longer a login form to sign into: the question comes FIRST, without a credential, and it is
+  // answering `Team` that puts the login screen there. `TT_SHAPE` skips the question entirely,
+  // because a shape supplied by the environment is not `source: 'default'` and the open state
+  // never opens.
   //
-  //   • it is DETERMINISTIC, not a "dismiss the modal if it happens to be there" branch. The
-  //     server decides (`AppState.shapeOpen`) on exactly the conditions reproduced above, so
-  //     the modal is present precisely when `opts.shape` is unset and absent otherwise. A
-  //     timing-dependent probe here would be a flake source in every browser test at once.
-  //   • it answers "my company's", which is the TRAP HALF. The open state resolves to an
-  //     effective `team`, so this is the answer that a compare-first gesture would silently
-  //     swallow (SB-133's early return) — leaving the question open and this click useless. If
-  //     that regression ever lands, `+ client` below is never reachable and EVERY browser test
-  //     goes red on the same line, which is a louder alarm than one dedicated test.
-  // `onboarding: true` stops HERE, with the question still on screen and unanswered, for the one
-  // test whose subject is the question itself. It cannot go on to Settings: the modal is not
-  // skippable, so the nav behind it is genuinely unreachable — which is the property under test.
-  if (opts.onboarding) return { port, child, dataDir, mdDir, vaultDir, browser, page, pageErrors };
+  // Nothing here is a "dismiss it if it happens to be there" branch. The server decides on
+  // conditions this function controls exactly — nothing stored, no TT_SHAPE, one user — so the
+  // first run is present precisely when `opts.shape` is unset and absent otherwise. A
+  // timing-dependent probe would be a flake source in every browser test at once.
+  //
+  // `onboarding: true` stops HERE, with the question on screen and unanswered, for the tests whose
+  // subject is the first run itself.
+  if (opts.onboarding) return { port, child, dataDir, mdDir, vaultDir, browser, page, pageErrors, stdout };
   if (!opts.shape) {
+    // ANSWERING `Team` IS THE TRAP HALF. The open state resolves to an effective `team`, so this is
+    // the answer a compare-first gesture would silently swallow (SB-133's early return) — leaving
+    // the question open and this click useless. If that regression lands, `+ client` below is never
+    // reachable and EVERY browser test goes red on the same line, which is a louder alarm than one
+    // dedicated test. The demo step follows it; left unchecked, because these cases build their own
+    // data and `TT_SEED_DEMO=1` has already seeded at boot.
     await page.locator('[data-tt="shape-choice-team"]').waitFor({ timeout: 15000 });
     await page.locator('[data-tt="shape-choice-team"]').click();
-    await page.locator('[data-tt="shape-choice"]').waitFor({ state: 'detached', timeout: 15000 });
+    await page.locator('[data-tt="first-run-demo-submit"]').click();
+  }
+
+  // SB-098 item 1: under `personal` there IS no sign-in — `requireUser` resolves the single
+  // local user with no cookie, so `/api/state` answers 200 on the first load and the client
+  // never renders the Login screen. Signing in there would hang on a form that does not exist,
+  // which is the harness feeling the feature rather than working around it.
+  if (opts.shape !== 'personal') {
+    await page.locator('input[type=text]').waitFor({ timeout: 15000 });
+    await page.locator('input[type=text]').fill(ADMIN_EMAIL);
+    await page.locator('input[type=password]').fill(opts.defaultPassword ? PUBLISHED_PASSWORD : ADMIN_PASSWORD);
+    await page.locator('button:has-text("Sign in")').click();
   }
 
   await page.locator('text=Settings').first().waitFor({ timeout: 15000 });
   await page.locator('text=Settings').first().click();
   await page.locator('button:has-text("+ client")').first().waitFor({ timeout: 15000 });
 
-  return { port, child, dataDir, mdDir, vaultDir, browser, page, pageErrors };
+  return { port, child, dataDir, mdDir, vaultDir, browser, page, pageErrors, stdout };
 }
 
 /**

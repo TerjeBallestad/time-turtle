@@ -1,6 +1,6 @@
 // App shell: login, sidebar, topbar, routing, server sync
 import React from 'react';
-import TT from '../i18n';
+import TT, { preSessionLang } from '../i18n';
 import { Toast, ToastStack } from '../ds';
 import styles from './App.module.css';
 import { api } from '../api';
@@ -15,6 +15,7 @@ import { ProjectPage } from './views/ProjectPage';
 import { SettingsView } from './settings/SettingsView';
 import { Login } from './Login';
 import { ShapeChoice } from './ShapeChoice';
+import { FirstRun } from './FirstRun';
 import { TaskModal } from './TaskModal';
 import { Sidebar } from './Sidebar';
 import { TopBar } from './TopBar';
@@ -31,7 +32,7 @@ function sameBlock(a: MirrorBlock | null | undefined, b: MirrorBlock | null | un
 }
 
 export function App() {
-  const { state, setState, load } = useSession();
+  const { state, setState, firstRun, load } = useSession();
   const { toasts, toast } = useToasts();
   // SB-085: the save response is where a mirror refusal first shows up. Fold it into the
   // session state (`mirrorBlocked` is NOT one of useServerSync's SYNC_KEYS, so this cannot
@@ -100,15 +101,27 @@ export function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isAdminSession, reviewNonce]);
 
+  // DD-024: BEFORE the early returns, because the two screens below them render with no session
+  // and therefore with no `settings.language` to read. Until this plan that cost four words on a
+  // login form; now it is the whole first run, which has to be legible to the person meeting it.
+  // The line after the returns still has the last word once a session exists — the stored setting
+  // beats a browser default, as it should.
+  TT.lang = preSessionLang(lang);
   if (state === null) return null;
+  // DD-024 / SB-158: a 401 is no longer one thing. On a fresh install it means "nobody has said
+  // what this install IS yet", and the answer to that question is what removes the login — so the
+  // question goes FIRST. `firstRun.open` is the SERVER's verdict on the open state, never a client
+  // re-derivation of it, and a caller the server will not serve the first run to (not on this
+  // machine) gets `null` and the login it always got.
+  const reload = () => {
+    setState(null);
+    load();
+  };
   if (state === false)
-    return (
-      <Login
-        onLogin={() => {
-          setState(null);
-          load();
-        }}
-      />
+    return firstRun?.open ? (
+      <FirstRun info={firstRun} onDone={reload} />
+    ) : (
+      <Login onLogin={reload} defaultLogin={firstRun?.defaultLogin ?? null} />
     );
 
   TT.lang = lang || state.settings.language || 'en';
@@ -600,8 +613,15 @@ export function App() {
       {taskModal && <TaskModal state={state} ui={ui} init={taskModal} onClose={() => setTaskModal(null)} />}
       {/* SB-098 item 4: LAST, so its scrim covers everything including an open task modal, and
           rendered off `state.shapeOpen` — the server's verdict on whether the question is owed,
-          never a client re-derivation of it (see AppState.shapeOpen). */}
-      {state.shapeOpen && <ShapeChoice ui={ui} />}
+          never a client re-derivation of it (see AppState.shapeOpen).
+
+          DD-024 MOVED THE ORDINARY PATH OUT FROM UNDER THIS. A fresh install now meets the question
+          as `<FirstRun>` before any session exists, so this branch is the AUTHENTICATED FALLBACK: it
+          is what an admin sees if a session somehow exists while the open state still stands. It is
+          kept rather than deleted because nothing here proves that is unreachable — `shapeOpen` is
+          the server's own condition and this is the surface that answers it. If it is ever proven
+          dead, delete it then. */}
+      {state.shapeOpen && <ShapeChoice onAnswer={ui.chooseShape} />}
     </div>
   );
 }

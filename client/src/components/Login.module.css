@@ -46,3 +46,17 @@
   width: 100%;
   margin-top: 6px;
 }
+/* DD-024 clause 2: the starting-password note. Quiet — it is a fact about this install, not an
+   instruction — and the credential itself is mono, because it is a string to be typed exactly. */
+.hint {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-2);
+  font-size: 11px;
+  line-height: 1.6;
+  color: var(--text-3);
+}
+.hint code {
+  font-family: var(--mono);
+  color: var(--text-2);
+}

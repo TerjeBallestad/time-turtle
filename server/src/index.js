@@ -3,7 +3,16 @@ import express from 'express';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
-import { PORT, HOST, MD_DIR_LOCKED, isLoopbackHost, isLoopbackHostHeader, isLoopbackPeer } from './config.js';
+import {
+  PORT,
+  HOST,
+  MD_DIR_LOCKED,
+  isLoopbackHost,
+  isLoopbackHostHeader,
+  isLoopbackPeer,
+  ADMIN_EMAIL,
+  DEFAULT_ADMIN_PASSWORD,
+} from './config.js';
 import { shapeTarget, activeShape, shapeLocked } from './backend.js';
 import { verifyPassword, makeToken, readSessionCookie, sessionCookie, clearCookie } from './auth.js';
 // SB-056: the split is at the import site on purpose. `db` is IDENTITY ONLY here — users,
@@ -1293,6 +1302,30 @@ function firstRunCaller(req) {
  * @param {Response} res
  */
 const notFound = (res) => res.status(404).json({ error: 'not found' });
+/**
+ * DD-024 clause 2: is the seeded admin still carrying the password this repo publishes?
+ *
+ * THE WALL THIS EXISTS TO CLOSE IS ONE THIS PLAN BUILT. Moving the shape question in FRONT of the
+ * login means a person who answers `team` lands on `<Login>` holding a credential nobody ever
+ * showed them — `seedIfEmpty` announces it once, on stdout, which `tt serve` redirects into a
+ * detached log file. Before this plan they at least met that wall after signing in.
+ *
+ * IT VERIFIES AGAINST THE PUBLISHED CONSTANT, never against `ADMIN_PASSWORD`. An operator who set
+ * `TT_ADMIN_PASSWORD` supplied a real secret and gets no hint — they already know it. What is
+ * stated back is a literal from a public MIT repo, and it stops being stated the moment the
+ * password changes, because the answer is recomputed per request from the stored hash.
+ *
+ * The CALLER gate is not here: this rides on `GET /api/first-run`, behind `firstRunCaller` — the
+ * same peer-socket + Host predicate as the first-run surface itself and as task 2's guard. Under
+ * `team` the bind is every interface (see `BIND_HOST`), so a Host-header-only gate would read this
+ * credential out to any machine on the wifi. That is SB-162 with a password in it.
+ * @returns {{ email: string, password: string } | null}
+ */
+function defaultLoginHint() {
+  const admin = db.findUserByEmail(ADMIN_EMAIL);
+  if (!admin || !verifyPassword(DEFAULT_ADMIN_PASSWORD, admin.password_hash)) return null;
+  return { email: admin.email, password: DEFAULT_ADMIN_PASSWORD };
+}
 
 // GET is readable from loopback FOREVER, and answers `open: false` once the question is
 // answered — it does not start 404ing. The client needs a definite answer to decide whether to
@@ -1306,7 +1339,17 @@ app.get('/api/first-run', (req, res) => {
   // beat of one flow, and a second round trip is a second thing that can be slow or fail on the
   // first screen a person ever sees. `readObsidianVaults` never throws — an absent or malformed
   // registry is an empty list, and the client falls back to a vault NAME over `vaultPrefix`.
-  res.json({ open: firstRunOpen(), vaults: readObsidianVaults(), vaultPrefix: ICLOUD_VAULT_PREFIX });
+  //
+  // DD-024 clause 2 rides here too, and that is why this route keeps answering after the question
+  // is over: the `team` answer CLOSES the first run and lands the person on `<Login>`, so the one
+  // moment the hint is needed is the moment `open` is already false. One probe on the 401 path
+  // decides both — first run or login, and if login, whether the published password still works.
+  res.json({
+    open: firstRunOpen(),
+    vaults: readObsidianVaults(),
+    vaultPrefix: ICLOUD_VAULT_PREFIX,
+    defaultLogin: defaultLoginHint(),
+  });
 });
 
 // POST is PERMANENTLY CLOSED once the question is answered — 409, not 404, because a loopback
@@ -1353,6 +1396,21 @@ app.post('/api/first-run', (req, res) => {
     // and a second copy of them would be the drift `TT.VAULT_PATHS_DEFAULT`'s own comment forbids.
     store.putSettings(vaultRoot ? { shape, vaultPaths: { root: vaultRoot } } : { shape });
   });
+  // THE THIRD DOOR HAS TO DO WHAT THE OTHER TWO DO. `PUT /api/state` and `POST /api/shape` both
+  // re-point the sync engine after storing a shape or a vault path, because the vault the engine
+  // watches is a SETTING and `startVaultSync()` ran once at boot — when this install was still
+  // `team` with no root. Without this the person finishes the first run, lands in an install whose
+  // sidebar says `synced → vault`, and nothing watches the vault until the next restart. That is
+  // SB-063's failure shape and it is exactly what SB-140 exists to prevent, one screen later.
+  //
+  // Idempotent and stop-first, so it is safe under `team` too, where it correctly stops nothing.
+  // The scan is fire-and-forget for the same reason the boot one is: a cold vault takes minutes and
+  // the person is waiting on this response to see their app.
+  forgetOwnWrites();
+  if (startVaultSync())
+    void scanVault().catch((err) =>
+      console.error('[time-turtle] vault re-scan failed:', /** @type {Error} */ (err).message),
+    );
   // AFTER the shape, and outside its transaction. DD-024 clause 3's whole mechanism is that the
   // seed happens PAST the answer — under `team` there is then no cutover for the demo rows to land
   // before, which is what dissolves SB-146 without touching DD-017's freeze.

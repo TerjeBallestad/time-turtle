@@ -13,10 +13,25 @@
 // toggle, would silently swallow it: nothing stored, the question still open, asked again on the
 // next load. The `personal` answer works either way. That is what makes it easy to ship broken.
 //
+// UPDATED FOR DD-024, and the update is the whole finding SB-158 filed: the question used to be
+// reachable only by first clearing a login form, using a password nobody was ever shown. It now
+// comes FIRST, with no credential, and answering `Team` is what puts the login screen there. So the
+// sign-in in these cases moved from before the question to after it. `tests-browser/first-run.test.js`
+// owns the claims that are new; this file keeps its original subject — the QUESTION.
+//
 // ## Verified red-green: 2026-07-26 (output TRANSCRIBED from the runs, not reconstructed)
 //   See the stanza above each test.
+// ## Verified red-green: 2026-07-31 — see the DD-024 stanzas.
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
-import { startApp, stopApp } from './harness.js';
+import { startApp, stopApp, ADMIN_EMAIL, ADMIN_PASSWORD } from './harness.js';
+
+/** Sign in, the way a person meets the login screen after answering `Team`. */
+async function signIn(page) {
+  await page.locator('input[type=text]').waitFor({ timeout: 15000 });
+  await page.locator('input[type=text]').fill(ADMIN_EMAIL);
+  await page.locator('input[type=password]').fill(ADMIN_PASSWORD);
+  await page.locator('button:has-text("Sign in")').click();
+}
 
 /** Read `/api/state` through the page's own origin, so the browser's cookie (if any) rides along. */
 function stateFromPage(page) {
@@ -44,33 +59,44 @@ describe('SB-098 item 4: the first-run question', () => {
   //     FAIL  answering "my company's" … / the install becomes personal …
   //           TimeoutError: locator.click: Timeout 30000ms exceeded.
   //           waiting for locator('[data-tt="shape-choice-team"]')  /  …-personal
+  // ## Verified red-green: 2026-07-31, TRANSCRIBED. `ShapeChoice.tsx` reverted to its pre-SB-153
+  //   wording (`My company’s`, and the team body's engine-free sentence) — 1 of 1 in this case
+  //   fails, on the two assertions that ARE the ruling:
+  //     FAIL  a fresh install is asked, in shape words, and cannot get past it
+  //           AssertionError: expected '…My own Obsidian-backed timesheet…My company’s…' to
+  //           contain 'Team'
   it('a fresh install is asked, in shape words, and cannot get past it', async () => {
     const modal = app.page.locator('[data-tt="shape-choice"]');
     await modal.waitFor({ timeout: 15000 });
 
     const text = await modal.innerText();
-    // SHAPE LANGUAGE. The two answers are about whose hours these are, never about a storage
-    // engine — DD-015's whole point is that the backend is derived and nobody selects one.
+    // SHAPE LANGUAGE. The two answers are about whose hours these are — nobody has to answer
+    // "sqlite or vault" to start logging hours, and neither option asks them to.
     expect(text).toContain('My own Obsidian-backed timesheet');
-    expect(text).toContain('My company’s');
-    expect(text.toLowerCase()).not.toContain('sqlite');
+    // SB-153, ruled by Terje: `My company’s` → `Team`, the word Settings → Vault already uses.
+    expect(text).toContain('Team');
+    expect(text).not.toContain('My company’s');
+    // AND THE RIDER, which is the bigger half of that ruling and deliberately inverts what this
+    // line asserted before: the team option NAMES SQLITE. The personal option already names its
+    // engine, so the question was only ever engine-free on one side, which left `Team` reading as
+    // the vague default. `backend` stays banned — after DD-015/SB-100 that word means a value
+    // nobody selects, so it is the one storage word this screen must not use.
+    expect(text.toLowerCase()).toContain('sqlite');
     expect(text.toLowerCase()).not.toContain('backend');
 
     // NOT SKIPPABLE. There is no × and no dismiss, the scrim does not close on a click, and
-    // Escape does nothing — the two answers ARE the escape, and `team` is the safe half.
+    // Escape does nothing — the two answers ARE the escape, and `Team` is the safe half.
     await app.page.keyboard.press('Escape');
     await app.page.mouse.click(20, 20); // the scrim, well clear of the card
     await expect.poll(() => modal.isVisible()).toBe(true);
 
-    // And the app behind it is genuinely unreachable while it stands: the sidebar is under the
-    // scrim, so a click on it is intercepted rather than merely ignored.
-    const blocked = await app.page
-      .locator('text=Settings')
-      .first()
-      .click({ timeout: 2000 })
-      .then(() => null)
-      .catch((err) => String(err.message));
-    expect(blocked).toMatch(/intercepts pointer events|Timeout/);
+    // DD-024: and there is nothing else on the screen to get past it TO. This used to assert that
+    // the sidebar behind the scrim intercepted the click; on a fresh install there is no longer an
+    // app behind it and no login form either, which is SB-158's finding closed.
+    expect(await app.page.locator('button:has-text("Sign in")').count()).toBe(0);
+    // The sidebar's sync row, which every screen of the real app carries — not `text=Settings`,
+    // which the question's own closing line contains ("…later under Settings → Vault").
+    expect(await app.page.locator('[data-tt="sync-status"]').count()).toBe(0);
   }, 120000);
 
   // ## Verified red-green: 2026-07-26, TRANSCRIBED. THE TRAP — `ui.chooseShape` pointed at
@@ -83,9 +109,17 @@ describe('SB-098 item 4: the first-run question', () => {
   //             34 × locator resolved to visible <div data-tt="shape-choice" …>…</div>
   //   The `personal` test below stays GREEN under that same mutation. That asymmetry is the
   //   entire reason this one is written first and separately.
-  it('answering "my company\'s" — the shape already in force — closes the question for good', async () => {
+  it('answering "Team" — the shape already in force — closes the question for good', async () => {
     await app.page.locator('[data-tt="shape-choice-team"]').click();
-    await app.page.locator('[data-tt="shape-choice"]').waitFor({ state: 'detached', timeout: 15000 });
+    // DD-024 clause 3: `Team` leads to the demo step, opt-in and off by default. Left unchecked
+    // here — this case is about the shape answer sticking, and `tests/first-run-seed.test.js`
+    // owns what the checkbox does.
+    await app.page.locator('[data-tt="first-run-demo-submit"]').click();
+
+    // THE WALL DD-024 CLAUSE 2 CLOSES: answering `Team` lands the person on a login screen. That
+    // is correct — a team install asking for credentials is the point — and it is exactly why the
+    // starting-password note exists (first-run.test.js owns that claim).
+    await signIn(app.page);
 
     // The app is reachable now, and it is the team app: the Users section is back.
     await app.page.locator('text=Settings').first().click();
@@ -123,7 +157,12 @@ describe('SB-098 item 4: answering "my own Obsidian-backed timesheet"', () => {
   //   reaching the install, not about which endpoint carried it.
   it('the install becomes personal, and the identity surface goes with it', async () => {
     await app.page.locator('[data-tt="shape-choice-personal"]').click();
-    await app.page.locator('[data-tt="shape-choice"]').waitFor({ state: 'detached', timeout: 15000 });
+    // DD-024 / SB-140: `personal` leads to the vault step, and it is not skippable — an install
+    // sold an Obsidian-backed timesheet with no vault is an ordinary local timesheet.
+    // `first-run.test.js` owns the un-skippability itself; here it is just the road to the app.
+    await app.page.locator('[data-tt="first-run-vault-root"]').fill(app.vaultDir);
+    await app.page.locator('[data-tt="first-run-vault-submit"]').click();
+    await app.page.locator('[data-tt="first-run"]').waitFor({ state: 'detached', timeout: 15000 });
 
     const state = await stateFromPage(app.page);
     expect(state.shape).toBe('personal');

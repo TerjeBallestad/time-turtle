@@ -32,6 +32,7 @@ import { connect } from 'node:net';
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir, networkInterfaces } from 'node:os';
 import { join } from 'node:path';
+import TT from '../shared/core.js';
 import { startServer, stopServer, stopAllServers, session } from './util.js';
 
 afterAll(stopAllServers);
@@ -375,6 +376,184 @@ describe('DD-024 clause 1: the gate is the peer socket, not the Host header', ()
     const local = await rawRequest(server.port, { connectTo: '127.0.0.1', host: `localhost:${server.port}` });
     expect(local.status).toBe(200);
     expect(local.json.open).toBe(true);
+
+    await stopServer(server.child);
+  }, 60000);
+});
+
+// ## Verified red-green: 2026-07-31, TRANSCRIBED. See the stanza above each case.
+//
+// DD-024 CLAUSE 2 — the credential the login screen may state back, and to whom.
+//
+// WHY IT RIDES ON THIS SURFACE AT ALL. This plan MOVED the shape question in front of the login,
+// so a person who answers `Team` now lands on `<Login>` holding a password nobody ever showed them
+// — `seedIfEmpty` announces it once on stdout, which `tt serve` redirects into a detached log file.
+// The wall is this work's doing, so closing it is this work's job.
+//
+// AND WHY THE GATE IS THE SAME ONE. Under `team` the bind is EVERY INTERFACE (`BIND_HOST` is
+// undefined), and task 2's peer middleware deliberately does not apply — a team install serving
+// the network is what a team install is FOR. So the only thing standing between this credential
+// and the wifi is `firstRunCaller`, the peer-socket + Host predicate. A Host-header-only gate here
+// would be SB-162 with a password in it, and the browser rung structurally cannot see that: every
+// Playwright page speaks from loopback.
+describe('DD-024 clause 2: the starting-password hint, and who is allowed to read it', () => {
+  /** An install whose admin still carries the password `server/src/config.js` publishes.
+   *
+   *  `TT_ADMIN_PASSWORD: ''` rather than omitting the key: `startServer` defaults it to `testpw`,
+   *  and an empty string is falsy, so the server falls back to the published default exactly as an
+   *  install with the variable unset does. An empty string also SURVIVES `child_process`, which
+   *  drops `undefined` values.
+   */
+  const stock = (label) => ({ ...dataDir(label), TT_SEED_DEMO: '0', TT_ADMIN_PASSWORD: '' });
+
+  // ## Verified red-green: 2026-07-31, TRANSCRIBED. THE GATE WEAKENED — the GET handler's
+  //   `firstRunCaller(req)` replaced by `isLoopbackHostHeader(req.headers.host)`, i.e. the hint
+  //   gated on the Host header alone, which is the plausible wrong version and precisely SB-162's
+  //   shape. 2 of 14 fail, and the pair is the point: the surface's own LAN case and this one both
+  //   go, because they are the same gate — but only this one is about a credential.
+  //     FAIL  a LAN caller forging `Host: localhost` gets nothing, while loopback gets the surface
+  //           AssertionError: LAN request from 192.168.131.234 was not refused:
+  //           expected 200 to be 404 // Object.is equality
+  //     FAIL  the LAN cannot read it, not even with `Host: localhost` forged
+  //           AssertionError: the LAN read the starting password from 192.168.131.234:
+  //           expected 200 to be 404 // Object.is equality
+  it('the LAN cannot read it, not even with `Host: localhost` forged', async () => {
+    const lan = lanAddress();
+    const server = await startServer(stock('first-run-hint-lan'));
+
+    // THE CONTROL, byte-identical but for the socket it came from: over loopback the hint is there.
+    const local = await rawRequest(server.port, { connectTo: '127.0.0.1', host: `localhost:${server.port}` });
+    expect(local.status).toBe(200);
+    expect(local.json.defaultLogin.email).toBe('admin@timeturtle.local');
+    expect(local.json.defaultLogin.password).toBe('turtle');
+
+    const remote = await rawRequest(server.port, { connectTo: lan, host: `localhost:${server.port}` });
+    expect(remote.status, `the LAN read the starting password from ${lan}`).toBe(404);
+    // Not merely absent from the parsed body — absent from the BYTES. A hint that leaks to the
+    // wifi is worse than no hint, because the person who reads it is not the person who installed.
+    expect(remote.raw).not.toMatch(/turtle/i);
+    expect(remote.raw).not.toMatch(/admin@/);
+
+    await stopServer(server.child);
+  }, 60000);
+
+  // ## Verified red-green: 2026-07-31, TRANSCRIBED. THE SECRET LEAK — `defaultLoginHint()` changed
+  //   to verify against `ADMIN_PASSWORD` (the env-aware value) and to report it, which is the
+  //   version that looks more helpful and hands an operator's own secret to a screen:
+  //   1 of 14 fails, and nothing else moves — the published-default cases cannot see this.
+  //     FAIL  an operator who set their own password is told nothing — that one is a real secret
+  //           AssertionError: an operator's own TT_ADMIN_PASSWORD was offered to the login screen:
+  //           expected { …(2) } to be null
+  it('an operator who set their own password is told nothing — that one is a real secret', async () => {
+    const server = await startServer({ ...dataDir('first-run-hint-operator'), TT_ADMIN_PASSWORD: 'operatorpw' });
+
+    const probe = await bare(server.port, '/api/first-run');
+    expect(probe.status).toBe(200);
+    expect(probe.json.defaultLogin, "an operator's own TT_ADMIN_PASSWORD was offered to the login screen").toBeNull();
+
+    await stopServer(server.child);
+  }, 60000);
+
+  // ## Verified red-green: 2026-07-31, TRANSCRIBED. THE STICKY HINT — `defaultLoginHint()` reduced
+  //   to a boot-time boolean captured once instead of a per-request check against the stored hash,
+  //   which is the shape that reads as an optimisation and turns a self-retiring note into a
+  //   permanent one:
+  //   1 of 14 fails, and the operator case above stays green under it — a cached `null` is still
+  //   `null`, which is exactly why that case cannot stand in for this one.
+  //     FAIL  it retires itself the moment the password changes
+  //           AssertionError: the login screen still offers a password that no longer works:
+  //           expected { …(2) } to be null
+  it('it retires itself the moment the password changes', async () => {
+    const server = await startServer(stock('first-run-hint-retires'));
+    // Answer `team` first, because that is the branch the hint exists for: it closes the open state
+    // and puts the login screen there.
+    expect((await postFirstRun(server.port, { shape: 'team' })).status).toBe(200);
+    expect((await bare(server.port, '/api/first-run')).json.defaultLogin.password).toBe('turtle');
+
+    // The person does what the note tells them to do.
+    const admin = session(server.port);
+    expect(
+      (await admin('POST', '/api/auth/login', { email: 'admin@timeturtle.local', password: 'turtle' })).status,
+    ).toBe(200);
+    expect(
+      (await admin('POST', '/api/me/password', { currentPassword: 'turtle', newPassword: 'something of theirs' }))
+        .status,
+    ).toBe(200);
+
+    const after = await bare(server.port, '/api/first-run');
+    expect(after.status).toBe(200);
+    expect(after.json.defaultLogin, 'the login screen still offers a password that no longer works').toBeNull();
+
+    await stopServer(server.child);
+  }, 60000);
+});
+
+// ## Verified red-green: 2026-07-31, TRANSCRIBED. See the stanza on the case.
+//
+// SB-140's LAST HALF, and it was FOUND BY BUILDING THE BROWSER FLOW rather than by reading the
+// route: the first-run answer stored the vault root and left the sync engine where boot left it —
+// pointed at nothing. `startVaultSync()` runs ONCE at module load, when a DD-024 install is still
+// `team` with no vault, and both other doors that can store a shape or a path (`PUT /api/state`,
+// `POST /api/shape`) already re-point it afterwards for exactly this reason. This one did not.
+//
+// The symptom is the one SB-063 cost this repo once: an install that looks wired up. The sidebar
+// says `synced → vault`, the setting is stored, `/api/state` is correct in every field — and no
+// watcher is on the vault until the person restarts the server, which nothing tells them to do.
+//
+// WHY THE EVIDENCE IS A NOTE PLACED BEFORE THE ANSWER. The boot scan cannot have imported it (there
+// was no vault to scan), so an entry appearing in `/api/state` afterwards can ONLY have come from a
+// scan the first-run route started. A note written after the answer would be ambiguous — the
+// watcher and a later save would both explain it.
+describe('DD-024 / SB-140: the first-run answer starts the vault sync engine', () => {
+  // ## Verified red-green: 2026-07-31, TRANSCRIBED. ABSENCE — the `forgetOwnWrites()` +
+  //   `startVaultSync()` block removed from `POST /api/first-run`, i.e. the route as task 4 left
+  //   it. 1 of 15 fails, and it fails as the SYMPTOM rather than as a flag: the install is
+  //   `personal`, the root is stored, and the vault it names is not being read.
+  //     FAIL  a note already in the vault is read the moment the first run ends, not at the next
+  //           restart
+  //           AssertionError: the vault was never scanned after the answer — the sync engine is
+  //           still pointed where boot left it: expected undefined to be 'from the other machine'
+  it('a note already in the vault is read the moment the first run ends, not at the next restart', async () => {
+    const vault = mkdtempSync(join(tmpdir(), 'tt-first-run-sync-'));
+    const dailyDir = join(vault, 'Calendar', 'Daily');
+    mkdirSync(dailyDir, { recursive: true });
+    // TOMORROW, not today: the answer stamps the cutover from `Date.now()` in UTC and the rule is
+    // day-grained (`date >= cutoverDay`), so a note dated today is on the wrong side of it for a
+    // few hours a night in the western half of the world (SB-147). Tomorrow is after it everywhere.
+    const day = new Date(Date.now() + 86400000).toISOString().slice(0, 10);
+    const entry = {
+      id: 'e1',
+      date: day,
+      start: 540,
+      end: 600,
+      durMin: null,
+      project: null,
+      task: null,
+      label: 'from the other machine',
+      note: '',
+      bill: true,
+    };
+    writeFileSync(
+      join(dailyDir, day + '.md'),
+      `# ${day}\n\n## Intentions\n\nship it\n\n` +
+        TT.serializeVaultBlock([entry], { heading: 'Time Log', revision: 4 }) +
+        '\n\n## Captures\n\nnothing yet\n',
+    );
+
+    const server = await startServer(open('first-run-sync'));
+    expect((await postFirstRun(server.port, { shape: 'personal', vaultRoot: vault })).status).toBe(200);
+
+    // The scan is fire-and-forget, so poll rather than assert once — the response deliberately does
+    // not wait for it (a cold vault takes minutes and the person is waiting on this screen).
+    let entries = [];
+    for (let i = 0; i < 100 && !entries.length; i++) {
+      await new Promise((r) => setTimeout(r, 100));
+      entries = (await bare(server.port, '/api/state')).json?.entries ?? [];
+    }
+    expect(
+      entries[0]?.label,
+      'the vault was never scanned after the answer — the sync engine is still pointed where boot left it',
+    ).toBe('from the other machine');
 
     await stopServer(server.child);
   }, 60000);

@@ -168,7 +168,16 @@ export function isLoopbackPeer(raw) {
 }
 
 export const ADMIN_EMAIL = process.env.TT_ADMIN_EMAIL || 'admin@timeturtle.local';
-export const ADMIN_PASSWORD = process.env.TT_ADMIN_PASSWORD || 'turtle';
+// ---- DD-024 clause 2: the ONE password this repo may ever read out to a screen ----
+//
+// Named, rather than inlined into the line below, because a second surface now reads it: the
+// Login screen states this credential back to a loopback caller while the seeded admin still
+// carries it (`defaultLogin` on `GET /api/first-run`). That is only safe for THIS literal — it is
+// a constant in a public MIT repo (DD-004), so stating it discloses nothing the source does not.
+// An operator's `TT_ADMIN_PASSWORD` is a real secret and must never reach a screen, which is why
+// the hint verifies against this constant and never against `ADMIN_PASSWORD`.
+export const DEFAULT_ADMIN_PASSWORD = 'turtle';
+export const ADMIN_PASSWORD = process.env.TT_ADMIN_PASSWORD || DEFAULT_ADMIN_PASSWORD;
 // ---- DD-024 clause 3: demo content is a step you ask for, not one you opt out of ----
 //
 // INVERTED from `!== '0'`. Terje ruled the direction on SB-159 ("Create demo content — don't spawn
