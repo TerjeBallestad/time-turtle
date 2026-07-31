@@ -27,6 +27,7 @@ import { describe, it, expect, afterAll } from 'vitest';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { startServer, stopServer, stopAllServers, session } from './util.js';
 
 afterAll(stopAllServers);
@@ -34,6 +35,26 @@ afterAll(stopAllServers);
 function dataDir(label) {
   const data = mkdtempSync(join(tmpdir(), 'tt-' + label + '-'));
   return { TT_DATA_DIR: data, TT_MD_DIR: join(data, 'mirror') };
+}
+
+/**
+ * One settings row, read straight out of the data dir's SQLite.
+ *
+ * Needed since DD-026 took the Shape stamp off the wire: it is a fact about the MACHINE and no
+ * client may read it (clause 1), but "did this install actually become personal" is still a
+ * question a test has to be able to ask.
+ * @param {string} data @param {string} key
+ */
+function storedSetting(data, key) {
+  const db = new DatabaseSync(join(data, 'timeturtle.db'), { readOnly: true });
+  try {
+    const row = /** @type {{ value: string } | undefined} */ (
+      db.prepare('SELECT value FROM settings WHERE key = ?').get(key)
+    );
+    return row ? row.value : null;
+  } finally {
+    db.close();
+  }
 }
 
 /** A bare cookieless fetch — the first run takes no credential and neither does this. */
@@ -107,7 +128,8 @@ describe('DD-024 clause 3: a fresh install is empty', () => {
   it("SB-146's repro cannot be constructed any more — there is no demo row to freeze", async () => {
     // The trap, in its own terms: answer `personal` on a fresh install and count what is now
     // frozen behind the cutover the answer stamps.
-    const server = await startServer({ ...dataDir('seed-sb146'), TT_SEED_DEMO: undefined });
+    const env = { ...dataDir('seed-sb146'), TT_SEED_DEMO: undefined };
+    const server = await startServer(env);
 
     expect((await answerFirstRun(server.port, { shape: 'personal' })).status).toBe(200);
 
@@ -117,13 +139,18 @@ describe('DD-024 clause 3: a fresh install is empty', () => {
     expect(state.json.shape).toBe('personal');
 
     // BOTH HALVES, and the second is what makes the first mean anything. A count of 0 read alone
-    // is 0 for any reason at all — including an install that never became `personal` and so never
-    // stamped a cutover to be pre-cutover OF.
-    const cutover = String(state.json.settings.shapeStamp || '');
-    expect(cutover, 'no cutover was stamped, so this install never became personal').toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    // is 0 for any reason at all — including an install that never became `personal`.
+    //
+    // THE STAMP IS READ FROM THE STORED ROW, not from the wire (DD-026 / PLAN-017 task 4). It left
+    // the wire because nothing on the client may read it: it is a fact about the MACHINE, and
+    // every client reader of the old key was a rule deciding whether a day was writable. Here it
+    // still answers the question this test asks — "did this install actually become personal" —
+    // which is why the assertion moved rather than being dropped.
+    const stamp = String(storedSetting(env.TT_DATA_DIR, 'shapeStamp') || '');
+    expect(stamp, 'no shape stamp was written, so this install never became personal').toMatch(/^\d{4}-\d{2}-\d{2}T/);
     expect(state.json.entries.length).toBe(0);
-    const cutoverDay = cutover.slice(0, 10);
-    expect(state.json.entries.filter((e) => e.date < cutoverDay)).toEqual([]);
+    const stampDay = stamp.slice(0, 10);
+    expect(state.json.entries.filter((e) => e.date < stampDay)).toEqual([]);
 
     await stopServer(server.child);
   }, 60000);

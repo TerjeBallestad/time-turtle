@@ -46,7 +46,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import TT from '../shared/core.js';
 import { vaultCheckpoint, lastCheckpointDayInRepo, CHECKPOINT_PREFIX } from '../server/src/vault-checkpoint.js';
-import { startServer, stopServer, stopAllServers, adminOn } from './util.js';
+import { startServer, stopServer, stopAllServers, adminOn, seedVaultCatalog } from './util.js';
 
 const DAY = '2026-07-20';
 const NEXT_DAY = '2026-07-21';
@@ -81,6 +81,11 @@ function newVaultRepo() {
   git(dir, 'config', 'user.name', 'Checkpoint Test');
   git(dir, 'config', 'commit.gpgsign', 'false');
   writeFileSync(join(dir, 'README.md'), 'a vault\n');
+  // THE CATALOG IS PART OF A CLEAN VAULT (DD-026 / PLAN-017). The Cutover lives in this note, and
+  // the engine stands down without a readable one — so it has to be here, and it has to be
+  // COMMITTED. A seeded-but-untracked note leaves the worktree dirty, and "a clean vault still
+  // counts the day as checkpointed" would then be measuring the fixture rather than the rule.
+  seedVaultCatalog(dir, { cutover: '2020-01-01' });
   git(dir, 'add', '-A');
   git(dir, 'commit', '-q', '-m', 'vault backup: 2026-07-19 09:00:00');
   return dir;
@@ -354,13 +359,15 @@ describe('the checkpoint on the real write path', () => {
     userId = user.id;
   });
 
-  beforeEach(() => {
+  beforeEach(async () => {
     vaultRoot = newVaultRepo();
     db.putSettings({ shape: 'personal', vaultPaths: { root: vaultRoot, daily: 'Calendar/Daily' } });
-    db.db.exec("INSERT INTO settings (key, value) VALUES ('shapeStamp', '2020-01-01T00:00:00.000Z') ON CONFLICT(key) DO UPDATE SET value = excluded.value"); // prettier-ignore
+    // The Catalog is seeded and committed by `newVaultRepo` — see the note there.
     for (const row of db.listVaultIndex()) db.deleteVaultIndex(row.path);
     db.putEntries(userId, []);
     sync.forgetOwnWrites();
+    // …and READ it: `vaultCutoverInForce()` gates on the index row saying TT read the note.
+    await sync.syncVaultCatalog(sync.vaultCatalogConfig());
   });
   afterEach(() => {
     writer.setVaultCheckpointHook(null); // and, with it, the day gate
@@ -446,10 +453,13 @@ describe('the checkpoint on the real write path', () => {
     vaultRoot = tempDir('tt-ckpt-notrepo-');
     mkdirSync(join(vaultRoot, 'Calendar', 'Daily'), { recursive: true });
     db.putSettings({ shape: 'personal', vaultPaths: { root: vaultRoot, daily: 'Calendar/Daily' } });
+    seedVaultCatalog(vaultRoot, { cutover: '2020-01-01' });
     const rec = recorder();
     writer.setVaultCheckpointHook((day) => vaultCheckpoint(vaultRoot, day, rec.io));
 
     return (async () => {
+      // this suite points at a NEW vault root mid-test, so the Catalog has to be read here
+      await sync.syncVaultCatalog(sync.vaultCatalogConfig());
       const report = await save([entry('e1', 540, 600, 'an hour that must survive a broken backup')]);
       expect(report.written).toEqual([TODAY]);
       const parsed = TT.parseVaultBlock(readFileSync(notePath(), 'utf8'), { heading: HEADING, date: TODAY });

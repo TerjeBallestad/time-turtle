@@ -174,16 +174,19 @@ export function setVaultCatalogRewriter(fn) {
 
 // ---- configuration ----
 /**
- * Where the vault is, what TT is allowed to look at inside it, and who the entries belong to.
- * Resolved on every pass rather than captured at boot: `vaultPaths` is a setting, and a scan that
- * kept scanning the old folder after the user re-pointed it would be reading somebody else's
- * vault. Same discipline `mirrorTarget()` follows for DD-011.
+ * WHERE THE CATALOG IS, and nothing more. The smaller of the two configs, and the split is
+ * load-bearing rather than tidy (PLAN-017 task 4).
  *
- * `null` means "there is nothing to sync": not the `personal` shape, or no vault root configured.
- * A missing root is emphatically NOT "scan from the current directory".
- * @returns {{ root: string, dailyDir: string, catalogPath: string, heading: string, cutoverDay: string, userId: number, projects: import('../../shared/types.ts').Project[], timeSeparator: any } | null}
+ * `vaultSyncConfig()` below stands down when there is no readable Cutover — which is DD-026
+ * clause 2 — and the Cutover lives in the Catalog. If the catalog pass shared that config it
+ * could never read the note that would end the stand-down: the engine would idle forever on a
+ * vault whose Catalog was one scan away from being readable. So the catalog pass resolves through
+ * THIS, which asks only for a root, a path and the one user.
+ *
+ * `null` means "there is no vault at all": not the `personal` shape, or no root configured.
+ * @returns {{ root: string, catalogPath: string, userId: number } | null}
  */
-export function vaultSyncConfig() {
+export function vaultCatalogConfig() {
   if (activeBackend() !== 'vault') return null;
   const settings = db.getSettings();
   const paths = settings.vaultPaths || TT.VAULT_PATHS_DEFAULT;
@@ -191,22 +194,80 @@ export function vaultSyncConfig() {
   const users = listUsers();
   if (users.length !== 1) return null; // DD-006 consequence 1; the boot guard already refuses this
   return {
+    root: paths.root,
+    catalogPath: join(paths.root, paths.catalog || TT.VAULT_PATHS_DEFAULT.catalog),
+    userId: users[0].id,
+  };
+}
+
+/**
+ * THE CUTOVER IN FORCE (TERM-020) — the day from which THIS VAULT holds TT history, or `''`.
+ *
+ * ONE HOME, ONE RESOLUTION, and every rule and every surface reads this rather than deriving its
+ * own. `''` is not a fallback and not "no history excluded by accident": it is the honest answer
+ * to "where does this vault's history start" when TT has not been able to read the note that says.
+ *
+ * GATED ON THE INDEX ROW, NOT ON THE STORED VALUE, and that is the whole point. SQLite caches what
+ * the Catalog last said, the way it caches `currency` — DD-006's derived index. A cached day that
+ * outlived the note it came from is exactly the per-machine stamp DD-026 removed, wearing a new
+ * name: the note goes unreadable, the cache does not, and the rules go on freezing days on the
+ * authority of a file nobody can read. So the value counts only while the index says TT has
+ * READ the note it came from.
+ * @returns {string} `YYYY-MM-DD`, or `''`
+ */
+export function resolvedVaultCutover() {
+  const config = vaultCatalogConfig();
+  if (!config) return '';
+  const row = db.getVaultIndex(config.catalogPath);
+  if (!row || row.state !== 'known') return '';
+  return db.getSettings().cutover || '';
+}
+
+/**
+ * Where the vault is, what TT is allowed to look at inside it, and who the entries belong to.
+ * Resolved on every pass rather than captured at boot: `vaultPaths` is a setting, and a scan that
+ * kept scanning the old folder after the user re-pointed it would be reading somebody else's
+ * vault. Same discipline `mirrorTarget()` follows for DD-011.
+ *
+ * `null` means "there is nothing to sync": not the `personal` shape, no vault root configured, or
+ * NO READABLE CUTOVER. A missing root is emphatically NOT "scan from the current directory".
+ *
+ * THE THIRD CASE IS DD-026 CLAUSE 2 AND IT STANDS THE ENGINE DOWN IN BOTH DIRECTIONS, which is
+ * more than the clause's own words say about the write half. Two reasons, and both are about
+ * writing into a real note:
+ *
+ *   • THE HEADING NOW LIVES IN THE CATALOG (clause 5). With no readable Catalog TT does not know
+ *     which region of a daily note is its own, and importing against a guessed heading is how TT
+ *     writes into the wrong part of somebody's note.
+ *   • NOTHING SAYS WHERE THE VAULT'S HISTORY STARTS. Scanning anyway means offering every daily
+ *     note in the folder to DD-012 adoption, including the ~60 that predate TT — which is DD-016's
+ *     first named hazard, and the header vocabulary is the only thing standing in front of it.
+ *
+ * The one thing that still reads the vault in this state is task 5's proposal scan, which is
+ * heading-independent and imports nothing.
+ * @returns {{ root: string, dailyDir: string, catalogPath: string, heading: string, cutoverDay: string, userId: number, projects: import('../../shared/types.ts').Project[], timeSeparator: any } | null}
+ */
+export function vaultSyncConfig() {
+  const catalog = vaultCatalogConfig();
+  if (!catalog) return null;
+  const cutoverDay = resolvedVaultCutover();
+  if (!cutoverDay) return null;
+  const settings = db.getSettings();
+  const paths = settings.vaultPaths || TT.VAULT_PATHS_DEFAULT;
+  return {
     // SB-068 needs the ROOT, not the daily folder: the checkpoint is `git add -A` against the
     // whole vault worktree, and a checkpoint of `Calendar/Daily` is not a checkpoint of the vault.
-    root: paths.root,
+    root: catalog.root,
     dailyDir: join(paths.root, paths.daily),
-    // PLAN-017 task 1: the Catalog note, resolved on every pass for the same reason the daily
-    // folder is — `vaultPaths.catalog` is a setting, and a pass that kept reading the old path
-    // after the user re-pointed it would be resolving rates out of somebody else's note.
-    catalogPath: join(paths.root, paths.catalog || TT.VAULT_PATHS_DEFAULT.catalog),
+    catalogPath: catalog.catalogPath,
     // DD-026 clause 5: the heading is a SETTING now, not a path. Its authority is the Catalog and
     // the SQLite row is the derived index — the same relationship `currency` has.
     heading: settings.timeLogHeading || TT.TIME_LOG_HEADING_DEFAULT,
-    // PLAN-017 task 3's deliberate intermediate: this still reads the renamed SQLite row, so the
-    // suite stays green and each commit builds. Task 4 points it at the Catalog's `cutover`, which
-    // is where DD-026 clause 1 requires it to come from.
-    cutoverDay: (settings.shapeStamp || '').slice(0, 10),
-    userId: users[0].id,
+    // THE CATALOG'S OWN `cutover`, resolved once above. No `.slice`, because there is no instant
+    // left to slice (DD-026 clause 6), and no fallback to the Shape stamp, because clause 1 forbids
+    // any rule that decides whether a day is writable from reading it.
+    cutoverDay,
+    userId: catalog.userId,
     // SB-059: the catalog the Project column resolves through. Absent it, a `[[Wikilink]]` cell is
     // carried literally, which is the pre-SB-059 behaviour and never a refusal.
     projects: db.getProjects(),
@@ -498,7 +559,12 @@ function importCatalog(userId, catalog) {
     db.putClients(catalog.clients || []);
     db.putProjects(catalog.projects || []);
     db.putTasks(userId, catalog.tasks || []);
-    db.putSettings(TT.vaultCatalogSettings(catalog.settings || []));
+    const applied = TT.vaultCatalogSettings(catalog.settings || []);
+    db.putSettings(applied);
+    // THE CUTOVER GOES THROUGH ITS OWN SETTER, and it is SET OR CLEARED on every import — never
+    // left alone. A note that drops its `cutover` row must not leave yesterday's day standing:
+    // that is the per-machine stamp DD-026 removed, cached instead of stored.
+    db.setVaultCutover(applied.cutover ?? null);
     // DC-001: without the bump an open tab keeps its stale catalog and PUTs it straight back over
     // what was just imported — the same trap `importEntries` closes for a day's rows.
     db.bumpCatalogVersion();
@@ -507,7 +573,10 @@ function importCatalog(userId, catalog) {
 
 /**
  * Look at the Catalog note and do whatever it deserves. The same pass a daily note gets.
- * @param {ReturnType<typeof vaultSyncConfig>} config
+ *
+ * TAKES `vaultCatalogConfig()`, never `vaultSyncConfig()` — see the note in `scanVault`. This is
+ * the pass that ends the stand-down, so it cannot be gated by it.
+ * @param {ReturnType<typeof vaultCatalogConfig>} config
  * @param {{ stat?: (p: string) => any, readFile?: (p: string) => Promise<string>, timeoutMs?: number, viaWatcher?: boolean }} [io]
  * @returns {Promise<string>} the verdict applied, for logging and for tests
  */
@@ -609,18 +678,25 @@ export async function syncVaultPath(path, date, config, io) {
 export async function scanVault(io) {
   /** @type {Record<string, number>} */
   const counts = {};
-  const first = vaultSyncConfig();
-  if (!first) return counts;
-  // THE CATALOG FIRST, and the order is load-bearing rather than tidy: the note carries the
-  // Projects table a daily note's `[[Wikilink]]` cell resolves through (SB-059), so reading it
-  // after the days would resolve this pass's cells against the previous pass's catalog.
+  // THE CATALOG FIRST, through its OWN config, and both halves of that are load-bearing.
+  //
+  // FIRST, because the note carries the Projects table a daily note's `[[Wikilink]]` cell resolves
+  // through (SB-059) — and, since PLAN-017 task 4, because it carries the Cutover and the heading
+  // that decide whether the daily half runs at all. A pass that read the days first would resolve
+  // them against the previous pass's answers.
+  //
+  // ITS OWN CONFIG, because `vaultSyncConfig()` stands down when there is no readable Cutover
+  // (DD-026 clause 2) and the Cutover is IN this note. Sharing one config would mean the one file
+  // that can end the stand-down is the one file the stand-down stops TT reading.
   //
   // COUNTED UNDER ITS OWN KEY, never folded into the daily verdict counts. `counts.unknown === 3`
   // has meant "three days TT could not read" since SB-057, and quietly making it mean "…or the
   // catalog" would move every existing reading of that number by one without anything failing.
-  counts['catalog:' + (await syncVaultCatalog(first, io))] = 1;
-  // RE-RESOLVED after the catalog pass, for the same reason the catalog runs first: the import
-  // that just landed may have replaced the Projects table this loop resolves cells against.
+  const catalog = vaultCatalogConfig();
+  if (!catalog) return counts;
+  counts['catalog:' + (await syncVaultCatalog(catalog, io))] = 1;
+  // RESOLVED AFTER the catalog pass, never before: the import that just landed may have supplied
+  // the Cutover this call needs, the heading it reads with, and the Projects it resolves through.
   const config = vaultSyncConfig();
   if (!config) return counts;
   /** @type {string[]} */
@@ -661,48 +737,58 @@ const debounces = new Map();
  */
 export function startVaultSync(opts) {
   stopVaultSync();
+  // THE CATALOG'S CONFIG DECIDES WHETHER ANYTHING STARTS AT ALL, not the daily one. An install
+  // whose Catalog is not readable yet has a `vaultSyncConfig()` of null (DD-026 clause 2) and
+  // still needs its watcher and its interval running — they are what will read the Catalog and
+  // end that state. Starting nothing would mean the stand-down could only be lifted by a restart.
+  const catalog = vaultCatalogConfig();
+  if (!catalog) return false;
   const config = vaultSyncConfig();
-  if (!config) return false;
-  // Task 1 measured that a SIGKILL between the write and the rename really does leave a temp
-  // behind, and that it stays forever. Once at boot, in the one directory TT writes into.
-  sweepVaultTemps(config.dailyDir);
-  pruneVaultIndex(config.dailyDir, config.catalogPath);
   const debounceMs = (opts && opts.debounceMs) || WATCH_DEBOUNCE_MS;
-  try {
-    watcher = watch(config.dailyDir, (_event, filename) => {
-      if (!filename) return;
-      const name = basename(String(filename));
-      const m = DAILY_NOTE_RE.exec(name);
-      if (!m) return;
-      // Coalesced PER PATH: an editor save is several events, and iCloud lands a file in pieces.
-      const existing = debounces.get(name);
-      if (existing) clearTimeout(existing);
-      debounces.set(
-        name,
-        setTimeout(() => {
-          debounces.delete(name);
-          const now = vaultSyncConfig();
-          if (!now || !afterCutover(m[1], now.cutoverDay)) return;
-          void syncVaultPath(join(now.dailyDir, name), m[1], now, { viaWatcher: true }).catch((err) =>
-            console.error('[time-turtle] vault watch failed for', name + ':', /** @type {Error} */ (err).message),
-          );
-        }, debounceMs),
-      );
-    });
-  } catch (err) {
-    // A vault folder that cannot be watched is not a reason to refuse to start: the interval below
-    // is a complete second trigger on its own, and saying so is more use than a stack trace.
-    console.error(
-      `[time-turtle] could not watch ${config.dailyDir} (${/** @type {Error} */ (err).message}) — the interval scan still runs`,
-    );
+  // The daily-folder half runs only when the daily half of the engine does.
+  if (config) {
+    // Task 1 measured that a SIGKILL between the write and the rename really does leave a temp
+    // behind, and that it stays forever. Once at boot, in the one directory TT writes into.
+    sweepVaultTemps(config.dailyDir);
+    pruneVaultIndex(config.dailyDir, config.catalogPath);
   }
+  if (config)
+    try {
+      watcher = watch(config.dailyDir, (_event, filename) => {
+        if (!filename) return;
+        const name = basename(String(filename));
+        const m = DAILY_NOTE_RE.exec(name);
+        if (!m) return;
+        // Coalesced PER PATH: an editor save is several events, and iCloud lands a file in pieces.
+        const existing = debounces.get(name);
+        if (existing) clearTimeout(existing);
+        debounces.set(
+          name,
+          setTimeout(() => {
+            debounces.delete(name);
+            const now = vaultSyncConfig();
+            if (!now || !afterCutover(m[1], now.cutoverDay)) return;
+            void syncVaultPath(join(now.dailyDir, name), m[1], now, { viaWatcher: true }).catch((err) =>
+              console.error('[time-turtle] vault watch failed for', name + ':', /** @type {Error} */ (err).message),
+            );
+          }, debounceMs),
+        );
+      });
+    } catch (err) {
+      // A vault folder that cannot be watched is not a reason to refuse to start: the interval
+      // below is a complete second trigger on its own, and saying so is more use than a stack
+      // trace.
+      console.error(
+        `[time-turtle] could not watch ${config.dailyDir} (${/** @type {Error} */ (err).message}) — the interval scan still runs`,
+      );
+    }
   // THE CATALOG'S OWN WATCHER (PLAN-017 task 1). A second watcher rather than a wider one: the
   // Catalog can sit anywhere `vaultPaths.catalog` points, including the vault ROOT, and watching a
   // folder recursively to catch one file would hand TT an event for every note in the vault.
   //
   // Filtered by basename, because the folder it sits in is not TT's. Same debounce, same reason.
-  const catalogDir = dirname(config.catalogPath);
-  const catalogName = basename(config.catalogPath);
+  const catalogDir = dirname(catalog.catalogPath);
+  const catalogName = basename(catalog.catalogPath);
   try {
     catalogWatcher = watch(catalogDir, (_event, filename) => {
       if (!filename || basename(String(filename)) !== catalogName) return;
@@ -712,7 +798,7 @@ export function startVaultSync(opts) {
         catalogName,
         setTimeout(() => {
           debounces.delete(catalogName);
-          const now = vaultSyncConfig();
+          const now = vaultCatalogConfig();
           if (!now) return;
           void syncVaultCatalog(now, { viaWatcher: true }).catch((err) =>
             console.error('[time-turtle] catalog watch failed:', /** @type {Error} */ (err).message),

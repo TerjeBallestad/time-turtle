@@ -75,7 +75,7 @@ import * as db from './db.js';
 import { activeShape } from './backend.js';
 import { writeVaultFile } from './vault-fs.js';
 import { fileSha } from './vault-arbitrate.js';
-import { classifyVaultFile, noteOwnWrite, readNoteForWrite, vaultSyncConfig } from './vault-sync.js';
+import { classifyVaultFile, noteOwnWrite, readNoteForWrite, vaultCatalogConfig, vaultSyncConfig } from './vault-sync.js';
 
 /** @typedef {import('../../shared/types.ts').Entry} Entry */
 /** @typedef {import('../../shared/types.ts').VaultIndexRow} VaultIndexRow */
@@ -173,8 +173,10 @@ export function writeVaultEntries(userId, incoming, before) {
   const report = { written: [], skipped: [], refused: [] };
   const config = vaultSyncConfig();
   if (!config) return report;
-  const settings = db.getSettings();
-  const context = { shape: activeShape(), cutover: settings.shapeStamp, commits: db.getCommits(userId) };
+  // THE CONFIG'S OWN `cutoverDay`, which `vaultSyncConfig()` resolved from the Catalog. Never
+  // `getSettings()` — DD-026 clause 1 forbids a writability rule from reading the Shape stamp, and
+  // the cached `cutover` row cannot tell a day TT read from one whose note has gone unreadable.
+  const context = { shape: activeShape(), cutover: config.cutoverDay, commits: db.getCommits(userId) };
   /** @param {string} date @returns {string} */
   const pathFor = (date) => join(config.dailyDir, date + '.md');
   /** @param {string} date @returns {VaultIndexRow | null} */
@@ -481,7 +483,11 @@ let catalogMayCreate = false;
 export function writeVaultCatalogNote(opts) {
   /** @type {{ written: boolean, skipped: boolean, refused: string | null }} */
   const report = { written: false, skipped: false, refused: null };
-  const config = vaultSyncConfig();
+  // `vaultCatalogConfig()`, NOT `vaultSyncConfig()` (PLAN-017 task 4). The daily engine stands
+  // down when there is no readable Cutover — DD-026 clause 2, "nothing reaches the vault" — and
+  // that clause is about DAYS. The Catalog itself has to stay writable in exactly that state, or
+  // the question in task 5 could never write the answer that ends it.
+  const config = vaultCatalogConfig();
   if (!config) return report;
   const path = config.catalogPath;
   const row = db.getVaultIndex(path);
@@ -632,8 +638,10 @@ export function rewriteVaultCatalog(rev) {
 export function rewriteVaultDate(userId, date, rev) {
   const config = vaultSyncConfig();
   if (!config) return;
-  const settings = db.getSettings();
-  const context = { shape: activeShape(), cutover: settings.shapeStamp, commits: db.getCommits(userId) };
+  // THE CONFIG'S OWN `cutoverDay`, which `vaultSyncConfig()` resolved from the Catalog. Never
+  // `getSettings()` — DD-026 clause 1 forbids a writability rule from reading the Shape stamp, and
+  // the cached `cutover` row cannot tell a day TT read from one whose note has gone unreadable.
+  const context = { shape: activeShape(), cutover: config.cutoverDay, commits: db.getCommits(userId) };
   const entries = db.getEntries(userId).filter((entry) => entry.date === date && TT.vaultBound(entry, context));
   const path = join(config.dailyDir, date + '.md');
   /** @type {{ written: string[], skipped: string[], refused: { date: string, reason: string }[] }} */

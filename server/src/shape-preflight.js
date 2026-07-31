@@ -29,25 +29,28 @@ import TT from '../../shared/core.js';
 import * as db from './db.js';
 import * as store from './store.js';
 import { mirrorCandidates, mirrorPath } from './markdown.js';
+import { resolvedVaultCutover } from './vault-sync.js';
 
 /**
- * THE CUTOVER THAT WOULD BE IN FORCE AFTER THE SWITCH — not necessarily the stored one.
+ * THE CUTOVER THAT WOULD BE IN FORCE AFTER THE SWITCH — the Catalog's, and nothing else.
  *
- * `stampShape` is first-stamp-wins (server/src/db.js): a value already there survives a
- * personal → team → personal round trip untouched, which is what keeps the team interlude's days
- * from being re-stranded. So the stored value wins whenever there IS one.
+ * IT DOES NOT FALL BACK TO THE SHAPE STAMP, and that is the whole change here (DD-026 clause 1):
+ * no rule that decides whether a day is writable may read the stamp, and this is such a rule —
+ * its number is the one the boot banner prints and the one a person reads before switching.
  *
- * On the common `team → personal` path nothing has ever been stamped — `getSettings().shapeStamp`
- * is `''` — and `TT.vaultBound` then excludes nothing by date at all, i.e. the preflight would
- * report zero stranded entries for a switch that is about to strand the whole back catalogue.
- * `now` is what the switch itself will stamp a moment later, so `now` is the honest answer.
+ * WITH NO READABLE CUTOVER IT RETURNS `''` AND THE WHOLE TIMESHEET COUNTS AS STRANDED, which
+ * looks alarming and is the honest number. Stranded here is the exact complement of
+ * `TT.vaultBound`, and under clause 2 nothing reaches the vault while the Catalog cannot be read,
+ * so nothing is bound. It is a ONE-BOOT condition that the question in task 5 ends — papering
+ * over it with the stamp would be exactly the reader clause 1 forbids, printing a reassuring
+ * number derived from a value that has no authority over this vault.
  *
- * AND WE DO NOT STAMP IT. Calling `store.stampShape()` here would answer the question by
- * doing the thing — a preflight that mutated something is not a preflight.
- * @returns {string} an ISO instant
+ * AND WE STILL DO NOT STAMP ANYTHING. A preflight that mutated something is not a preflight, and
+ * `tests/shape-preflight.test.js` hashes every file in the data dir before and after a call.
+ * @returns {string} a `YYYY-MM-DD` day, or `''` when TT has not read a Cutover
  */
 function cutoverInForce() {
-  return store.getSettings().shapeStamp || new Date().toISOString();
+  return resolvedVaultCutover();
 }
 
 /**

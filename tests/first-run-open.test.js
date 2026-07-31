@@ -33,7 +33,7 @@ import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir, networkInterfaces } from 'node:os';
 import { join } from 'node:path';
 import TT from '../shared/core.js';
-import { startServer, stopServer, stopAllServers, session } from './util.js';
+import { startServer, stopServer, stopAllServers, session, seedVaultCatalog } from './util.js';
 
 afterAll(stopAllServers);
 
@@ -560,10 +560,16 @@ describe('DD-024 / SB-140: the first-run answer starts the vault sync engine', (
     const vault = mkdtempSync(join(tmpdir(), 'tt-first-run-sync-'));
     const dailyDir = join(vault, 'Calendar', 'Daily');
     mkdirSync(dailyDir, { recursive: true });
-    // TOMORROW, not today: the answer stamps the cutover from `Date.now()` in UTC and the rule is
-    // day-grained (`date >= cutoverDay`), so a note dated today is on the wrong side of it for a
-    // few hours a night in the western half of the world (SB-147). Tomorrow is after it everywhere.
+    // A CATALOG CARRYING A CUTOVER, which is what a vault the other machine already uses HAS
+    // (DD-026 / PLAN-017 task 4). Without one the engine correctly stands down and imports
+    // nothing, so this suite would be asserting the absence of a scan that was never owed. The
+    // no-Catalog case is its own beat and its own question — that is task 5's.
+    //
+    // The day is TOMORROW rather than today, and the reason survives DD-026: the rule is
+    // day-grained and a note dated today sits on the wrong side of a UTC-derived line for a few
+    // hours a night in the western half of the world. Tomorrow is after it everywhere.
     const day = new Date(Date.now() + 86400000).toISOString().slice(0, 10);
+    seedVaultCatalog(vault, { cutover: '2020-01-01' });
     const entry = {
       id: 'e1',
       date: day,

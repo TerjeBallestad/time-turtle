@@ -355,13 +355,20 @@ export function getSettings() {
     // how a MACHINE finds the vault — and its authority is the Catalog. The row here is the
     // derived index, the way `currency` and `language` already are.
     timeLogHeading: TT.TIME_LOG_HEADING_DEFAULT,
+    // DD-026 clauses 1 and 6: the CUTOVER (TERM-020), a `YYYY-MM-DD` day cached from the Catalog.
+    // `''` is "TT has not read a Cutover", which is a real state now — see `resolvedVaultCutover`,
+    // which is the only thing entitled to answer that question, because this row alone cannot
+    // tell a day it read from a day whose note has since become unreadable.
+    cutover: '',
     vaultPaths: { ...VAULT_PATHS_DEFAULT },
   };
   for (const row of rows) {
     if (row.key === 'vaultPaths') settings.vaultPaths = parseVaultPaths(row.value);
     else
       settings[
-        /** @type {'currency'|'language'|'mdDir'|'vaultTimeSeparator'|'shape'|'shapeStamp'|'timeLogHeading'} */ (row.key)
+        /** @type {'currency'|'language'|'mdDir'|'vaultTimeSeparator'|'shape'|'shapeStamp'|'timeLogHeading'|'cutover'} */ (
+          row.key
+        )
       ] = row.value;
   }
   return /** @type {Settings & { mdDir: string }} */ (/** @type {unknown} */ (settings));
@@ -469,6 +476,29 @@ export function putSettings(settings) {
       if (typeof incoming[key] === 'string') next[key] = /** @type {string} */ (incoming[key]);
     upsert.run('vaultPaths', JSON.stringify(next));
   }
+}
+
+/**
+ * THE CUTOVER, cached from the Catalog note — DD-006's derived index, the way `currency` is.
+ *
+ * A DEDICATED SETTER RATHER THAN A `putSettings` KEY, and the reason is the one DD-016 gave for
+ * the old stamp: the client PUTs the whole settings object back on every save, so a value
+ * `putSettings` reads off its argument is a value a client can move — and this one decides which
+ * of the user's days may reach the vault at all. The only caller is the catalog import.
+ *
+ * `null` CLEARS THE ROW, and that half is not optional. A note that loses its `cutover` row, or a
+ * catalog re-pointed at a different vault, must not leave the old day standing: a cached day that
+ * outlived the note it came from is the per-machine stamp DD-026 removed, wearing a new name.
+ * @param {string | null} day a `YYYY-MM-DD`, or null to clear
+ */
+export function setVaultCutover(day) {
+  if (day == null || day === '') {
+    db.prepare('DELETE FROM settings WHERE key = ?').run('cutover');
+    return;
+  }
+  db.prepare(
+    'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
+  ).run('cutover', String(day));
 }
 
 // ---- catalog ----

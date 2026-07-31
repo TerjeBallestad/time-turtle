@@ -37,6 +37,7 @@ import {
   forgetOwnWrites,
   setVaultRewriter,
   setVaultCatalogRewriter,
+  resolvedVaultCutover,
 } from './vault-sync.js';
 import { rewriteVaultDate, rewriteVaultCatalog, setVaultCheckpointHook } from './vault-write.js';
 import { vaultCheckpoint } from './vault-checkpoint.js';
@@ -604,7 +605,18 @@ function vaultQuarantinedNotes() {
  * @returns {import('../../shared/types.ts').Settings & { mdDir: string }}
  */
 function wireSettings() {
-  const settings = store.getSettings();
+  // PLAN-017 task 4: NEITHER DATE GOES OUT AS A SETTING.
+  //
+  // `cutover` leaves the settings object because it is not a setting — nobody sets it, it is
+  // resolved (`resolvedVaultCutover`), and a client that could PUT it back could move the line that
+  // decides which of its own days are writable. It goes out as `AppState.cutover` instead: one
+  // home, one resolution, no client re-derivation.
+  //
+  // `shapeStamp` leaves because nothing on the client may read it. DD-026 clause 1 says no rule
+  // that decides whether a day is writable may, and the two client readers of the old key were
+  // exactly such rules. It stays a server-side diagnostic — the boot banner and task 5's
+  // last-resort proposal — and putting it on the wire is how it would quietly acquire a third.
+  const { shapeStamp: _stamp, cutover: _cutover, ...settings } = store.getSettings();
   const stored = store.getStoredShape();
   if (stored) return { ...settings, shape: stored };
   const { shape: _defaulted, ...rest } = settings;
@@ -635,6 +647,12 @@ function stateFor(user) {
     // BACKEND is not on the wire: it is derived from the shape (DD-015), never chosen.
     shape: activeShape(),
     shapeLocked: shapeLocked(),
+    // PLAN-017 task 4 / DD-026: THE CUTOVER, resolved server-side and rendered by the client.
+    // Its own field rather than a settings key, because it is not something anybody sets, and
+    // because the client must be able to tell "no Cutover" (`''` — the app works, nothing reaches
+    // the vault) from "a Cutover of some date". `TimeGrid` and `WeekView` read this and nothing
+    // else; a second derivation on the client is the failure DD-017 put the rule in one home for.
+    cutover: resolvedVaultCutover(),
     // SB-098: DD-015's open state. See shapeQuestionOpen — the client renders the question,
     // it does not decide whether it is being asked.
     shapeOpen: shapeQuestionOpen(user),
@@ -866,7 +884,10 @@ function frozenEntryRefusal(userId, incoming) {
     // The rule context's field is `cutover`, and at PLAN-017 task 3 it is still fed the renamed
     // SQLite row — a deliberate intermediate so each commit builds. Task 4 points it at the
     // Catalog, which is where DD-026 clause 1 requires the answer to come from.
-    cutover: store.getSettings().shapeStamp,
+    // PLAN-017 task 4: the RESOLVED Cutover, from the one home that resolves it. Never
+    // `getSettings().cutover` — that row cannot tell a day TT read from a day whose note has since
+    // become unreadable, and telling those apart is the entire point of DD-026 clause 2.
+    cutover: resolvedVaultCutover(),
     commits: store.getCommits(userId),
   };
   /** @param {any[] | undefined} entries @returns {string[]} the frozen rows, canonical and sorted */

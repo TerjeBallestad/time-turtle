@@ -109,7 +109,7 @@ afterEach(() => {
 });
 
 /** The one call under test, resolved through the real config the way the interval does. */
-const pass = (io) => sync.syncVaultCatalog(sync.vaultSyncConfig(), io);
+const pass = (io) => sync.syncVaultCatalog(sync.vaultCatalogConfig(), io);
 
 describe('the catalog note, read', () => {
   it('a hand-written note is read: clients, projects, templates and settings reach the store', async () => {

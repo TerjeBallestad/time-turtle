@@ -268,6 +268,16 @@ export interface Settings {
    */
   timeLogHeading?: string;
   /**
+   * DD-026 clauses 1 and 6: THE CUTOVER (TERM-020) — the day from which THIS VAULT holds Time
+   * Turtle history, `YYYY-MM-DD`. Cached from the Catalog note, which is its authority.
+   *
+   * SERVER-INTERNAL, and it never reaches the wire: `wireSettings()` strips it and `AppState`
+   * carries the RESOLVED value instead. This row on its own cannot tell a day Time Turtle read
+   * from a day whose note has since become unreadable, and telling those apart is the whole of
+   * clause 2 — so `resolvedVaultCutover()` is the only thing entitled to answer with it.
+   */
+  cutover?: string;
+  /**
    * SB-056: where inside the vault TT reads and writes. INSTANCE-LOCAL for the same reason as
    * `shape` — these paths are how TT FINDS the catalog note, so serializing them INTO it
    * (SB-058) would be a bootstrap loop. Stored as one JSON value; defaulted on read.
@@ -401,6 +411,21 @@ export interface AppState extends Catalog {
    * Absent (an older server) behaves as false: never ask. The safe direction is silence.
    */
   shapeOpen?: boolean;
+  /**
+   * DD-026 / PLAN-017 task 4: THE CUTOVER IN FORCE (TERM-020) — the day from which this VAULT
+   * holds Time Turtle history, `YYYY-MM-DD`, or `''` when Time Turtle has not been able to read
+   * one.
+   *
+   * A FIELD OF ITS OWN RATHER THAN A SETTINGS KEY, because nobody sets it: it is resolved from the
+   * Catalog note, and a client that could PUT it back could move the line deciding which of its
+   * own days are writable. It is the ONLY thing the client's read-only rules read; a second
+   * derivation on the client is the failure DD-017 put that rule in one home for.
+   *
+   * `''` IS A REAL AND DIFFERENT STATE, not a missing value: no readable Cutover means every day
+   * is editable AND nothing reaches the vault (clause 2). Absent (an older server) reads as `''`,
+   * which is the same safe direction.
+   */
+  cutover?: string;
   /**
    * SB-057: the daily notes TT has stopped writing to. Additive and read-only, the same shape
    * `mirrorBlocked` takes and for the identical reason — a note that silently stops syncing still

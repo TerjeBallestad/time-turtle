@@ -823,7 +823,10 @@ describe('the wikilink composition is one rule, independent of encodeCell (SB-12
 // (the admin exemption), and a table with only `personal` rows would let a broken `team` branch
 // through untouched.
 describe('the read-only rule (DD-017 §1)', () => {
-  const CUTOVER = '2026-07-15T09:12:33.000Z'; // an ISO instant; compared day-grained
+  // A DAY, not an instant (DD-026 clause 6). It was `'2026-07-15T09:12:33.000Z'` while the value
+  // came from a SQLite stamp and `preCutover` sliced it; the Catalog's validator refuses anything
+  // but `YYYY-MM-DD` now, so a table built on an instant would be testing a value TT cannot hold.
+  const CUTOVER = '2026-07-15';
   const BEFORE = '2026-07-14'; // strictly before the cutover DAY
   const ON = '2026-07-15'; // the cutover day itself is NOT before it
   const AFTER = '2026-07-20'; // Monday, week 30
@@ -872,16 +875,50 @@ describe('the read-only rule (DD-017 §1)', () => {
     expect([TT.preCutover(date, ctx), TT.frozenSegment(date, ctx), TT.readOnlyDay(date, ctx)]).toEqual(expected);
   });
 
-  it('under `personal`, readOnlyDay is the EXACT complement of vaultBound on every row', () => {
-    // DD-017's whole rule, executed: "editable ⇔ vault-bound". If these two ever disagree the
-    // app can show an editable day whose hours never reach a daily note, which is the silent
-    // divergence the one-home discipline exists to prevent.
-    const personalRows = ROWS.filter((r) => r.shape === 'personal');
-    expect(personalRows.length).toBeGreaterThan(0);
-    for (const { shape, cutover, commits, admin, date, name } of personalRows) {
+  // REWRITTEN, NOT DELETED (DD-026 clause 2, PLAN-017 task 4). This used to assert one thing —
+  // "under `personal`, readOnlyDay is the EXACT complement of vaultBound" — and that held only
+  // because the Cutover could never be absent: SQLite stamped it the moment the shape was stored.
+  // Moving it into a vault file makes absence reachable, and in that one state the two questions
+  // genuinely get different answers. So the assertion says what the relation IS now, over BOTH
+  // branches, rather than being weakened to cover the branch that changed.
+  it('with a readable Cutover the two are still exact complements', () => {
+    const withCutover = ROWS.filter((r) => r.shape === 'personal' && r.cutover);
+    expect(withCutover.length).toBeGreaterThan(0);
+    for (const { shape, cutover, commits, admin, date, name } of withCutover) {
       const ctx = { shape, cutover, commits, admin };
       expect(TT.readOnlyDay(date, ctx), name).toBe(!TT.vaultBound({ date }, ctx));
     }
+  });
+
+  it('with NO readable Cutover they diverge, and each is right about its own question', () => {
+    // The whole of clause 2 in one assertion. `vaultBound` false everywhere: TT does not know
+    // where this vault's history starts, so no day of it is TT's to write. `readOnlyDay` false
+    // everywhere the LEDGER does not freeze: the app works against SQLite and reconciles once the
+    // Catalog is read. Fail-open and fail-closed are both rejected by name, and this is the row
+    // that would go red if either were built.
+    const noCutover = ROWS.filter((r) => r.shape === 'personal' && !r.cutover);
+    expect(noCutover.length).toBeGreaterThan(0);
+    for (const { shape, cutover, commits, admin, date, name } of noCutover) {
+      const ctx = { shape, cutover, commits, admin };
+      expect(TT.vaultBound({ date }, ctx), name + ' — vaultBound').toBe(false);
+      expect(TT.readOnlyDay(date, ctx), name + ' — readOnlyDay').toBe(TT.committedOn(date, commits));
+    }
+    // and the divergence is REAL rather than an artefact of the rows: a day that is neither
+    // committed nor pre-anything is editable AND not vault-bound at the same time
+    const open = { shape: 'personal', cutover: '', commits: [], admin: false };
+    expect(TT.readOnlyDay(AFTER, open)).toBe(false);
+    expect(TT.vaultBound({ date: AFTER }, open)).toBe(false);
+  });
+
+  it('a Cutover is a DAY, and the day itself is never before itself (clause 6)', () => {
+    // No `.slice(0, 10)` survives in the rule, so an instant handed in by a caller that has not
+    // been updated does NOT quietly half-work: `'2026-07-15' < '2026-07-15T09:12:33.000Z'` is
+    // true, so the cutover day itself would read as pre-cutover. This is the assertion that
+    // catches such a caller.
+    const day = { shape: 'personal', cutover: '2026-07-15', commits: [], admin: false };
+    expect(TT.preCutover('2026-07-14', day)).toBe(true);
+    expect(TT.preCutover('2026-07-15', day)).toBe(false);
+    expect(TT.preCutover('2026-07-16', day)).toBe(false);
   });
 
   it('the ledger is scanned in ONE place — committedOn is shape-blind and the others gate it', () => {

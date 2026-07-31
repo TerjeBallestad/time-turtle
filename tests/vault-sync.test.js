@@ -16,10 +16,23 @@
 // invalidates the client's version, TT's own write does not echo back, and an unreadable, absent
 // or timed-out read yields `unknown` and leaves every entry TT already holds exactly where it is.
 import { describe, it, expect, beforeAll, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { readFile as readFileAsync } from 'node:fs/promises';
 import TT from '../shared/core.js';
+import { seedVaultCatalog } from './util.js';
+/**
+ * An io injection scoped to ONE path (PLAN-017 task 4).
+ *
+ * `scanVault` reads the Catalog first, and a blanket injection would answer for that read too —
+ * making the Catalog unreadable, which stands the whole daily engine down (DD-026 clause 2). The
+ * test would then pass for the wrong reason: no daily note was scanned at all. Every other path
+ * reads for real.
+ * @param {string} path @param {(p: string) => Promise<string>} fake
+ */
+const onlyFor = (path, fake) => (p) => (p === path ? fake(p) : readFileAsync(p, 'utf8'));
+
 
 /** @type {typeof import('../server/src/vault-sync.js')} */
 let sync;
@@ -75,17 +88,25 @@ beforeAll(async () => {
   userId = user.id;
 });
 
-beforeEach(() => {
+beforeEach(async () => {
   vaultRoot = mkdtempSync(join(tmpdir(), 'tt-vault-sync-'));
   dailyDir = join(vaultRoot, 'Calendar', 'Daily');
   mkdirSync(dailyDir, { recursive: true });
   db.putSettings({ shape: 'personal', vaultPaths: { root: vaultRoot, daily: 'Calendar/Daily' } });
   // a cutover far enough back that the fixtures are all inside it; the cutover's own behaviour is
   // asserted on its own below
-  db.db.exec("INSERT INTO settings (key, value) VALUES ('shapeStamp', '2020-01-01T00:00:00.000Z') ON CONFLICT(key) DO UPDATE SET value = excluded.value"); // prettier-ignore
+  // THE CUTOVER IS A ROW IN A REAL NOTE NOW (DD-026). It was one SQLite `INSERT` here; the engine
+  // stands down entirely without a readable one (clause 2), so a suite that skipped this would be
+  // testing a stood-down engine rather than the behaviour it names. Far enough back that every
+  // fixture below is inside it; the Cutover's own behaviour is asserted on its own.
+  seedVaultCatalog(vaultRoot, { cutover: '2020-01-01' });
   for (const row of db.listVaultIndex()) db.deleteVaultIndex(row.path);
   db.putEntries(userId, []);
   sync.forgetOwnWrites();
+  // …AND READ IT. Writing the note is not enough: `vaultCutoverInForce()` gates on the index row
+  // saying TT has READ the Catalog, precisely so a cached day cannot outlive the note it came
+  // from. One pass here is what the boot scan does on a real install.
+  await sync.syncVaultCatalog(sync.vaultCatalogConfig());
   sync.setVaultRewriter(null);
 });
 afterEach(() => {
@@ -166,7 +187,7 @@ describe('the vault sync engine', () => {
     const version = db.getVersions(userId).entries;
 
     const counts = await sync.scanVault({
-      readFile: () => Promise.reject(Object.assign(new Error('EACCES'), { code: 'EACCES' })),
+      readFile: onlyFor(notePath(), () => Promise.reject(Object.assign(new Error('EACCES'), { code: 'EACCES' }))),
     });
     expect(counts.unknown).toBe(1);
     const entries = db.getEntries(userId);
@@ -182,7 +203,7 @@ describe('the vault sync engine', () => {
     writeFileSync(notePath(), note([entry('e1', 540, 600, 'three hours of real work')], 4));
     await sync.scanVault();
     const counts = await sync.scanVault({
-      readFile: () => new Promise(() => {}), // never settles — the offline case SB-052 could not test
+      readFile: onlyFor(notePath(), () => new Promise(() => {})), // never settles — SB-052's offline case
       timeoutMs: 20,
     });
     expect(counts.unknown).toBe(1);
@@ -207,9 +228,11 @@ describe('the vault sync engine', () => {
     writeFileSync(notePath(), note([entry('e1', 540, 600, 'evicted')], 4));
     let reads = 0;
     const counts = await sync.scanVault({
-      stat: () => ({ size: 19256, blocks: 0 }), // the real shape of an iCloud eviction
+      stat: (p) => (p === notePath() ? { size: 19256, blocks: 0 } : statSync(p)), // an iCloud eviction
       readFile: (p) => {
-        reads++;
+        // COUNTED FOR THIS NOTE'S PATH ONLY. The scan reads the Catalog too, and that read is not
+        // what this branch is about.
+        if (p === notePath()) reads++;
         return Promise.resolve(readFileSync(p, 'utf8'));
       },
     });
@@ -225,7 +248,7 @@ describe('the vault sync engine', () => {
     // counter would tally a second file and say nothing more about the branch under test.
     let warmReads = 0;
     await sync.scanVault({
-      stat: () => ({ size: 19256, blocks: 40 }),
+      stat: (p) => (p === notePath() ? { size: 19256, blocks: 40 } : statSync(p)),
       readFile: (p) => {
         if (p === notePath()) warmReads++;
         return Promise.resolve(readFileSync(p, 'utf8'));
@@ -293,7 +316,10 @@ describe('the vault sync engine', () => {
   });
 
   it('pre-cutover days are not scanned at all (DD-016 applies to adoption, not only to writes)', async () => {
-    db.db.exec("UPDATE settings SET value = '2026-07-15T09:00:00.000Z' WHERE key = 'shapeStamp'");
+    // The Cutover is a row in the Catalog now, and moving it means rewriting the note and reading
+    // it back — the index row is what `vaultCutoverInForce()` gates on.
+    seedVaultCatalog(vaultRoot, { cutover: '2026-07-15', revision: 2 });
+    await sync.syncVaultCatalog(sync.vaultCatalogConfig());
     writeFileSync(join(dailyDir, '2026-07-10.md'), note([entry('old', 540, 600, 'before TT')], 1, '2026-07-10'));
     writeFileSync(join(dailyDir, '2026-07-20.md'), note([entry('new', 540, 600, 'after TT')], 1));
     await sync.scanVault();

@@ -119,6 +119,10 @@ describe('the SQLite row becomes the Shape stamp', () => {
     // The check that can actually fail. A leftover reader of `vaultCutover` typechecks perfectly
     // if the key is still on the object, and a green suite says nothing about it.
     //
+    // `-w` (whole word), so a NAME that merely contains the old spelling is not a reader of it —
+    // `resolvedVaultCutover` was called `vaultCutoverInForce` for exactly one commit and that is
+    // how this test caught it. The retired thing is the settings KEY.
+    //
     // NOT "the string appears nowhere", which is what the plan's stanza asked for and which is
     // unsatisfiable: a migration that moves the row has to name the row it is moving, and the
     // alternative — orphaning Terje's stamp — is the thing the migration exists to prevent. The
@@ -128,7 +132,7 @@ describe('the SQLite row becomes the Shape stamp', () => {
     /** @param {string[]} paths */
     const filesSaying = (paths) => {
       try {
-        return execFileSync('git', ['grep', '-l', '--', 'vaultCutover', ...paths], {
+        return execFileSync('git', ['grep', '-l', '-w', '--', 'vaultCutover', ...paths], {
           cwd: new URL('..', import.meta.url).pathname,
           encoding: 'utf8',
         })

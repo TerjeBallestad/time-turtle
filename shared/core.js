@@ -265,6 +265,15 @@ TT.vaultBound = function (entry, context) {
   const ctx = context || {};
   if (ctx.shape !== 'personal') return false;
   if (!entry || typeof entry.date !== 'string') return false;
+  // NO READABLE CUTOVER MEANS NOTHING IS THE VAULT'S (DD-026 clause 2). Absence became reachable
+  // the moment the Cutover moved into a file: first boot before the note exists, a quarantined
+  // note, an iCloud-evicted read that times out. TT does not know where this vault's history
+  // starts, so it may not claim any day of it.
+  //
+  // THIS IS WHERE THE TWO PREDICATES STOP BEING COMPLEMENTS. `readOnlyDay` answers a different
+  // question about the same state — may the USER edit this day — and the answer there is yes.
+  // Freezing the whole app because a file could not be read is the option DD-026 rejects by name.
+  if (!String(ctx.cutover || '')) return false;
   return !TT.preCutover(entry.date, ctx) && !TT.frozenSegment(entry.date, ctx);
 };
 
@@ -300,18 +309,24 @@ TT.committedOn = function (date, commits) {
 /**
  * IS THIS DAY OLDER THAN THE VAULT? — `vaultBound`'s cutover clause (DD-016), on its own.
  *
- * Day-grained, and after DD-026 clause 6 the VALUE is a day too — `YYYY-MM-DD`, validated by the
- * Catalog's own allowlist, never an instant. The `slice` survives one task longer than the instant
- * does: at PLAN-017 task 3 this still reads the renamed SQLite row, and task 4 points it at the
- * Catalog. `''` (no Cutover) excludes no history at all. Only `personal` has a cutover — under
- * `team` there is no vault to predate.
+ * A DAY COMPARED AS A DAY, and there is no `.slice(0, 10)` because there is no instant left to
+ * slice (DD-026 clause 6). The Catalog's `cutover` is `YYYY-MM-DD` and its validator refuses
+ * anything else, so the two sides of this `<` are the same kind of thing — which is precisely what
+ * SB-147 was about, and why clause 6 dissolves it rather than fixing it.
+ *
+ * `''` — NO READABLE CUTOVER — excludes no history at all, and that is clause 2's read of the
+ * absent case rather than a fallback. TT does not know where this vault's history starts, so it
+ * says nothing is older than it, and `vaultBound` separately says nothing is the vault's. The two
+ * together are "the user may edit everything, and TT writes nothing", which is the ruling.
+ *
+ * Only `personal` has a cutover — under `team` there is no vault to predate.
  * @param {string} date @param {VaultRuleContext} context @returns {boolean}
  */
 TT.preCutover = function (date, context) {
   const ctx = context || {};
   if (ctx.shape !== 'personal') return false;
   if (typeof date !== 'string') return false;
-  const cutoverDay = String(ctx.cutover || '').slice(0, 10);
+  const cutoverDay = String(ctx.cutover || '');
   return cutoverDay !== '' && date < cutoverDay;
 };
 
@@ -334,11 +349,22 @@ TT.frozenSegment = function (date, context) {
 /**
  * CAN THIS DAY BE TYPED INTO? — DD-017 §1, and the rule the grid and the server both read.
  *
- * Under `personal`, `readOnlyDay` is the EXACT COMPLEMENT of `vaultBound`: editable ⇔ vault-bound.
- * Anything you can type into reaches a daily note; anything that does not reach a daily note you
- * cannot type into. That is not a comment — `tests/core.test.js` executes it over every personal
- * row of its table, because two predicates that agree today and diverge on the first ruling is
- * exactly the failure the one-home discipline exists to prevent.
+ * UNDER `personal` THIS USED TO BE THE EXACT COMPLEMENT OF `vaultBound`, and DD-026 clause 2 ended
+ * that. The complement held only because the Cutover could never be absent — SQLite stamped it the
+ * moment the shape was stored. Moving it into a vault file makes absence reachable, and in that one
+ * state the two questions get different answers:
+ *
+ *     may TT write this day into a note?   NO.  Nothing reaches the vault.
+ *     may the user edit this day?           YES. The app works against SQLite.
+ *
+ * THE RELATION THAT REPLACES IT, and `tests/core.test.js` executes this one: with a readable
+ * Cutover they are still exact complements, and with none, `readOnlyDay` is false everywhere the
+ * ledger does not freeze while `vaultBound` is false everywhere. Stated as a relation over both
+ * branches rather than deleted, because two predicates that agree today and diverge on the first
+ * ruling is exactly the failure the one-home discipline exists to prevent.
+ *
+ * `TT.FROZEN_ENTRY_REFUSAL` therefore never fires for a day frozen by an unreadable Catalog. Its
+ * words are "the day is from before your vault", and that sentence would be false.
  *
  * `ctx.admin` is read by the `team` branch and NOWHERE ELSE, and that is the point of the whole
  * plan: the committed-segment admin exemption (SDD-002 ruling 6) is a `team` concept, and under

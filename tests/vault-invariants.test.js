@@ -12,7 +12,20 @@ import { describe, it, expect, beforeAll, beforeEach, afterEach } from 'vitest';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, chmodSync, rmSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { readFile as readFileAsync } from 'node:fs/promises';
 import TT from '../shared/core.js';
+import { seedVaultCatalog } from './util.js';
+/**
+ * An io injection scoped to ONE path (PLAN-017 task 4).
+ *
+ * `scanVault` reads the Catalog first, and a blanket injection would answer for that read too —
+ * making the Catalog unreadable, which stands the whole daily engine down (DD-026 clause 2). The
+ * test would then pass for the wrong reason: no daily note was scanned at all. Every other path
+ * reads for real.
+ * @param {string} path @param {(p: string) => Promise<string>} fake
+ */
+const onlyFor = (path, fake) => (p) => (p === path ? fake(p) : readFileAsync(p, 'utf8'));
+
 
 /** @type {typeof import('../server/src/vault-sync.js')} */
 let sync;
@@ -89,15 +102,23 @@ beforeAll(async () => {
   userId = user.id;
 });
 
-beforeEach(() => {
+beforeEach(async () => {
   vaultRoot = mkdtempSync(join(tmpdir(), 'tt-invariants-'));
   dailyDir = join(vaultRoot, 'Calendar', 'Daily');
   mkdirSync(dailyDir, { recursive: true });
   db.putSettings({ shape: 'personal', vaultPaths: { root: vaultRoot, daily: 'Calendar/Daily' } });
-  db.db.exec("INSERT INTO settings (key, value) VALUES ('shapeStamp', '2020-01-01T00:00:00.000Z') ON CONFLICT(key) DO UPDATE SET value = excluded.value"); // prettier-ignore
+  // THE CUTOVER IS A ROW IN A REAL NOTE NOW (DD-026). It was one SQLite `INSERT` here; the engine
+  // stands down entirely without a readable one (clause 2), so a suite that skipped this would be
+  // testing a stood-down engine rather than the behaviour it names. Far enough back that every
+  // fixture below is inside it; the Cutover's own behaviour is asserted on its own.
+  seedVaultCatalog(vaultRoot, { cutover: '2020-01-01' });
   for (const row of db.listVaultIndex()) db.deleteVaultIndex(row.path);
   db.putEntries(userId, []);
   sync.forgetOwnWrites();
+  // …AND READ IT. Writing the note is not enough: `vaultCutoverInForce()` gates on the index row
+  // saying TT has READ the Catalog, precisely so a cached day cannot outlive the note it came
+  // from. One pass here is what the boot scan does on a real install.
+  await sync.syncVaultCatalog(sync.vaultCatalogConfig());
 });
 afterEach(() => {
   try {
@@ -149,7 +170,7 @@ describe('invariant 1 — unreadable or absent is UNKNOWN, never EMPTY', () => {
   it('a read that TIMES OUT does exactly the same thing (the offline case SB-052 could not test)', async () => {
     writeFileSync(notePath(), fullNote(THREE, 4));
     await sync.scanVault();
-    const counts = await sync.scanVault({ readFile: () => new Promise(() => {}), timeoutMs: 20 });
+    const counts = await sync.scanVault({ readFile: onlyFor(notePath(), () => new Promise(() => {})), timeoutMs: 20 });
     expect(counts.unknown).toBe(1);
     expect(db.getEntries(userId)).toHaveLength(3);
     expect(db.getVaultIndex(notePath()).state).toBe('unknown');
@@ -170,7 +191,7 @@ describe('invariant 1 — unreadable or absent is UNKNOWN, never EMPTY', () => {
     // side leave the file alone. Without this the whole state would be a comment.
     const md = fullNote(THREE, 4);
     writeFileSync(notePath(), md);
-    await sync.scanVault({ readFile: () => Promise.reject(new Error('EACCES')), timeoutMs: 50 });
+    await sync.scanVault({ readFile: onlyFor(notePath(), () => Promise.reject(new Error('EACCES'))), timeoutMs: 50 });
     expect(db.getVaultIndex(notePath()).state).toBe('unknown');
     const report = await saveThroughStore([entry('later', 900, 960, 'typed in the app')]);
     expect(report.written).toEqual([]);

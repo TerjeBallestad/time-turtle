@@ -5,6 +5,7 @@
 // server on it answers our readiness probes, the real child dies with EADDRINUSE,
 // and the suite fails for the wrong reason (a misleading 401-instead-of-200). See
 // SB-012 — this helper started life inside md-dir-lock.test.js.
+import { mkdirSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { spawn } from 'node:child_process';
 import { resolve, dirname, join } from 'node:path';
@@ -170,33 +171,49 @@ export async function adminOn(port) {
  * care which day it lands on (SB-161).
  *
  * The three suites this was extracted from each wrote a hardcoded `'2026-07-26'`, which was
- * `todayStr()` on the day it was typed and went pre-cutover the next morning: DD-017 §5 stamps
- * `Settings.shapeStamp` at first personal boot, `TT.preCutover` is `date < cutoverDay`, and
- * `frozenEntryRefusal` 403s the PUT before any of those suites' real assertions are reached.
+ * `todayStr()` on the day it was typed and went pre-cutover the next morning: `TT.preCutover` is
+ * `date < cutoverDay` and `frozenEntryRefusal` 403s the PUT before any of those suites' real
+ * assertions are reached.
  *
- * TAKEN FROM THE STAMP, NEVER FROM THE CLOCK, and that is the point rather than a preference.
- * the stamp is an ISO instant in UTC while a local `todayStr()` is a local day, so the two
- * disagree for a couple of hours a night (SB-147) — a `todayStr()` here would go red by the
- * clock again, and intermittently, which is worse than the bug it replaced. `preCutover` is a
- * strict `<`, so the cutover day ITSELF is the nearest day that is never pre-cutover.
+ * TAKEN FROM THE RESOLVED CUTOVER (`AppState.cutover`), which after DD-026 is a `YYYY-MM-DD` day
+ * carried by the vault's Catalog note. `preCutover` is a strict `<`, so the cutover day ITSELF is
+ * the nearest day that is never pre-cutover.
+ *
+ * `''` IS NOT A FAILURE ANY MORE, and that is DD-026 clause 2. It used to be — the old stamp was
+ * written by every path into `personal`, so an unstamped personal install meant the stamp had
+ * moved, and this function said so out loud. The Cutover lives in a file now and its absence is a
+ * ruled state: nothing is pre-cutover, every day is editable, and nothing reaches the vault. So
+ * with no Cutover the clock is the right answer rather than a fallback that hides a fault.
  *
  * It answers the DATE clause only. A day inside a committed segment is frozen by the ledger
  * clause whatever its date (DD-017 §2), so a suite with commits in its data dir must pick its
  * own day — every caller here boots a fresh `mkdtemp` dir with an empty ledger.
- *
- * Under `team` there is no cutover and no freeze at all, so any day does; the clock is used
- * there because nothing can overtake it.
  * @param {any} state the body of a `GET /api/state`
  * @returns {string} a `YYYY-MM-DD` that `frozenEntryRefusal` will not refuse
  */
 export function unfrozenDay(state) {
-  const cutoverDay = String(state?.settings?.shapeStamp || '').slice(0, 10);
-  // Every path into `personal` stamps — the boot (server/src/index.js) and `putSettings`
-  // (server/src/db.js) both — so an unstamped personal install means the stamp moved, and the
-  // fallback below would quietly go back to choosing a day by the clock. Say so instead.
-  if (state?.shape === 'personal')
-    expect(cutoverDay, 'a personal install reported no shape stamp').toMatch(/^\d{4}-\d{2}-\d{2}$/);
-  return cutoverDay || new Date().toISOString().slice(0, 10);
+  const cutoverDay = String(state?.cutover || '');
+  return /^\d{4}-\d{2}-\d{2}$/.test(cutoverDay) ? cutoverDay : new Date().toISOString().slice(0, 10);
+}
+
+/**
+ * Put a Catalog note in a temp vault, carrying a Cutover — the fixture almost every vault suite
+ * needs after DD-026.
+ *
+ * WHY IT EXISTS: the Cutover used to be a SQLite row a test could `INSERT` in one line, and it is
+ * a row in a real note now. Every suite that wants the vault engine RUNNING has to supply one,
+ * because `vaultSyncConfig()` stands down without a readable Cutover (clause 2) — so a suite that
+ * skipped this would not be testing a frozen day, it would be testing a stood-down engine.
+ * @param {string} vaultRoot @param {{ cutover: string, heading?: string, catalog?: string, revision?: number }} opts
+ * @returns {string} the path written
+ */
+export function seedVaultCatalog(vaultRoot, opts) {
+  const rows = [{ key: 'cutover', value: opts.cutover }];
+  if (opts.heading) rows.push({ key: 'timeLogHeading', value: opts.heading });
+  const path = join(vaultRoot, opts.catalog || TT.VAULT_PATHS_DEFAULT.catalog);
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, TT.serializeVaultCatalog({ settings: rows }, { revision: opts.revision || 1 }));
+  return path;
 }
 
 // ---- SB-165 / DD-023: comparing table rows without comparing their padding ----
