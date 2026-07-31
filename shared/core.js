@@ -2835,6 +2835,12 @@ TT.parseVaultCatalog = function (md) {
  *     with the input handed back untouched, rather than reported as a successful write that froze
  *     the note against TT until a human repaired it by hand.
  *
+ * A SECTION THE NOTE DOES NOT HAVE IS BACKFILLED (DD-020 consequence 1, built by PLAN-017 task 2):
+ * emitted at the end of the note, at the same revision as the other three, because the catalog is
+ * the unit of change and a section left one counter behind would quarantine the note on its own
+ * next read. Backfill is NOT adoption — a heading TT can SEE, with no revision line under it, still
+ * refuses. Absent is a fact about the note; present-and-unanchored is a claim TT will not make.
+ *
  * The revision is NOT bumped here: `opts.revision` sets it, and absent, the note's own counter is
  * re-emitted unchanged. When a write bumps it is SB-057's arbitration.
  * @param {string} md @param {{ clients?: Client[], projects?: Project[], tasks?: Task[], settings?: import('./types.ts').VaultCatalogSettingRow[], revision?: number }} catalog
@@ -2855,9 +2861,28 @@ TT.writeVaultCatalog = function (md, catalog, opts) {
   const lines = input.split('\n');
   /** @type {{ start: number, end: number, region: string }[]} */
   const splices = [];
+  /** Sections the note does not have yet — BACKFILL, appended below everything (DD-020 c1). */
+  /** @type {string[]} */
+  const backfills = [];
   for (const section of CATALOG_ORDER) {
     const loc = TT.locateVaultBlock(input, { heading: CATALOG_SECTIONS[section].heading });
-    if (loc.quarantine) return { md: input, quarantine: true, reason: loc.reason, section };
+    if (loc.quarantine) {
+      // BACKFILL, AND ONLY FOR AN ABSENT HEADING. DD-020 c2's boundary on the write side: heading
+      // absent → emit; heading present without an anchor → refuse, because writing over bytes TT
+      // is being asked to describe and cannot is the silent overwrite this layer exists to prevent.
+      //
+      // THE REFUSAL BELOW IS DEFENSIVE, NOT A LIVE GATE, and saying so is more use than implying
+      // otherwise: the whole-note parse at the top of this function has already refused anything
+      // whose heading is present and unreadable, so by here `loc.reason` can only be `no-heading`.
+      // It is kept because that reachability is a property of TWO functions agreeing, and the day
+      // they stop agreeing this is the difference between a refusal and an overwrite of the file
+      // that holds the rates. A deliberate break of it does not redden a test, by construction.
+      if (loc.reason !== 'no-heading') return { md: input, quarantine: true, reason: loc.reason, section };
+      backfills.push(
+        TT.serializeVaultCatalogSection(section, source[section] ?? parsed[section], { revision }),
+      );
+      continue;
+    }
     splices.push({
       start: loc.start,
       end: loc.end,
@@ -2882,7 +2907,12 @@ TT.writeVaultCatalog = function (md, catalog, opts) {
   let out = lines;
   for (const splice of splices.slice().sort((a, b) => b.start - a.start))
     out = out.slice(0, splice.start).concat(splice.region.split('\n'), out.slice(splice.end + 1));
-  const written = out.join('\n');
+  let written = out.join('\n');
+  // A BACKFILL ONLY EVER ADDS BYTES, at the END of the note. Two reasons it goes there rather than
+  // into `CATALOG_ORDER` position: an absent section HAS no position, and inserting one between two
+  // of Terje's paragraphs would be TT deciding where his prose breaks. The note's existing bytes
+  // are not touched at all — not even its trailing blank lines, which are his too.
+  for (const region of backfills) written += (written.endsWith('\n') ? '' : '\n') + '\n' + region + '\n';
 
   // The REASON stays `write-would-corrupt` — that is the class, and SB-057 keys on it — but the
   // SECTION comes from the failed read, because "TT could not read back what it just wrote" is

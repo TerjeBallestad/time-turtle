@@ -21,16 +21,29 @@
 //     an empty catalog → "zero of the four headings is refused and surfaced" failed, 11 others green.
 //   • replaced `TT.vaultCatalogSettings` with `Object.fromEntries(rows)` in `importCatalog` →
 //     "the note cannot reach the three settings that say where the note IS" failed, 11 others green.
+//
+// Task 2, three breaks, and the third is recorded because it did NOT redden anything:
+//   • dropped the payload-digest comparison in `writeVaultCatalogNote` → "a write that moves no
+//     payload is SKIPPED" failed alone, 22 others green.
+//   • made `store.putSettings` always pass `mayCreate: true` → "a settings write that carries
+//     nothing the note owns does NOT create it" failed alone, 22 others green.
+//   • made `TT.writeVaultCatalog` backfill on ANY locate refusal rather than only `no-heading` →
+//     STAYED GREEN. Not a gap in the tests: the whole-note parse at the top of that function has
+//     already refused a heading that is present and unreadable, so the branch is unreachable by
+//     construction. Said out loud at the line rather than left looking like an untested gate.
 import { describe, it, expect, beforeAll, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import TT from '../shared/core.js';
+import { containsRow } from './util.js';
 
 /** @type {typeof import('../server/src/vault-sync.js')} */
 let sync;
 /** @type {typeof import('../server/src/db.js')} */
 let db;
+/** @type {typeof import('../server/src/store.js')} */
+let store;
 
 let vaultRoot = '';
 let catalogPath = '';
@@ -62,6 +75,9 @@ beforeAll(async () => {
   process.env.TT_SHAPE = 'personal'; // config.js reads this at import; the backend derives from it
   db = await import('../server/src/db.js');
   sync = await import('../server/src/vault-sync.js');
+  // The real seam, so the write fan-out is exercised through the code the API layer calls rather
+  // than through a hand-built imitation of it.
+  store = await import('../server/src/store.js');
   const user = db.createUser({ email: 'solo@timeturtle.local', name: 'Solo', role: 'admin', password: 'pw' });
   userId = user.id;
 });
@@ -250,3 +266,167 @@ describe('the catalog note, read', () => {
     expect(db.getVaultIndex(catalogPath).rev).toBe(3);
   });
 });
+
+describe('the catalog note, written', () => {
+  /** The bytes on disk right now. */
+  const onDisk = () => readFileSync(catalogPath, 'utf8');
+
+  it('a client added in the app reaches the note, all four sections at N+1', async () => {
+    writeFileSync(catalogPath, note());
+    await pass(); // TT now knows this note — the `unread` gate needs a confirmed read
+
+    store.putClients([FJELLHEIM, BRYGGA, { id: 'nyk', name: 'Ny Kunde', rate: 700, rounding: 'exact', archived: false }]); // prettier-ignore
+
+    const after = onDisk();
+    expect(containsRow(after, '| nyk | Ny Kunde | 700 | exact |')).toBe(true);
+    // ONE COUNTER, FOUR SECTIONS, all bumped together (DD-020 c4). A section left behind would
+    // quarantine the note as `catalog-revision-mismatch` on its own next read.
+    const revisions = [...after.matchAll(/`revision: (\d+) · /g)].map((m) => +m[1]);
+    expect(revisions).toEqual([4, 4, 4, 4]);
+    expect(TT.parseVaultCatalog(after).quarantine).toBe(false);
+  });
+
+  it("every byte outside the four regions is left alone — above, between and below", async () => {
+    const withProse = note().replace('## Projects', 'a paragraph Terje wrote between two sections\n\n## Projects') + '\nand a closing line of his\n'; // prettier-ignore
+    writeFileSync(catalogPath, withProse);
+    await pass();
+    const before = onDisk();
+
+    store.putClients([FJELLHEIM]);
+
+    const after = onDisk();
+    expect(after).toContain('the rates live here');
+    expect(after).toContain('a paragraph Terje wrote between two sections');
+    expect(after).toContain('and a closing line of his');
+    // and the only lines that moved are inside the four regions — a golden alone cannot see that
+    // TT ate the paragraph above `## Clients`, so the diff is taken line by line
+    const moved = diffLines(before, after);
+    expect(moved.every((line) => line.startsWith('|') || line.startsWith('`revision:'))).toBe(true);
+  });
+
+  it('a section the note lacks is BACKFILLED, at the same N as the rest', async () => {
+    const withoutTemplates = note().replace(TT.serializeVaultCatalogSection('tasks', CATALOG.tasks, { revision: 3 }) + '\n\n', ''); // prettier-ignore
+    writeFileSync(catalogPath, withoutTemplates);
+    await pass();
+    expect(db.getTasks(userId)).toEqual([]);
+
+    store.putTasks(userId, [TEMPLATE]);
+
+    const after = onDisk();
+    expect(after).toContain('## Task templates');
+    expect(containsRow(after, '| standup | Standup | INT |')).toBe(true);
+    const revisions = [...after.matchAll(/`revision: (\d+) · /g)].map((m) => +m[1]);
+    expect(revisions).toEqual([4, 4, 4, 4]);
+    expect(TT.parseVaultCatalog(after).quarantine).toBe(false);
+  });
+
+  it('a heading present with no revision line still refuses — backfill is not adoption', async () => {
+    const unanchored = ['# Time Turtle', '', '## Clients', '', '| Client | Name |', '|---|---|', '| brygga | Brygga Digital |', ''].join('\n'); // prettier-ignore
+    writeFileSync(catalogPath, unanchored);
+    await pass(); // quarantines
+
+    store.putClients([FJELLHEIM]);
+
+    expect(onDisk()).toBe(unanchored); // not one byte
+  });
+
+  it('an absent note is CREATED by the first write that needs it', async () => {
+    expect(existsSync(catalogPath)).toBe(false);
+
+    store.putClients([FJELLHEIM, BRYGGA]);
+
+    expect(existsSync(catalogPath)).toBe(true);
+    const created = TT.parseVaultCatalog(onDisk());
+    expect(created.quarantine).toBe(false);
+    expect(created.revision).toBe(1); // a first write starts at 1
+    expect(created.clients.map((client) => client.id).sort()).toEqual(['brygga', 'fjellheim']); // prettier-ignore
+  });
+
+  it('a settings write that carries nothing the note owns does NOT create it', async () => {
+    // DD-020 c8: creation is lazy and never a boot side-effect. SB-100's boot-time inference is
+    // exactly `putSettings({ shape })`, run because the process started.
+    expect(existsSync(catalogPath)).toBe(false);
+    store.putSettings({ shape: 'personal' });
+    expect(existsSync(catalogPath)).toBe(false);
+    // …and a setting the note DOES own creates it, so the gate is about the key and not about
+    // settings writes in general
+    store.putSettings({ currency: 'NOK' });
+    expect(existsSync(catalogPath)).toBe(true);
+    // ON CELL CONTENT, never on framing (DD-023's fixture rule): the column widths come out of
+    // whatever the widest row happens to be, and a padded literal silently stops matching.
+    expect(containsRow(onDisk(), '| currency | NOK |')).toBe(true);
+  });
+
+  it('a file at the path with zero of the four headings is refused, never created over', async () => {
+    const stranger = '# Groceries\n\n- milk\n- coffee\n';
+    writeFileSync(catalogPath, stranger);
+    await pass();
+
+    store.putClients([FJELLHEIM]);
+
+    expect(onDisk()).toBe(stranger);
+    expect(db.getVaultIndex(catalogPath).state).toBe('quarantined');
+  });
+
+  it('a write that moves no payload is SKIPPED — DD-020 c7, the money file is not rewritten', async () => {
+    writeFileSync(catalogPath, note());
+    await pass();
+    // Terje types a sentence BETWEEN two sections. The file's sha moves; no payload does.
+    const edited = onDisk().replace('## Projects', 'a thought\n\n## Projects');
+    writeFileSync(catalogPath, edited);
+    await pass();
+
+    store.putClients([FJELLHEIM, BRYGGA]); // the same clients already in the note
+
+    expect(onDisk()).toBe(edited); // not rewritten, and no counter moved
+    expect([...onDisk().matchAll(/`revision: (\d+) · /g)].map((m) => +m[1])).toEqual([3, 3, 3, 3]);
+  });
+
+  it('a note that broke on disk SINCE the last scan is refused, not written over', async () => {
+    // The race the `writeEligibility` gate cannot see: the index says `known` because the scan read
+    // a good note, and a human has damaged it since. The write re-parses rather than trusting the
+    // row, because trusting it means splicing four tables over bytes TT has never read.
+    writeFileSync(catalogPath, note());
+    await pass();
+    expect(db.getVaultIndex(catalogPath).state).toBe('known');
+    // A rate changed by hand, leaving the section's fingerprint describing the old bytes. The
+    // structurally-valid, semantically-wrong note DD-009 exists to catch, on the money file.
+    const damaged = onDisk().replace('1150', '9999');
+    writeFileSync(catalogPath, damaged);
+
+    store.putClients([FJELLHEIM]);
+
+    expect(onDisk()).toBe(damaged); // not one byte
+    const row = db.getVaultIndex(catalogPath);
+    expect(row.state).toBe('quarantined');
+    expect(row.quarantineReason).toBe('digest-mismatch');
+    expect(row.quarantineSection).toBe('clients');
+  });
+
+  it("TT's own write does not come back through the watcher as an import", async () => {
+    writeFileSync(catalogPath, note());
+    await pass();
+    store.putClients([FJELLHEIM]);
+    const version = db.getVersions(userId).catalog;
+    // The watcher's pass, with the echo record in place.
+    expect(await pass({ viaWatcher: true })).toBe('echo');
+    expect(db.getVersions(userId).catalog).toBe(version);
+  });
+
+  it('the note TT writes is one TT reads back with no change at all', async () => {
+    store.putClients([FJELLHEIM, BRYGGA]);
+    store.putProjects([TUR, INT]);
+    const written = onDisk();
+    // The round-trip that pins the format: a scan straight after a write takes the cheap exit,
+    // rather than re-importing bytes TT just emitted.
+    expect(await pass()).toBe('skip');
+    expect(onDisk()).toBe(written);
+  });
+});
+
+/** The lines that differ between two notes, in either direction. */
+function diffLines(before, after) {
+  const a = new Set(before.split('\n'));
+  const b = new Set(after.split('\n'));
+  return [...before.split('\n').filter((line) => !b.has(line)), ...after.split('\n').filter((line) => !a.has(line))];
+}

@@ -39,13 +39,23 @@
 
 import { activeCapabilities, activeBackend } from './backend.js';
 import { writeMirror, retireMirrors } from './markdown.js';
-import { getEntries as storedEntries, putEntries as putStoredEntries, afterCommit } from './db.js';
-import { writeVaultEntries } from './vault-write.js';
+import {
+  getEntries as storedEntries,
+  putEntries as putStoredEntries,
+  afterCommit,
+  putClients as putStoredClients,
+  putProjects as putStoredProjects,
+  putTasks as putStoredTasks,
+  putSettings as putStoredSettings,
+  renameProjectCode as renameStoredProjectCode,
+  renameClientId as renameStoredClientId,
+} from './db.js';
+import TT from '../../shared/core.js';
+import { writeVaultEntries, scheduleVaultCatalogWrite } from './vault-write.js';
 
 export {
   // settings
   getSettings,
-  putSettings,
   getStoredShape,
   // SB-100 / DD-016: the cutover stamp. On the seam because SB-057's vault store is the thing
   // that will READ it — the write filter that keeps pre-cutover entries out of the vault.
@@ -54,14 +64,11 @@ export {
   // something a boot does. On the seam for the same reason the stamp is — it writes the catalog
   // and entries through the store's own operations, so the vault implementation inherits it.
   seedDemoContent,
-  // catalog
+  // catalog. The PUT half of every one of these fans out to the catalog note — see below.
   getClients,
-  putClients,
   getProjects,
-  putProjects,
   // per-user task templates (SDD-002)
   getTasks,
-  putTasks,
   // entries. `getEntries` stays a straight re-export under BOTH shapes: DD-006's "SQLite is the
   // derived index" is the architecture, so reading the index IS reading the vault, provided the
   // sync engine keeps it in step. A filesystem read on every GET /api/state would re-read 85 notes
@@ -89,9 +96,6 @@ export {
   // SDD-002 ruling 7: the never-referenced true-delete guards
   projectCodeReferenced,
   clientReferenced,
-  // DC-005 / SB-087: the server-reconciled renames — one transaction each, so nothing dangles
-  renameProjectCode,
-  renameClientId,
   // atomicity
   transaction,
 } from './db.js';
@@ -129,6 +133,74 @@ export function putEntries(userId, entries) {
   const before = storedEntries(userId);
   putStoredEntries(userId, entries);
   afterCommit(() => writeVaultEntries(userId, entries, before));
+}
+
+// ---- the catalog fan-out (PLAN-017 task 2, DD-020) ----
+//
+// The same shape as the per-date fan-out above, one file over: under `vault` a catalog change
+// writes SQLite exactly as it always did and THEN writes `Time Turtle.md`. Under `sqlite` these
+// are byte-for-byte the old `db.*` functions and there is no branch anyone can forget — which is
+// the argument this file already makes twice, for the mirror and for the daily notes.
+//
+// SIX CALL SITES, NOT ONE. Every way the catalog changes goes through here: the three tables, the
+// settings, and the two server-reconciled renames. A rename that skipped this would move a project
+// code in SQLite and leave the note naming the old one — a dangling reference in the file that
+// resolves the rates, which is exactly what `catalog-dangling-client` refuses to import.
+//
+// THE WRITE IS COALESCED AND DEFERRED. One `PUT /api/state` can touch clients, projects, templates
+// and settings inside one transaction, and they are all one note; `scheduleVaultCatalogWrite`
+// queues one write for after the COMMIT. The reason it must not run inside the transaction is the
+// one spelled out for `putEntries` above, and it is the serious one: a throw later in the same
+// transaction rolls SQLite back while the note is already fsynced on disk.
+//
+// `mayCreate` IS PASSED, NEVER INFERRED (DD-020 c8). Creation is lazy — TT authors the note from
+// the first write that NEEDS it — and "a person added a client" is not distinguishable from "the
+// boot stored a shape" once you are inside the writer. A settings write carries the permission
+// only when it actually carries a setting the note owns.
+/** @param {import('../../shared/types.ts').Client[]} clients */
+export function putClients(clients) {
+  putStoredClients(clients);
+  if (activeBackend() === 'vault') scheduleVaultCatalogWrite({ mayCreate: true });
+}
+/** @param {import('../../shared/types.ts').Project[]} projects */
+export function putProjects(projects) {
+  putStoredProjects(projects);
+  if (activeBackend() === 'vault') scheduleVaultCatalogWrite({ mayCreate: true });
+}
+/** @param {number} userId @param {import('../../shared/types.ts').Task[]} tasks */
+export function putTasks(userId, tasks) {
+  putStoredTasks(userId, tasks);
+  if (activeBackend() === 'vault') scheduleVaultCatalogWrite({ mayCreate: true });
+}
+/**
+ * @param {Partial<Omit<import('../../shared/types.ts').Settings, 'vaultPaths'>> & { vaultPaths?: Partial<import('../../shared/types.ts').VaultPaths> }} settings
+ */
+export function putSettings(settings) {
+  putStoredSettings(settings);
+  if (activeBackend() !== 'vault') return;
+  // A settings write may CREATE the note only when it carries a setting the note owns. Without
+  // that gate, SB-100's boot-time shape inference — `putSettings({ shape: 'team' })`, run because
+  // the process started — would materialise a file in somebody's vault.
+  const owned = TT.VAULT_CATALOG_SETTING_KEYS.some(
+    (key) => /** @type {Record<string, unknown>} */ (settings || {})[key] != null,
+  );
+  scheduleVaultCatalogWrite({ mayCreate: owned });
+}
+// Both renames RETURN, and the return is not decoration: the project rename hands back the user
+// ids whose entries and templates it re-pointed (the routes mirror each of them), and the client
+// rename hands back how many projects moved. A wrapper that swallowed either would leave the
+// mirror silently un-rewritten for every affected user.
+/** @param {string} from @param {string} to @returns {number[]} */
+export function renameProjectCode(from, to) {
+  const affected = renameStoredProjectCode(from, to);
+  if (activeBackend() === 'vault') scheduleVaultCatalogWrite({ mayCreate: true });
+  return affected;
+}
+/** @param {string} from @param {string} to @returns {number} */
+export function renameClientId(from, to) {
+  const moved = renameStoredClientId(from, to);
+  if (activeBackend() === 'vault') scheduleVaultCatalogWrite({ mayCreate: true });
+  return moved;
 }
 
 // ---- the markdown mirror, as a CAPABILITY OF THE STORE (SB-056 / DD-011) ----

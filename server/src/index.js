@@ -30,8 +30,15 @@ import { shapePreflight, strandingBannerLines } from './shape-preflight.js';
 // SB-057: the sync engine. Imported here and nowhere else in the API layer — the routes have no
 // business knowing the vault is being watched, and the only thing this file does with it is start
 // it once the server is answering.
-import { startVaultSync, scanVault, vaultSyncConfig, forgetOwnWrites, setVaultRewriter } from './vault-sync.js';
-import { rewriteVaultDate, setVaultCheckpointHook } from './vault-write.js';
+import {
+  startVaultSync,
+  scanVault,
+  vaultSyncConfig,
+  forgetOwnWrites,
+  setVaultRewriter,
+  setVaultCatalogRewriter,
+} from './vault-sync.js';
+import { rewriteVaultDate, rewriteVaultCatalog, setVaultCheckpointHook } from './vault-write.js';
 import { vaultCheckpoint } from './vault-checkpoint.js';
 
 // SB-057: the two arbitration verdicts that need a WRITE are handed back to the writer HERE, at
@@ -41,6 +48,9 @@ setVaultRewriter((date, rev) => {
   const config = vaultSyncConfig();
   if (config) rewriteVaultDate(config.userId, date, rev);
 });
+// PLAN-017 task 2: the catalog's half of the same seam, registered at the same place for the same
+// reason. It takes no date — the Catalog is state that is not a day (TERM-004).
+setVaultCatalogRewriter((rev) => rewriteVaultCatalog(rev));
 
 // SB-068: and the same trick for the checkpoint. The writer owns the WHEN (its first write of a
 // calendar day, which is the only place that moment exists — `tt serve` runs detached for weeks,

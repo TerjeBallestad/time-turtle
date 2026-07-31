@@ -426,6 +426,199 @@ function writeOneDate(date, entries, path, config, report, revisionOverride) {
   report.written.push(date);
 }
 
+// ============================================================================================
+// THE CATALOG WRITER (PLAN-017 task 2, DD-020)
+// ============================================================================================
+//
+// The same three rules as the daily writer above, on the one file that holds the rates:
+//
+//   1. THE SAME PRIMITIVE. `writeVaultFile` — stage, fsync, rename — and the same per-day
+//      checkpoint. Nothing here opens a file itself.
+//   2. DIFF BEFORE WRITING, and here the diff is DD-020 consequence 7 by name: the catalog's
+//      payload digest is one number over the four sections' own digests, so a sentence typed
+//      BETWEEN two sections moves the file's sha and moves no payload. Without the check, typing
+//      that sentence rewrites the money file and takes a git checkpoint for it.
+//   3. REFUSALS NEVER FAIL THE SAVE. The SQLite write has committed by the time a byte is written
+//      here; a note that will not write is a note that has stopped syncing.
+//
+// AND ONE RULE THE DAILY WRITER DOES NOT HAVE — CREATION IS LAZY AND NEVER A BOOT SIDE-EFFECT
+// (DD-020 consequence 8). `mayCreate` is threaded from the CALLER rather than inferred here,
+// because the difference between "a person added a client" and "the boot stored a shape" is not
+// visible from inside this function, and a boot that materialises a file in somebody's vault is
+// the bug PLAN-010's end-gate review already had to fix once.
+//
+// ABSENT IS A FACT ABOUT THE FILESYSTEM; EMPTY IS A FACT ABOUT A NOTE TT HAS READ. A file present
+// at the path that locates zero of the four headings is refused and surfaced, never created over.
+
+/** Coalesces the catalog write to ONE per commit — four store wrappers, one note. */
+let catalogWritePending = false;
+/**
+ * Queue the catalog note's write for after the commit. Called by the store's catalog wrappers.
+ *
+ * COALESCED, because one `PUT /api/state` can write clients, projects, templates and settings in
+ * one transaction and they are all one note. Four queued writes would be three no-op re-reads and
+ * — worse — three chances to bump the counter for nothing.
+ * @param {{ mayCreate?: boolean }} [opts]
+ */
+export function scheduleVaultCatalogWrite(opts) {
+  if (opts && opts.mayCreate) catalogMayCreate = true;
+  if (catalogWritePending) return;
+  catalogWritePending = true;
+  db.afterCommit(() => {
+    const mayCreate = catalogMayCreate;
+    catalogWritePending = false;
+    catalogMayCreate = false;
+    writeVaultCatalogNote({ mayCreate });
+  });
+}
+let catalogMayCreate = false;
+
+/**
+ * Write the catalog note from what SQLite now holds. Never throws.
+ * @param {{ mayCreate?: boolean, revisionOverride?: number }} [opts]
+ * @returns {{ written: boolean, skipped: boolean, refused: string | null }}
+ */
+export function writeVaultCatalogNote(opts) {
+  /** @type {{ written: boolean, skipped: boolean, refused: string | null }} */
+  const report = { written: false, skipped: false, refused: null };
+  const config = vaultSyncConfig();
+  if (!config) return report;
+  const path = config.catalogPath;
+  const row = db.getVaultIndex(path);
+  const eligibility = writeEligibility(path, row);
+  if (eligibility === 'quarantined') {
+    report.refused = row && row.quarantineReason ? String(row.quarantineReason) : 'quarantined';
+    return report;
+  }
+  // A file TT has not confirmed reading is not TT's to splice into — the same gate the daily
+  // writer applies, and for the same reason. The next scan claims it.
+  if (eligibility === 'unread' && (!opts || opts.revisionOverride == null)) {
+    keepRow(path, '', row, { state: 'unknown' });
+    report.refused = 'unread';
+    return report;
+  }
+
+  /** @type {string | null} */
+  let current = null;
+  try {
+    current = readNoteForWrite(path);
+  } catch (err) {
+    keepRow(path, '', row, { state: 'unknown' });
+    report.refused = /** @type {Error} */ (err).message;
+    console.error(`[time-turtle] could not read ${path} to write it: ${report.refused}`);
+    return report;
+  }
+  // CREATION IS THE CALLER'S TO AUTHORISE. An absent note plus a write that is not a catalog
+  // change is simply nothing to do.
+  if (current == null && !(opts && opts.mayCreate)) return report;
+
+  const catalog = catalogFromStore(config.userId, current);
+  /** @type {string} */
+  let out;
+  if (current == null) {
+    // A vault with no catalog note at all. TT authors the whole file, starting at revision 1 —
+    // the same first-write counter `serializeVaultCatalogSection` defaults to.
+    out = TT.serializeVaultCatalog(catalog, { revision: 1 });
+  } else {
+    const parsed = TT.parseVaultCatalog(current);
+    if (parsed.quarantine) {
+      // Including the zero-of-four case, which is how a mistyped `vaultPaths.catalog` pointed at
+      // an innocent note stays an innocent note.
+      keepRow(path, '', row, { state: 'quarantined', quarantineReason: parsed.reason, quarantineSection: parsed.section }); // prettier-ignore
+      report.refused = String(parsed.reason);
+      return report;
+    }
+    // DD-020 c7 — DID ANY PAYLOAD MOVE? Serialize at the note's CURRENT revision and compare the
+    // catalog's payload digest. At rev+1 every section would differ by the counter alone and the
+    // check could never fire, which is how one keystroke rewrites the money file.
+    const atCurrentRev = TT.writeVaultCatalog(current, catalog, { revision: parsed.revision });
+    if (!atCurrentRev.quarantine) {
+      const wouldBe = TT.parseVaultCatalog(atCurrentRev.md);
+      if (!wouldBe.quarantine && wouldBe.payloadDigest === parsed.payloadDigest) {
+        report.skipped = true;
+        return report;
+      }
+    }
+    const revision = opts && opts.revisionOverride != null ? opts.revisionOverride : parsed.revision + 1;
+    const written = TT.writeVaultCatalog(current, catalog, { revision });
+    if (written.quarantine) {
+      keepRow(path, '', row, { state: 'quarantined', quarantineReason: written.reason, quarantineSection: written.section }); // prettier-ignore
+      report.refused = String(written.reason);
+      console.error(`[time-turtle] catalog write refused: ${written.reason}`);
+      return report;
+    }
+    out = written.md;
+  }
+  if (current != null && out === current) {
+    report.skipped = true;
+    return report;
+  }
+
+  checkpointIfFirstWriteOfDay();
+  writeVaultFile(path, out);
+  const sha = fileSha(out);
+  const after = TT.parseVaultCatalog(out);
+  // The echo record, so TT's own write does not come back through the catalog watcher as an
+  // import. A de-duplication convenience and nothing more — the index's sha already makes the
+  // next SCAN take the cheap exit.
+  noteOwnWrite(path, sha, after.quarantine ? null : after.revision);
+  const now = new Date().toISOString();
+  db.putVaultIndex(
+    /** @type {VaultIndexRow} */ ({
+      path,
+      date: '', // the Catalog is state that is not a day (TERM-004)
+      state: 'known',
+      rev: after.quarantine ? null : after.revision,
+      payloadDigest: after.quarantine ? null : after.payloadDigest,
+      fileSha: sha,
+      verified: true, // TT always writes a digest into every section (DD-009)
+      quarantineReason: null,
+      quarantineSection: null,
+      seenAt: now,
+      writtenAt: now,
+    }),
+  );
+  report.written = true;
+  console.log(`[time-turtle] catalog write: ${path} → revision ${after.quarantine ? '?' : after.revision}`);
+  return report;
+}
+
+/**
+ * The catalog TT would write, read out of SQLite.
+ *
+ * THE SETTINGS ROWS COME FROM `TT.vaultCatalogSettingRows` AND NOTHING ELSE. Its own header says
+ * so in capitals: a caller that builds rows out of `Object.entries(settings)` writes `vaultPaths`
+ * into the synced note, which is the bootstrap loop the allowlist exists to prevent. The note's
+ * OWN unknown rows are handed back in as `carried`, so a key written by a newer TT survives this
+ * TT's read-write cycle untouched.
+ * @param {number} userId @param {string | null} current the note's bytes, or null when absent
+ * @returns {{ clients: any[], projects: any[], tasks: any[], settings: any[] }}
+ */
+function catalogFromStore(userId, current) {
+  const parsed = current == null ? null : TT.parseVaultCatalog(current);
+  const carried = parsed && !parsed.quarantine ? parsed.settings : [];
+  return {
+    clients: db.getClients(),
+    projects: db.getProjects(),
+    tasks: db.getTasks(userId),
+    settings: TT.vaultCatalogSettingRows(db.getSettings(), carried),
+  };
+}
+
+/**
+ * The catalog's half of the rewriter seam — the arbitration verdicts that need a WRITE rather than
+ * an import. Registered on the sync engine at boot, which keeps the dependency running one way.
+ * @param {number} rev
+ */
+export function rewriteVaultCatalog(rev) {
+  try {
+    const report = writeVaultCatalogNote({ revisionOverride: rev });
+    if (report.refused) console.error(`[time-turtle] catalog rewrite refused: ${report.refused}`);
+  } catch (err) {
+    console.error(`[time-turtle] catalog rewrite failed: ${/** @type {Error} */ (err).message}`);
+  }
+}
+
 /**
  * The two arbitration verdicts that need a WRITE rather than an import — `import-and-rewrite` and
  * `rewrite-from-index`. Registered on the sync engine at boot (server/src/index.js), which is what
