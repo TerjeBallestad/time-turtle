@@ -1252,9 +1252,12 @@ export interface TTModule {
    * both halves already being symmetric. Every `:` in the task portion and in the project
    * prefix is escaped, so a label like `Meeting: standup` cannot invent a project.
    *
-   * A project with a `vaultNote` writes `[[CODE]]` — the CODE in the brackets, resolved by an
-   * alias in that note, unlike the legacy `Project` column which brackets the note NAME. So
-   * DECODE NEEDS NO CATALOG: the code is already in the cell.
+   * A project with a `vaultNote` writes the INLINE-ALIAS link `[[Lifelines\|LIFE]]` (Terje,
+   * 2026-08-03, overriding SDD-004's `[[CODE]]`). Obsidian RENDERS it as `LIFE`, so the reader sees
+   * the code and only the source is longer; the link resolves by note NAME, so the project note
+   * needs no `aliases` frontmatter; and a rename keeps the display text, so the code survives it.
+   * The separator is written `\|` because it sits inside one cell. DECODE NEEDS NO CATALOG: the
+   * code is in the cell either way. The plain `[[CODE]]` form is still read, never written.
    */
   encodeMergedTaskCell(v: { project?: string | null; label?: string; note?: string }, projects?: Project[]): string;
   decodeMergedTaskCell(cell: string): { project: string | null; label: string; note: string };

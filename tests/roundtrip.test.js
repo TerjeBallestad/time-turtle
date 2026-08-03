@@ -823,11 +823,16 @@ describe('vault merged Task-cell codec (SDD-004)', () => {
     expect(TT.encodeMergedTaskCell({ project: 'INT', label: 'Agentic workflows', note: '' })).toBe(
       'INT:Agentic workflows',
     );
-    // a project with a vault note writes `[[CODE]]` — the CODE in the brackets, resolved by an
-    // alias in the project note, NOT the note name (that is the legacy `Project` column's form)
+    // a project with a vault note writes the INLINE-ALIAS link (Terje, 2026-08-03, overriding
+    // SDD-004's `[[CODE]]`): Obsidian RENDERS it as `LIFE`, the link resolves by note NAME so the
+    // project note needs no `aliases` frontmatter, and a rename keeps the display text
     expect(TT.encodeMergedTaskCell({ project: 'LIFE', label: 'Game Design', note: 'Card hand' }, PROJECTS)).toBe(
-      '[[LIFE]]:Game Design<br>- Card hand',
+      '[[Lifelines Tycoon\\|LIFE]]:Game Design<br>- Card hand',
     );
+    // the `|` is escaped because it lives INSIDE one cell — an unescaped one would split the row
+    expect(
+      TT.splitCells('| ' + TT.encodeMergedTaskCell({ project: 'LIFE', label: 'x' }, PROJECTS) + ' |'),
+    ).toHaveLength(3);
     // a project whose note TT does not have stays a bare code even WITH a catalog
     expect(TT.encodeMergedTaskCell({ project: 'INT', label: 'Agentic workflows', note: '' }, PROJECTS)).toBe(
       'INT:Agentic workflows',
@@ -866,6 +871,13 @@ describe('vault merged Task-cell codec (SDD-004)', () => {
   const HAND_WRITTEN = [
     { cell: 'LIFE:Game Design', v: { project: 'LIFE', label: 'Game Design', note: '' } },
     { cell: 'LIFE:Game Design<br>- Card hand', v: { project: 'LIFE', label: 'Game Design', note: 'Card hand' } },
+    { cell: '[[Lifelines\\|LIFE]]:Game Design', v: { project: 'LIFE', label: 'Game Design', note: '' } },
+    // a note name ending in a backslash, which emits `\\` immediately before the separator. This
+    // round-trips under either scan; it is here to pin the SHAPE, not to claim a bug is caught —
+    // an unescaped `|` could never reach the codec, because it would have split the row first.
+    { cell: '[[C\\\\\\|LIFE]]:x', v: { project: 'LIFE', label: 'x', note: '' } },
+    // the `[[CODE]]` form SDD-004 first specified: never written to disk, but still READ, so
+    // anything produced between b6b8a22 and this ruling keeps parsing
     { cell: '[[LIFE]]:Game Design', v: { project: 'LIFE', label: 'Game Design', note: '' } },
     { cell: 'LIFE:', v: { project: 'LIFE', label: '', note: '' } },
     { cell: 'LIFE:- Card hand', v: { project: 'LIFE', label: '', note: 'Card hand' } },
@@ -2426,21 +2438,65 @@ describe('the four-column daily block (SDD-004)', () => {
     expect(lines.slice(0, -1)).toEqual([
       '## Time Log',
       '',
-      '| Time        | Mode   | Task                                | $      |',
-      '| ----------- | ------ | ----------------------------------- | ------ |',
-      '| 13:00→16:00 | #deep  | [[LIFE]]:Game Design<br>- Card hand | ✓      |',
-      '| 16:00→16:30 | #learn | INT:Agentic workflows               | 0      |',
-      '| **3.5h**    |        |                                     | **3h** |',
+      '| Time        | Mode   | Task                                                  | $      |',
+      '| ----------- | ------ | ----------------------------------------------------- | ------ |',
+      '| 13:00→16:00 | #deep  | [[Lifelines Tycoon\\|LIFE]]:Game Design<br>- Card hand | ✓      |',
+      '| 16:00→16:30 | #learn | INT:Agentic workflows                                 | 0      |',
+      '| **3.5h**    |        |                                                       | **3h** |',
       '',
     ]);
     expect(lines[lines.length - 1]).toMatch(/^`revision: 1 · [0-9a-f]{4}`$/);
   });
 
-  it('is 71 characters wide where the five-column block was 81 — the measured reason for the change', () => {
-    const width = (md) => Math.max(...md.split('\n').filter((l) => l.startsWith('|')).map((l) => l.length)); // prettier-ignore
-    expect(width(TT.serializeVaultBlock(DAY, { revision: 1, projects: PROJECTS }))).toBe(71);
+  // THE TRADE, both halves asserted, because Terje's 2026-08-03 ruling accepts one to buy the other.
+  // SDD-004 picked `[[CODE]]` to keep the SOURCE narrow. The ruling overrides that: what a person
+  // reads is the RENDERED table, where the link shows only its display text, and the source width of
+  // a table you are looking at in Obsidian is not something anyone reads.
+  const width = (md) => Math.max(...md.split('\n').filter((l) => l.startsWith('|')).map((l) => l.length)); // prettier-ignore
+
+  it('narrows what is RENDERED — the link displays the bare code, so the reader sees `LIFE:`', () => {
+    // Obsidian renders `[[target\|display]]` as `display`. Rendering the block that way is what the
+    // reader actually gets, and it is where the merged column pays off: 67 against the five-column
+    // shape, whose Project cell renders as the NOTE NAME and is wider still.
+    const render = (md) => md.replace(/\[\[.*?\\\|(.*?)\]\]/g, '$1').replace(/\[\[(.*?)\]\]/g, '$1');
+    const rendered = render(TT.serializeVaultBlock(DAY, { revision: 1, projects: PROJECTS }));
+    expect(rendered).toContain('LIFE:Game Design<br>- Card hand');
+    expect(rendered).not.toContain('Lifelines Tycoon'); // the note name is not what you read
+    // the same day with no catalog is the floor: a bare code, and the narrowest the shape gets
+    expect(width(TT.serializeVaultBlock(DAY, { revision: 1 }))).toBe(67);
+  });
+
+  it('widens what is STORED, and that is the accepted cost — 89 source characters against 81', () => {
+    // Recorded as a fact, not a target. `[[Lifelines Tycoon\|LIFE]]` is 26 source characters where
+    // the bare code is 4, and `vaultAlignedTable` pads the column to the longest SOURCE cell.
+    expect(width(TT.serializeVaultBlock(DAY, { revision: 1, projects: PROJECTS }))).toBe(89);
     const five = TT.serializeVaultBlock(DAY, { revision: 1, headers: ['Time', 'Mode', 'Project', 'Task', 'Bill'] });
     expect(width(five)).toBe(81);
+  });
+
+  it('TT pads `\\|` exactly as Obsidian does — measured, not assumed', () => {
+    // SDD-004's REAL objection to the inline alias, and the one Terje's ruling does not dissolve by
+    // itself: `vaultAlignedTable` counts `\|` as two code units, and if Obsidian counted one the
+    // note would ping-pong on every write (DD-023's whole reason for existing).
+    //
+    // Terje's own vault settles it. `Calendar/Daily/2026-02-09.md` is an OBSIDIAN-aligned table
+    // whose Project column holds `[[Projects/Lifelines/Lifelines\|Lifelines]]` — 43 source
+    // characters — and Obsidian padded that column to 43, every row exactly 105 wide. So the two
+    // agree. This pins TT's half of that agreement.
+    const CELL = '[[Projects/Lifelines/Lifelines\\|Lifelines]]';
+    expect(CELL).toHaveLength(43);
+    const md = TT.serializeVaultBlock([E({ start: 540, end: 810, project: 'X', label: 'M3 spec', tags: ['#deep'] })], {
+      revision: 1,
+      headers: ['Time', 'Task'],
+      projects: [{ code: 'X', name: 'X', clientId: null, vaultNote: 'Projects/Lifelines/Lifelines' }],
+    });
+    const row = md.split('\n').find((l) => l.includes('M3 spec'));
+    expect(row).toContain('[[Projects/Lifelines/Lifelines\\|X]]:M3 spec');
+    // and the escaped `|` does NOT split the row — still the cell count the header declares
+    expect(TT.splitCells(row.trim().slice(1, -1))).toHaveLength(2);
+    // every row padded to the same width, which is what a re-pad by either side must reproduce
+    const rows = md.split('\n').filter((l) => l.startsWith('|'));
+    expect(new Set(rows.map((r) => r.length)).size).toBe(1);
   });
 
   it('round-trips the new shape — parse gives back the entries that were written', () => {

@@ -1079,6 +1079,60 @@ function vaultProjectCode(cell, projects) {
 const MERGE_DELIM = ':';
 /** @param {string} s already \-escaped by the layers below @returns {string} */
 const escapeMergeDelim = (s) => (s.indexOf(MERGE_DELIM) < 0 ? s : s.split(MERGE_DELIM).join('\\' + MERGE_DELIM));
+// THE INLINE-ALIAS WIKILINK, `[[Lifelines\|LIFE]]` — Terje's ruling on 2026-08-03, overriding
+// SDD-004's `[[CODE]]`. Obsidian RENDERS this as `LIFE`, so the reader sees the code and only the
+// source is longer. The source width was one of SDD-004's two objections and it is the weaker one:
+// nobody reads the raw bytes of a table they are looking at in Obsidian.
+//
+// SDD-004's OTHER objection was real and is now MEASURED rather than assumed. It said `\|` puts
+// DD-023's padding math on unverified ground, because `vaultAlignedTable` counts `\|` as two code
+// units and nobody knew what Obsidian counts when it re-aligns. Terje's own vault answered it:
+// `Calendar/Daily/2026-02-09.md` is an Obsidian-aligned table whose Project column holds
+// `[[Projects/Lifelines/Lifelines\|Lifelines]]`, and Obsidian padded that column to 43 — the raw
+// source length, `\|` counted as two, every row exactly 105 characters. TT computes the same 43.
+// The two agree, so there is no re-pad ping-pong. (And even had they disagreed, DD-023 half 2
+// makes the digest compare NORMALISED text, so a padding difference cannot quarantine a day —
+// it could only have churned bytes.)
+//
+// TWO PROBLEMS DISSOLVE WITH IT. The link resolves by NOTE NAME, so the project note needs no
+// `aliases` frontmatter — GAP-001's unresolved link cannot happen. And when Obsidian rewrites the
+// target on a rename it keeps the display text, so the code survives a rename, which `[[CODE]]`
+// could not.
+//
+// THE SEPARATOR IS WRITTEN `\|` BECAUSE IT IS INSIDE ONE CELL. `|` is the row delimiter, so an
+// unescaped one would split the row. It is structure at the wikilink layer and escaped at the cell
+// layer, which is why it is composed AFTER both fields go through `encodeCell` (SB-122's order),
+// and why the reader below finds it BEFORE anything is decoded.
+const ALIAS_SEP = '\\|';
+/**
+ * A note name and a code as one finished, ESCAPED `[[note\|code]]` cell. Escape first, compose after.
+ * @param {string} note @param {string} code @returns {string}
+ */
+const encodeAliasedWikilink = (note, code) => '[[' + TT.encodeCell(note) + ALIAS_SEP + TT.encodeCell(code) + ']]';
+/**
+ * A project prefix — `[[note\|code]]`, `[[code]]` or a bare code — back to the CODE. Reads structure
+ * off the STILL-ESCAPED bytes, then decodes, which is the one order this file allows (SB-122).
+ *
+ * The alias separator is an ESCAPED `|`, and it is found with `isEscapedAt` rather than `indexOf`.
+ * BE HONEST ABOUT WHY: the two cannot disagree here, because an UNESCAPED `|` would have split the
+ * row back in `vaultRowCells` and never reached this function as one cell. So this is not a bug
+ * fix, it is using the file's own primitive for "is this delimiter live" instead of a second rule
+ * that happens to agree. Do not add a test claiming it catches something — it does not, and a
+ * mutation to `indexOf` stays green on purpose.
+ *
+ * A prefix with no separator is the `[[CODE]]` form SDD-004 originally specified — still read, so
+ * anything written between b6b8a22 and this ruling keeps parsing.
+ * @param {string} raw still escaped @returns {string}
+ */
+function readProjectPrefix(raw) {
+  const m = WIKILINK_RE.exec(raw);
+  if (!m) return TT.decodeCell(raw);
+  const inner = m[1];
+  for (let i = 0; i < inner.length; i++) {
+    if (inner[i] === '|' && isEscapedAt(inner, i)) return TT.decodeCell(inner.slice(i + 1));
+  }
+  return TT.decodeCell(inner);
+}
 /**
  * Encode a project/label/note triple into ONE merged vault `Task` cell. `projects` is the same
  * opt-in catalog the `Project` column takes: absent, or a project it does not claim, writes the
@@ -1100,7 +1154,7 @@ TT.encodeMergedTaskCell = function (v, projects) {
   const project = projects && projects.find((candidate) => candidate.code === code);
   let prefix;
   if (project && project.vaultNote) {
-    prefix = encodeWikilink(code);
+    prefix = encodeAliasedWikilink(project.vaultNote, code);
   } else {
     // A BARE CODE THAT ALREADY LOOKS LIKE A LINK GETS ESCAPED, the same way a label beginning
     // `- ` does one layer down. Decode reads `[[…]]` as structure and hands back the inner text,
@@ -1123,10 +1177,9 @@ TT.decodeMergedTaskCell = function (cell) {
   const parts = TT.splitUnescaped(cell == null ? '' : String(cell), MERGE_DELIM);
   if (parts.length < 2) return { project: null, ...TT.decodeTaskCell(parts[0]) };
   const raw = parts[0];
-  // the prefix is read as STRUCTURE before it is decoded (SB-122's order), so `[[…]]` is peeled
-  // off the still-escaped bytes and only the inner code goes through `decodeCell`
-  const linked = readWikilink(raw);
-  const project = raw === '' ? null : linked === null ? TT.decodeCell(raw) : linked;
+  // the prefix is read as STRUCTURE before it is decoded (SB-122's order): the brackets and the
+  // `\|` alias separator are peeled off the still-escaped bytes, and only the code is decoded
+  const project = raw === '' ? null : readProjectPrefix(raw);
   return { project, ...TT.decodeTaskCell(parts.slice(1).join(MERGE_DELIM)) };
 };
 
