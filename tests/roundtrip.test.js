@@ -49,7 +49,7 @@
 // ## Verified red-green: 2026-07-27
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
-import TT, { VAULT_BLOCK_QUARANTINE_REASONS } from '../shared/core.js';
+import TT, { VAULT_BLOCK_QUARANTINE_REASONS, VAULT_HEADER_VOCABULARY } from '../shared/core.js';
 import { containsRow } from './util.js';
 
 // ---- V1 fixture (byte-identical to the pre-SDD-002 golden) ----
@@ -2325,18 +2325,35 @@ describe('vault block — end-gate review regressions (SB-055)', () => {
   // SB-044 (settings-extended vocabulary) and SB-059 (Entry.tags removes `mode` from the
   // passthrough) each have to edit both. This is the guard: every column TT can READ must
   // also be one TT can WRITE, or the block gains a column on read it cannot emit.
+  // THE COLUMN LIST IS IMPORTED, NOT RE-DECLARED (PLAN-018 task 3). It used to be a hand-kept
+  // copy of the five columns, and SDD-004 walked straight past it: `$` joined the vocabulary and
+  // this guard — the one whose whole job is "every column TT can read is one TT can write" — went
+  // on checking five columns and stayed green. That is the same failure SB-109 fixed for the
+  // quarantine reasons, so it gets the same fix. A new word in the vocabulary with no sample here
+  // now fails loudly instead of being quietly uncovered.
   it('every vocabulary column round-trips — a column TT can read is one TT can write', () => {
-    const SAMPLES = { Time: '30m', Mode: '#deep', Project: '[[Home]]', Task: 'Tidying', Bill: '✓' };
-    const columns = ['Time', 'Mode', 'Project', 'Task', 'Bill'];
-    for (const column of columns) {
-      expect(SAMPLES[column], `no sample value for the column ${column} — add one`).toBeTruthy();
-      const header = column === 'Time' ? '| Time |' : `| Time | ${column} |`;
-      const row = column === 'Time' ? '| 30m |' : `| 30m | ${SAMPLES[column]} |`;
-      const totals = column === 'Bill' ? '| **0.5h** | **0.5h billable** |' : column === 'Time' ? '| **0.5h** |' : '| **0.5h** | **0.5h billable** |'; // prettier-ignore
+    /** key → the header label and one sample cell for it */
+    const SAMPLES = {
+      time: { label: 'Time', cell: '30m' },
+      mode: { label: 'Mode', cell: '#deep' },
+      project: { label: 'Project', cell: '[[Home]]' },
+      task: { label: 'Task', cell: 'Tidying' },
+      bill: { label: 'Bill', cell: '✓' },
+      $: { label: '$', cell: '✓' },
+    };
+    expect(Object.keys(SAMPLES).sort(), 'the vocabulary changed — add a sample column here').toEqual([...VAULT_HEADER_VOCABULARY].sort()); // prettier-ignore
+    for (const key of VAULT_HEADER_VOCABULARY) {
+      const { label, cell } = SAMPLES[key];
+      const header = key === 'time' ? '| Time |' : `| Time | ${label} |`;
+      const row = key === 'time' ? '| 30m |' : `| 30m | ${cell} |`;
+      // the billable total's label follows the COLUMN (SDD-004): ` billable` under `Bill`, bare
+      // under `$`. With neither, it falls back to the last column and keeps the word.
+      const billTotal = key === '$' ? '**0.5h**' : '**0.5h billable**';
+      const totals = key === 'time' ? '| **0.5h** |' : `| **0.5h** | ${billTotal} |`;
       const md = note(header, [row, totals]);
       const parsed = TT.parseVaultBlock(md);
-      expect(parsed.quarantine, column).toBe(false);
-      expect(TT.writeVaultBlock(md, parsed.entries).md, column).toBe(md);
+      expect(parsed.quarantine, key).toBe(false);
+      expect(TT.writeVaultBlock(md, parsed.entries).md, key).toBe(md);
     }
   });
 });
@@ -2813,6 +2830,48 @@ describe('the four-column daily block (SDD-004)', () => {
     expect(parsed.quarantine).toBe(false);
     expect(parsed.entries[0].project).toBe('LIFE'); // from the Project column, not from the colon
     expect(parsed.entries[0].label).toBe('Meeting: standup'); // the colon is content here
+  });
+
+  // ---- PLAN-018 task 3: the degenerate header set's routing, asserted rather than incidental ----
+  // `| Time | Task |` has no `project` column, so its Task cells now split on a colon. Several
+  // tests in this file use exactly that shape, and the danger they carry is specific: such a test
+  // does NOT go red when the routing changes under it, it changes meaning silently. All nine
+  // pre-existing Project-less fixtures were enumerated and every Task cell in them was checked —
+  // `Checkout flow`, `**urgent** fixes`, `Checkout`, `**urgent**`, `Tidying`, and two empties, none
+  // with a colon — so none decodes differently under either branch. These two tests make that
+  // routing a claim instead of a coincidence.
+  it('a bare `| Time | Task |` block takes the MERGED branch — a colon there IS a project', () => {
+    const md = [
+      '## Time Log',
+      '',
+      '| Time | Task |',
+      '|---|---|',
+      '| 30m | LIFE:Tidying |',
+      '| **0.5h** | **0.5h billable** |',
+      '',
+      '`revision: 1`',
+    ].join('\n');
+    const parsed = TT.parseVaultBlock(md, { date: '2026-08-03' });
+    expect(parsed.quarantine).toBe(false);
+    expect(parsed.entries[0]).toMatchObject({ project: 'LIFE', label: 'Tidying', durMin: 30 });
+    // and it is closed: writing it back reproduces the same cell
+    expect(containsRow(TT.writeVaultBlock(md, parsed.entries, { date: '2026-08-03' }).md, '| 30m | LIFE:Tidying |')).toBe(true); // prettier-ignore
+  });
+
+  it('an ESCAPED colon in that same shape is content, and stays content across a write', () => {
+    const md = [
+      '## Time Log',
+      '',
+      '| Time | Task |',
+      '|---|---|',
+      '| 30m | Meeting\\: standup |',
+      '| **0.5h** | **0.5h billable** |',
+      '',
+      '`revision: 1`',
+    ].join('\n');
+    const parsed = TT.parseVaultBlock(md, { date: '2026-08-03' });
+    expect(parsed.entries[0]).toMatchObject({ project: null, label: 'Meeting: standup' });
+    expect(containsRow(TT.writeVaultBlock(md, parsed.entries, { date: '2026-08-03' }).md, '| 30m | Meeting\\: standup |')).toBe(true); // prettier-ignore
   });
 });
 

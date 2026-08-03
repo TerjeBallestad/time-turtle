@@ -1707,7 +1707,13 @@ const VAULT_COLUMNS = ['Time', 'Mode', 'Task', '$'];
 // `description` are the forbidden words and the guard for them lives in tests/roundtrip.test.js.
 // SDD-004 added exactly one word, `$`, measured against the live vault on 2026-08-03: of 91 daily
 // notes, none uses `$` as a header, and the parse verdict for all 91 is identical before and after.
-const VAULT_KEYS = ['time', 'mode', 'project', 'task', 'bill', '$'];
+// EXPORTED so the round-trip guard in tests/roundtrip.test.js is driven by the list itself rather
+// than by a hand-kept copy of it. Same reason SB-109 exported the quarantine reasons: a guard that
+// re-declares what it guards goes stale silently, and this particular list going stale is how a
+// column TT can READ ends up being one TT cannot WRITE. SDD-004 is the case in point — `$` was
+// added here, and the hand-kept copy in that guard did not notice.
+export const VAULT_HEADER_VOCABULARY = /** @type {const} */ (['time', 'mode', 'project', 'task', 'bill', '$']);
+const VAULT_KEYS = VAULT_HEADER_VOCABULARY;
 const BILL_YES = '✓'; // U+2713. SB-045: `✓` or blank — never `—`, and nothing else parses.
 // The `$` column's own two spellings (SDD-004). It is NOT `bill` renamed: `bill` spells
 // non-billable as a BLANK cell, `$` spells it `0`. Both columns refuse the other's vocabulary
