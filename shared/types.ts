@@ -1246,6 +1246,19 @@ export interface TTModule {
   encodeTaskCell(v: { label?: string; note?: string }): string;
   decodeTaskCell(cell: string): { label: string; note: string };
   /**
+   * SDD-004: the MERGED `Task` cell — `Project` folded into `Task`, joined by the first
+   * unescaped `:` (`LIFE:Game Design<br>- Card hand`). The project codec COMPOSED with
+   * encodeTaskCell/decodeTaskCell, which are untouched: DD-014's losslessness here rests on
+   * both halves already being symmetric. Every `:` in the task portion and in the project
+   * prefix is escaped, so a label like `Meeting: standup` cannot invent a project.
+   *
+   * A project with a `vaultNote` writes `[[CODE]]` — the CODE in the brackets, resolved by an
+   * alias in that note, unlike the legacy `Project` column which brackets the note NAME. So
+   * DECODE NEEDS NO CATALOG: the code is already in the cell.
+   */
+  encodeMergedTaskCell(v: { project?: string | null; label?: string; note?: string }, projects?: Project[]): string;
+  decodeMergedTaskCell(cell: string): { project: string | null; label: string; note: string };
+  /**
    * SB-059: the vault `Mode` column's codec — `Entry.tags` ⇄ one cell. Composes on top of
    * encodeCell exactly as encodeTaskCell does, with the space as its structural delimiter
    * instead of `<br>`: a tag containing a space is escaped, so it cannot become two tags.

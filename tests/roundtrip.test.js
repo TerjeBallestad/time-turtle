@@ -756,6 +756,155 @@ describe('vault Task-cell codec (SB-045)', () => {
   });
 });
 
+// ---- SDD-004 / PLAN-018 task 1: the MERGED `Task` cell codec ----
+// SDD-004 folds the `Project` column into `Task`, joined by a colon: `LIFE:Game Design<br>- Card
+// hand`. The merged cell is the project codec COMPOSED with the task codec above, and the task
+// codec is untouched — that composition is the whole losslessness argument for DD-014, so both
+// halves being already-symmetric is what makes the composition symmetric.
+//
+// The delimiter is the FIRST UNESCAPED `:`. Absent, the whole cell is a task and the entry has no
+// project. Every `:` in the encoded task portion and in the project prefix is written `\:`, and the
+// encoder inserts exactly one unescaped `:` as the joint.
+//
+// WITHOUT THE ESCAPE RULE the label `Meeting: standup` decodes as project `Meeting`, label
+// `standup` — an entry filed against a project that does not exist. That is the failure this
+// suite exists to prevent, and it is the same class `core.js:936` names one layer down
+// (`#deep work` silently becoming two tags).
+//
+// A HAND-WRITTEN CELL IS THE REAL INPUT. A daily note holds bytes a person typed, not bytes the
+// encoder produced, so the decode half is seeded from raw cells below and not only from
+// round-trips of our own output.
+// ## Verified red-green: 2026-08-03
+describe('vault merged Task-cell codec (SDD-004)', () => {
+  /** A project with a vault note renders `[[CODE]]`; the code resolves via an alias in that note. */
+  const PROJECTS = [
+    { code: 'LIFE', name: 'Lifelines', clientId: null, vaultNote: 'Lifelines Tycoon' },
+    { code: 'INT', name: 'Internal', clientId: null, vaultNote: null },
+  ];
+  // DECODE TAKES NO CATALOG, and that is the point of the `[[CODE]]` form over `[[Note|CODE]]`:
+  // the code is in the brackets, so reading a merged cell never has to resolve anything.
+  /** @param {{project: string|null, label: string, note: string}} v @param {any[]} [projects] */
+  const cycle = (v, projects) => TT.decodeMergedTaskCell(TT.encodeMergedTaskCell(v, projects));
+
+  // SDD-004's case table, in full.
+  const CASES = [
+    { name: 'project + label + note', v: { project: 'LIFE', label: 'Game Design', note: 'Card hand' } },
+    { name: 'project + note, no label', v: { project: 'LIFE', label: '', note: 'Card hand' } },
+    { name: 'project, no label, no note', v: { project: 'LIFE', label: '', note: '' } },
+    { name: 'no project, a colon in the label', v: { project: null, label: 'Meeting: standup', note: '' } },
+    { name: 'project, a colon in the label', v: { project: 'LIFE', label: 'Meeting: standup', note: '' } },
+    { name: 'no project, note only', v: { project: null, label: '', note: 'Card hand' } },
+    { name: 'no project, label only', v: { project: null, label: 'Game Design', note: '' } },
+    { name: 'nothing at all', v: { project: null, label: '', note: '' } },
+    { name: 'a colon in the NOTE', v: { project: 'INT', label: 'Standup', note: 'ratio 3:1 today' } },
+    { name: 'a colon in the project code', v: { project: 'A:B', label: 'Work', note: '' } },
+    { name: 'a pipe and a backslash across all three', v: { project: 'C\\D', label: 'a|b', note: 'c\\d' } },
+    { name: 'a <br> in the label, with a project', v: { project: 'LIFE', label: 'The <br> tag', note: 'x' } },
+    { name: 'a label that begins with "- ", with a project', v: { project: 'LIFE', label: '- odd', note: 'n' } },
+    { name: 'everything at once', v: { project: 'A:B', label: '- a|b <br> c: d', note: '- e\\f <br> g: h' } },
+  ];
+
+  for (const { name, v } of CASES) {
+    it(`round-trips ${name}`, () => {
+      expect(cycle(v)).toEqual(v);
+    });
+    it(`round-trips ${name} — with a catalog (the linked prefix)`, () => {
+      expect(cycle(v, PROJECTS)).toEqual(v);
+    });
+  }
+
+  it('emits SDD-004’s exact bytes for the shapes in its shape table', () => {
+    expect(TT.encodeMergedTaskCell({ project: 'LIFE', label: 'Game Design', note: 'Card hand' })).toBe(
+      'LIFE:Game Design<br>- Card hand',
+    );
+    expect(TT.encodeMergedTaskCell({ project: 'INT', label: 'Agentic workflows', note: '' })).toBe(
+      'INT:Agentic workflows',
+    );
+    // a project with a vault note writes `[[CODE]]` — the CODE in the brackets, resolved by an
+    // alias in the project note, NOT the note name (that is the legacy `Project` column's form)
+    expect(TT.encodeMergedTaskCell({ project: 'LIFE', label: 'Game Design', note: 'Card hand' }, PROJECTS)).toBe(
+      '[[LIFE]]:Game Design<br>- Card hand',
+    );
+    // a project whose note TT does not have stays a bare code even WITH a catalog
+    expect(TT.encodeMergedTaskCell({ project: 'INT', label: 'Agentic workflows', note: '' }, PROJECTS)).toBe(
+      'INT:Agentic workflows',
+    );
+    // project with nothing else: the joint is still written, so the project survives
+    expect(TT.encodeMergedTaskCell({ project: 'LIFE', label: '', note: '' })).toBe('LIFE:');
+    // no project at all: byte-identical to what encodeTaskCell alone would emit
+    expect(TT.encodeMergedTaskCell({ project: null, label: 'Game Design', note: 'Card hand' })).toBe(
+      'Game Design<br>- Card hand',
+    );
+    expect(TT.encodeMergedTaskCell({ project: null, label: '', note: '' })).toBe('');
+  });
+
+  it('escapes every colon in the task portion, and inserts exactly ONE unescaped joint', () => {
+    const cell = TT.encodeMergedTaskCell({ project: 'LIFE', label: 'Meeting: standup', note: 'ratio 3:1' });
+    expect(cell).toBe('LIFE:Meeting\\: standup<br>- ratio 3\\:1');
+    expect(TT.splitUnescaped(cell, ':')).toHaveLength(2); // exactly one live delimiter
+  });
+
+  it('a colon in the label does NOT invent a project', () => {
+    // the failure this codec exists to prevent: `Meeting: standup` filed against a project
+    // called `Meeting`, which does not exist
+    const cell = TT.encodeMergedTaskCell({ project: null, label: 'Meeting: standup', note: '' });
+    expect(cell).toBe('Meeting\\: standup');
+    expect(TT.decodeMergedTaskCell(cell)).toEqual({ project: null, label: 'Meeting: standup', note: '' });
+  });
+
+  // The decode half seeded from bytes a PERSON typed, never through the encoder. This is what a
+  // daily note actually contains, and it is the only evidence that reading a real note works.
+  const HAND_WRITTEN = [
+    { cell: 'LIFE:Game Design', v: { project: 'LIFE', label: 'Game Design', note: '' } },
+    { cell: 'LIFE:Game Design<br>- Card hand', v: { project: 'LIFE', label: 'Game Design', note: 'Card hand' } },
+    { cell: '[[LIFE]]:Game Design', v: { project: 'LIFE', label: 'Game Design', note: '' } },
+    { cell: 'LIFE:', v: { project: 'LIFE', label: '', note: '' } },
+    { cell: 'LIFE:- Card hand', v: { project: 'LIFE', label: '', note: 'Card hand' } },
+    { cell: 'Game Design', v: { project: null, label: 'Game Design', note: '' } },
+    { cell: '- Card hand', v: { project: null, label: '', note: 'Card hand' } },
+    { cell: '', v: { project: null, label: '', note: '' } },
+    // only the FIRST unescaped colon is the delimiter — the rest is content a hand edit left raw,
+    // exactly as decodeTaskCell treats a second raw `<br>`
+    { cell: 'LIFE:Meeting: standup', v: { project: 'LIFE', label: 'Meeting: standup', note: '' } },
+    // a stray LEADING joint: no project was written, so there is none
+    { cell: ':Game Design', v: { project: null, label: 'Game Design', note: '' } },
+  ];
+  for (const { cell, v } of HAND_WRITTEN) {
+    it(`decodes the hand-written cell ${JSON.stringify(cell)}`, () => {
+      expect(TT.decodeMergedTaskCell(cell)).toEqual(v);
+    });
+  }
+
+  it('a hand-written cell normalises then holds steady — no drift on the second write', () => {
+    for (const { cell } of HAND_WRITTEN) {
+      const once = TT.encodeMergedTaskCell(TT.decodeMergedTaskCell(cell));
+      const twice = TT.encodeMergedTaskCell(TT.decodeMergedTaskCell(once));
+      expect(twice).toBe(once);
+    }
+  });
+
+  it('a cell the encoder produced is ALREADY normalised (no drift on first re-write)', () => {
+    for (const { v } of CASES) {
+      for (const projects of [undefined, PROJECTS]) {
+        const encoded = TT.encodeMergedTaskCell(v, projects);
+        expect(TT.encodeMergedTaskCell(TT.decodeMergedTaskCell(encoded), projects)).toBe(encoded);
+      }
+    }
+  });
+
+  it('leaves TT.encodeTaskCell / TT.decodeTaskCell untouched — the task half is composed, not rewritten', () => {
+    // DD-014's losslessness rests on both halves already being symmetric. If the merged codec
+    // reached into the task codec, that argument would have to be re-made from scratch.
+    expect(TT.encodeTaskCell({ label: 'Meeting: standup', note: '' })).toBe('Meeting: standup');
+    expect(TT.decodeTaskCell('Meeting: standup')).toEqual({ label: 'Meeting: standup', note: '' });
+  });
+
+  it('composes with the cell escaping — a merged cell is still ONE table cell', () => {
+    const cell = TT.encodeMergedTaskCell({ project: 'a|b', label: 'c|d', note: 'e|f' });
+    expect(cell.split(/(?<!\\)\|/)).toHaveLength(1);
+  });
+});
+
 // ---- SB-055 / PLAN-009 task 2: locate the block, or refuse ----
 // The safety half of the format, and the reason it is proven BEFORE anything parses a row:
 // this function is what stands between a malformed daily note and TT overwriting Terje's

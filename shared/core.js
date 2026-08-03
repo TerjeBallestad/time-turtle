@@ -1046,6 +1046,73 @@ function vaultProjectCode(cell, projects) {
   return TT.decodeCell(cell);
 }
 
+// ---- vault MERGED `Task` cell codec (SDD-004) ----
+// SDD-004 folds `Project` into `Task`, joined by a colon: `LIFE:Game Design<br>- Card hand`.
+// The merged cell is the project codec COMPOSED with the Task codec above, and `TT.encodeTaskCell`
+// / `TT.decodeTaskCell` are untouched. That is deliberate and load-bearing: DD-014's losslessness
+// argument for this cell is that both halves are ALREADY symmetric, so the composition is too.
+// Reach into the task half and that argument has to be re-made from scratch.
+//
+// DELIMITER: the first unescaped `:`. Absent, the whole cell is a task and the entry has no
+// project. Every `:` in the encoded task portion and in the project prefix is written `\:`, and
+// the encoder inserts exactly ONE unescaped `:` as the joint. Same three-layer shape `<br>`
+// already uses one level down (escape the fields FIRST, then this cell's own delimiter).
+//
+// WHY THE ESCAPE IS NOT OPTIONAL. `TT.encodeCell` does not escape `:`. Without the rule the label
+// `Meeting: standup` decodes as project `Meeting`, label `standup` — an entry filed against a
+// project that does not exist. `core.js:936` names this same class one layer down (`#deep work`
+// silently becoming two tags). No new primitive is needed for it: `TT.splitUnescaped` already
+// skips escaped delimiters and `TT.decodeCell` already unescapes `\X → X` for any X.
+//
+// THE BRACKETS HOLD THE CODE HERE, NOT THE NOTE NAME — the one place this differs from the legacy
+// `Project` column above (`vaultProjectCell`, which brackets `Project.vaultNote`). A merged cell
+// with a linked project writes `[[LIFE]]`, and `LIFE` resolves through an ALIAS in the project
+// note. SDD-004 measured why: the alternative that keeps both the link and the note name is
+// `[[Lifelines\|LIFE]]`, which is 82 characters against today's 81 — wider than the two columns it
+// replaces, so it defeats the change — and `\|` would put DD-023's padding math on unverified
+// ground. The cost is that a missing alias shows as an unresolved link in Obsidian, which TT
+// cannot fix because it does not own that note's frontmatter (GAP-001).
+//
+// CONSEQUENCE WORTH NAMING: decode needs NO catalog. The code is in the brackets, so reading a
+// merged cell resolves nothing — unlike `vaultProjectCode`, which needs `projects` to map a note
+// name back to a code.
+const MERGE_DELIM = ':';
+/** @param {string} s already \-escaped by the layers below @returns {string} */
+const escapeMergeDelim = (s) => (s.indexOf(MERGE_DELIM) < 0 ? s : s.split(MERGE_DELIM).join('\\' + MERGE_DELIM));
+/**
+ * Encode a project/label/note triple into ONE merged vault `Task` cell. `projects` is the same
+ * opt-in catalog the `Project` column takes: absent, or a project it does not claim, writes the
+ * bare code — which is exactly what a note carries when TT has no catalog to resolve against.
+ * @param {{ project?: string | null, label?: string, note?: string }} v
+ * @param {Project[]} [projects]
+ * @returns {string}
+ */
+TT.encodeMergedTaskCell = function (v, projects) {
+  const task = escapeMergeDelim(TT.encodeTaskCell({ label: v.label, note: v.note }));
+  const code = v.project || '';
+  if (!code) return task; // no project ⇒ byte-identical to the task codec alone
+  const project = projects && projects.find((candidate) => candidate.code === code);
+  const prefix = project && project.vaultNote ? encodeWikilink(code) : TT.encodeCell(code);
+  return escapeMergeDelim(prefix) + MERGE_DELIM + task;
+};
+/**
+ * Reverse of encodeMergedTaskCell. Only the FIRST unescaped `:` is the delimiter; any further one
+ * is content a hand edit left raw, and is carried into the task portion — the same reading
+ * `decodeTaskCell` gives a second raw `<br>`. An EMPTY prefix (a stray leading `:`) means no
+ * project was written, so there is none.
+ * @param {string} cell @returns {{ project: string | null, label: string, note: string }}
+ */
+TT.decodeMergedTaskCell = function (cell) {
+  const parts = TT.splitUnescaped(cell == null ? '' : String(cell), MERGE_DELIM);
+  if (parts.length < 2) return { project: null, ...TT.decodeTaskCell(parts[0]) };
+  const raw = parts[0];
+  // the prefix is read as STRUCTURE before it is decoded (SB-122's order), so `[[…]]` is peeled
+  // off the still-escaped bytes and only the inner code goes through `decodeCell`
+  const linked = readWikilink(raw);
+  const project = raw === '' ? null : linked === null ? TT.decodeCell(raw) : linked;
+  return { project, ...TT.decodeTaskCell(parts.slice(1).join(MERGE_DELIM)) };
+};
+
 // ---- vault block region (SB-055) ----
 // This is the thing standing between a malformed daily note and TT overwriting Terje's
 // Intentions, Habits, Captures and Reflection. It locates the block or REFUSES; it never
