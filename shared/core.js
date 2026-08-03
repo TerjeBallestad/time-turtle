@@ -1090,7 +1090,13 @@ const escapeMergeDelim = (s) => (s.indexOf(MERGE_DELIM) < 0 ? s : s.split(MERGE_
 TT.encodeMergedTaskCell = function (v, projects) {
   const task = escapeMergeDelim(TT.encodeTaskCell({ label: v.label, note: v.note }));
   const code = v.project || '';
-  if (!code) return task; // no project ⇒ byte-identical to the task codec alone
+  // No project ⇒ the joint is not written. NOT byte-identical to `encodeTaskCell` alone, though:
+  // the colon escape runs unconditionally and has to, because a cell is read back without knowing
+  // what wrote it — an unescaped colon in a project-less cell would decode as a project on the next
+  // read. THE COST, named because this file names its costs: every colon a person types into a
+  // four-column Task cell comes back as a literal `\:` in the note. `\|` and `\<br>` are rare in
+  // real text; a colon in a label is not. SB-175 is the gate that judges whether that is tolerable.
+  if (!code) return task;
   const project = projects && projects.find((candidate) => candidate.code === code);
   let prefix;
   if (project && project.vaultNote) {
@@ -1713,16 +1719,37 @@ const VAULT_COLUMNS = ['Time', 'Mode', 'Task', '$'];
 // column TT can READ ends up being one TT cannot WRITE. SDD-004 is the case in point — `$` was
 // added here, and the hand-kept copy in that guard did not notice.
 // Deliberately NOT `/** @type {const} */` — unlike the quarantine reasons, this list is READ
-// against arbitrary header text (`VAULT_KEYS.includes(key)`), so narrowing it to a literal tuple
-// makes every such check a type error.
-/** @type {string[]} */
+// against arbitrary header text (`includes(key)` on a plain string), so narrowing it to a literal
+// tuple makes every such check a type error. `readonly` instead: the check still compiles, and the
+// one thing standing between adoption and Terje's 80 pre-cutover notes cannot be pushed to by an
+// importer.
+/** @type {readonly string[]} */
 export const VAULT_HEADER_VOCABULARY = ['time', 'mode', 'project', 'task', 'bill', '$'];
-const VAULT_KEYS = VAULT_HEADER_VOCABULARY;
 const BILL_YES = '✓'; // U+2713. SB-045: `✓` or blank — never `—`, and nothing else parses.
 // The `$` column's own two spellings (SDD-004). It is NOT `bill` renamed: `bill` spells
 // non-billable as a BLANK cell, `$` spells it `0`. Both columns refuse the other's vocabulary
 // rather than guessing, because this cell decides money.
 const DOLLAR_NO = '0';
+/**
+ * SDD-004's gate: does this block's `Task` column carry the merged project-and-task cell, or just
+ * label-and-note? ONE DEFINITION, because the parser and the serializer both ask it and a block
+ * read merged but written unmerged loses the project out of the note — or worse, reads a label's
+ * colon as a project. That is the drift this file keeps unifying away: `TOTALS_CELL_RE` is shared
+ * by detection and emission "which is what makes them one decision", and `normaliseVaultPayloadLine`
+ * is exported so the writer cannot grow a second normaliser. Two copies that merely agree today is
+ * the same shape of mistake.
+ *
+ * It is keyed on the ABSENCE of `project`, never on the presence of `$`. The merged codec exists
+ * precisely because there is no separate project column, so that is the direct condition; keying on
+ * `$` would be a coincidence of SDD-004 and would break the moment a block carries one without the
+ * other. This is SB-045's "the header row is the schema" applied one level down.
+ *
+ * Computed ONCE PER BLOCK from the header row, never per cell. A degenerate header set like
+ * `| Time | Task |` has no `project` column, so it falls on the merged side and its Task cells
+ * split on a colon.
+ * @param {string[]} keys the block's header row, lowercased @returns {boolean}
+ */
+const isMergedTaskColumn = (keys) => !keys.includes('project');
 /**
  * Parse a note that ALREADY carries both anchors, or propagate the locator's verdict. The
  * adoption-aware entry point is `TT.parseVaultBlock` below, which is this function plus the
@@ -1744,19 +1771,11 @@ function parseAnchoredBlock(md, opts) {
   const keys = [];
   for (const label of headers) {
     const key = label.toLowerCase();
-    if (!VAULT_KEYS.includes(key)) return vaultQuarantine('unknown-header');
+    if (!VAULT_HEADER_VOCABULARY.includes(key)) return vaultQuarantine('unknown-header');
     if (keys.includes(key)) return vaultQuarantine('duplicate-header');
     keys.push(key);
   }
-  // SDD-004's gate, computed ONCE per block from the header row rather than per cell. It is keyed
-  // on the ABSENCE of `project`, never on the presence of `$`: the merged codec exists precisely
-  // because there is no separate project column, so that is the direct condition. Keying on `$`
-  // would be a coincidence of one change and would break the moment a block carries one without
-  // the other. This is SB-045's "the header row is the schema" applied one level down.
-  //
-  // A DEGENERATE HEADER SET FALLS ON THE MERGED SIDE. `| Time | Task |` has no `project` column,
-  // so its Task cells split on a colon.
-  const merged = !keys.includes('project');
+  const merged = isMergedTaskColumn(keys); // SDD-004 — see the predicate for why it keys on `project`
 
   /** @type {VaultEntry[]} */
   const entries = [];
@@ -2105,8 +2124,7 @@ TT.serializeVaultBlock = function (entries, opts) {
   const timeSeparator = (opts && opts.timeSeparator) || undefined; // absent ⇒ `unicode`, today's bytes
   const projects = (opts && opts.projects) || undefined; // absent ⇒ the bare project code
   const keys = headers.map((label) => label.toLowerCase());
-  // SDD-004's gate, the same condition the parser computes and for the same reason — read it there
-  const merged = !keys.includes('project');
+  const merged = isMergedTaskColumn(keys); // SDD-004 — the SAME predicate the parser calls, by construction
 
   // CELLS, not finished lines — `vaultAlignedTable` cannot know a column's width until the last
   // row is in hand, so the rows are collected and emitted together at the end (DD-023 half 1).

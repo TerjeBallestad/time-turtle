@@ -834,10 +834,16 @@ describe('vault merged Task-cell codec (SDD-004)', () => {
     );
     // project with nothing else: the joint is still written, so the project survives
     expect(TT.encodeMergedTaskCell({ project: 'LIFE', label: '', note: '' })).toBe('LIFE:');
-    // no project at all: byte-identical to what encodeTaskCell alone would emit
+    // no project at all: the joint is not written, so colon-free content is byte-identical to
+    // what encodeTaskCell alone would emit
     expect(TT.encodeMergedTaskCell({ project: null, label: 'Game Design', note: 'Card hand' })).toBe(
       'Game Design<br>- Card hand',
     );
+    // …but it is NOT byte-identical in general, and this is the case that says so. The colon
+    // escape runs whether or not there is a project, because a cell is read back without knowing
+    // what wrote it — leave it off and this label decodes as the project `Meeting` on the next read.
+    expect(TT.encodeMergedTaskCell({ project: null, label: 'Meeting: standup' })).toBe('Meeting\\: standup');
+    expect(TT.encodeTaskCell({ label: 'Meeting: standup' })).toBe('Meeting: standup'); // the layer below
     expect(TT.encodeMergedTaskCell({ project: null, label: '', note: '' })).toBe('');
   });
 
@@ -871,6 +877,15 @@ describe('vault merged Task-cell codec (SDD-004)', () => {
     { cell: 'LIFE:Meeting: standup', v: { project: 'LIFE', label: 'Meeting: standup', note: '' } },
     // a stray LEADING joint: no project was written, so there is none
     { cell: ':Game Design', v: { project: null, label: 'Game Design', note: '' } },
+    // THE WAY A PERSON ACTUALLY TYPES IT — a space after the colon. The space is content, so the
+    // codec keeps it and is a fixed point over it (asserted below). It disappears one layer up:
+    // `putEntries` trims every label on every write path (server/src/db.js, SB-075), so the stored
+    // label is `Game Design` and the next write emits `LIFE:Game Design`. That is a NORMALISATION
+    // with precedent — `decodeTaskCell` strips one `- ` prefix and `decodeTagsCell` collapses a run
+    // of spaces — and it converges after one write instead of drifting. Pinned because it was
+    // unasserted, and an unasserted normalisation is indistinguishable from a bug that eats a byte.
+    { cell: 'LIFE: Game Design', v: { project: 'LIFE', label: ' Game Design', note: '' } },
+    { cell: 'Meeting: standup', v: { project: 'Meeting', label: ' standup', note: '' } },
   ];
   for (const { cell, v } of HAND_WRITTEN) {
     it(`decodes the hand-written cell ${JSON.stringify(cell)}`, () => {
@@ -884,6 +899,15 @@ describe('vault merged Task-cell codec (SDD-004)', () => {
       const twice = TT.encodeMergedTaskCell(TT.decodeMergedTaskCell(once));
       expect(twice).toBe(once);
     }
+  });
+
+  it('the codec keeps a hand-typed space after the colon — the trim is the DB layer’s, not this one’s', () => {
+    // Which matters for locating the behaviour: a reader chasing the vanished space must not come
+    // looking here. `LIFE: Game Design` is a fixed point through the codec, in both directions.
+    expect(TT.encodeMergedTaskCell(TT.decodeMergedTaskCell('LIFE: Game Design'))).toBe('LIFE: Game Design');
+    // …and once the label has been through `putEntries`, which trims it, the cell converges on the
+    // spelling SDD-004's shape table shows — after ONE write, not drifting further on the next.
+    expect(TT.encodeMergedTaskCell({ project: 'LIFE', label: 'Game Design' })).toBe('LIFE:Game Design');
   });
 
   it('a cell the encoder produced is ALREADY normalised (no drift on first re-write)', () => {
@@ -2856,6 +2880,49 @@ describe('the four-column daily block (SDD-004)', () => {
     expect(parsed.entries[0]).toMatchObject({ project: 'LIFE', label: 'Tidying', durMin: 30 });
     // and it is closed: writing it back reproduces the same cell
     expect(containsRow(TT.writeVaultBlock(md, parsed.entries, { date: '2026-08-03' }).md, '| 30m | LIFE:Tidying |')).toBe(true); // prettier-ignore
+  });
+
+  // THE PATH THAT ACTUALLY MATTERS, added in the end-gate review. The first audit's scanner walked
+  // the file line by line, so it missed every header row written inside a template literal with a
+  // literal `\n` — and that is exactly how the DD-012 adoption fixtures are written
+  // (`tests/vault-invariants.test.js:292/333/334/343`, `tests/vault-write.test.js:391/553`). Those
+  // six are the ONLY place a hand-made Project-less block is adopted, imported and written back, so
+  // they are the population this audit existed to cover. Their Task cells are `his own morning`,
+  // `one`, `two` and `min morgen` — no colon in any of them, so none changed meaning. This test is
+  // the colon-bearing case they do not have.
+  it('a hand-made block ADOPTED with a colon in its Task cell files the entry against that project', () => {
+    // Not a hypothetical: `| Time | Task |` is the shape SB-049's own adoption tests use, and DD-012
+    // adopts a note that carries the heading and a well-formed table with no anchor at all. Whether
+    // this reading is the RIGHT one for a hand-typed colon is Terje's call (SB-175) — this pins what
+    // it does today, so a change to it cannot be silent.
+    const md = [
+      '# Monday',
+      '',
+      '## Time Log',
+      '',
+      '| Time | Task |',
+      '|---|---|',
+      '| 08:00→09:00 | LIFE:his own morning |',
+      '',
+      '## Captures',
+      '',
+      'thoughts',
+    ].join('\n');
+    const parsed = TT.parseVaultBlock(md, { date: '2026-08-03' });
+    expect(parsed.quarantine).toBe(false);
+    expect(parsed.adopted).toBe(true); // it really did take the adoption path, not the anchored one
+    expect(parsed.entries[0]).toMatchObject({ project: 'LIFE', label: 'his own morning' });
+  });
+
+  it('the totals row follows the `$` COLUMN, not the last position', () => {
+    // The only new routing in this change with no test of its own (end-gate review): `billAt`
+    // prefers `$` over the last-column fallback. Every other fixture puts `$` last, where the old
+    // and new rules agree and the case proves nothing.
+    const md = TT.serializeVaultBlock(DAY, { revision: 1, headers: ['Time', '$', 'Mode', 'Task'] });
+    const totals = md.split('\n').filter((l) => l.includes('**'));
+    expect(totals).toHaveLength(1);
+    expect(totals[0]).toMatch(/^\| \*\*3\.5h\*\* +\| \*\*3h\*\* +\| +\| +\|$/); // under `$`, and bare
+    expect(TT.parseVaultBlock(md, { date: '2026-08-03' }).entries).toHaveLength(2); // still not an entry
   });
 
   it('an ESCAPED colon in that same shape is content, and stays content across a write', () => {

@@ -67,12 +67,15 @@ export function ProjectPage({ state, ui, code }: ProjectPageProps) {
               <span className={[vs.td, vs.fs12, sh.ellipsis].join(' ')}>{entry.label || ''}</span>
               <span className={[vs.td, vs.cSecondary, sh.ellipsis].join(' ')}>{entry.note || ''}</span>
               <span className={pp.billCell}>
+                {/* SDD-004: the same chip the day grid renders (BillCell), over the same
+                    `entry.billable` field — so it has to read the same way. One entry's
+                    billability has one spelling wherever it appears. */}
                 <Chip
                   mono={true}
                   tone={entry.billable ? 'green' : 'neutral'}
                   style={entry.billable ? {} : { color: 'var(--text-4)' }}
                 >
-                  {entry.billable ? 'bill' : 'nb'}
+                  {'$'}
                 </Chip>
               </span>
               <span className={[vs.td, vs.mono, vs.right].join(' ')}>{TT.fmtHours(TT.entryMinutes(entry))}</span>
