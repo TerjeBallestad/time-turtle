@@ -172,7 +172,9 @@ describe('the vault writer (api)', () => {
     const parsed = parseNote(TOMORROW);
     expect(parsed.quarantine).toBe(false);
     expect(parsed.entries).toEqual([]);
-    expect(containsRow(readFileSync(notePath(TOMORROW), 'utf8'), '| Time | Mode | Project | Task | Bill |')).toBe(true);
+    // SDD-004's four-column shape, read off the note the real writer produced — this is the api
+    // rung's evidence that the new header set reaches disk, not just the serializer's unit tests
+    expect(containsRow(readFileSync(notePath(TOMORROW), 'utf8'), '| Time | Mode | Task | $ |')).toBe(true);
     expect(parsed.revision).toBe(revBefore + 1); // a real write, so the counter moved
   });
 

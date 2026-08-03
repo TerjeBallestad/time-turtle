@@ -1092,7 +1092,18 @@ TT.encodeMergedTaskCell = function (v, projects) {
   const code = v.project || '';
   if (!code) return task; // no project ⇒ byte-identical to the task codec alone
   const project = projects && projects.find((candidate) => candidate.code === code);
-  const prefix = project && project.vaultNote ? encodeWikilink(code) : TT.encodeCell(code);
+  let prefix;
+  if (project && project.vaultNote) {
+    prefix = encodeWikilink(code);
+  } else {
+    // A BARE CODE THAT ALREADY LOOKS LIKE A LINK GETS ESCAPED, the same way a label beginning
+    // `- ` does one layer down. Decode reads `[[…]]` as structure and hands back the inner text,
+    // so an unescaped `[[Home]]` here would come back as the code `Home` and the next write would
+    // emit different bytes. `readWikilink` runs on the STILL-ESCAPED cell (SB-122), so one
+    // backslash is enough to stop the match, and `decodeCell` takes it off again.
+    prefix = TT.encodeCell(code);
+    if (WIKILINK_RE.test(prefix)) prefix = '\\' + prefix;
+  }
   return escapeMergeDelim(prefix) + MERGE_DELIM + task;
 };
 /**
@@ -1679,9 +1690,29 @@ function vaultAdoptionCandidate(md, opts) {
 // ROW-LEVEL QUARANTINE. A row that parses as neither an entry nor the generated totals
 // row quarantines the whole block. It is not dropped and not guessed — that is what
 // stops a corrupted Time cell from silently vanishing an hour of Terje's day.
-const VAULT_COLUMNS = ['Time', 'Mode', 'Project', 'Task', 'Bill'];
-const VAULT_KEYS = VAULT_COLUMNS.map((label) => label.toLowerCase());
+// SDD-004 DROPPED THIS TO FOUR COLUMNS. `Project` folds into `Task` (task 1's merged codec) and
+// `Bill` becomes `$`. What a NEW block is written with, and nothing else — `serializeVaultBlock`
+// re-emits each block's OWN header set, so the six TT-written notes on disk keep five columns
+// forever. Terje ruled no migration.
+const VAULT_COLUMNS = ['Time', 'Mode', 'Task', '$'];
+// THE VOCABULARY IS NOT DERIVED FROM THE COLUMNS ANY MORE, and must not go back to being derived.
+// It is the union of every header TT can READ, which is now strictly larger than what it WRITES:
+// `project` and `bill` are retired from the canonical set but still parse, which is the whole
+// reason nothing on disk migrates.
+//
+// WIDENING THIS LIST IS A SAFETY ACT, NEVER A FORMALITY (SB-044). DD-012 adoption's precondition
+// is a well-formed table under the heading, so this vocabulary is the ONLY thing standing between
+// adoption and TT importing Terje's 80 pre-cutover daily notes — which SB-049 ruled must stay
+// untouched and invisible. They head `| Time | Cat | Project | Description |`, so `cat` and
+// `description` are the forbidden words and the guard for them lives in tests/roundtrip.test.js.
+// SDD-004 added exactly one word, `$`, measured against the live vault on 2026-08-03: of 91 daily
+// notes, none uses `$` as a header, and the parse verdict for all 91 is identical before and after.
+const VAULT_KEYS = ['time', 'mode', 'project', 'task', 'bill', '$'];
 const BILL_YES = '✓'; // U+2713. SB-045: `✓` or blank — never `—`, and nothing else parses.
+// The `$` column's own two spellings (SDD-004). It is NOT `bill` renamed: `bill` spells
+// non-billable as a BLANK cell, `$` spells it `0`. Both columns refuse the other's vocabulary
+// rather than guessing, because this cell decides money.
+const DOLLAR_NO = '0';
 /**
  * Parse a note that ALREADY carries both anchors, or propagate the locator's verdict. The
  * adoption-aware entry point is `TT.parseVaultBlock` below, which is this function plus the
@@ -1707,6 +1738,15 @@ function parseAnchoredBlock(md, opts) {
     if (keys.includes(key)) return vaultQuarantine('duplicate-header');
     keys.push(key);
   }
+  // SDD-004's gate, computed ONCE per block from the header row rather than per cell. It is keyed
+  // on the ABSENCE of `project`, never on the presence of `$`: the merged codec exists precisely
+  // because there is no separate project column, so that is the direct condition. Keying on `$`
+  // would be a coincidence of one change and would break the moment a block carries one without
+  // the other. This is SB-045's "the header row is the schema" applied one level down.
+  //
+  // A DEGENERATE HEADER SET FALLS ON THE MERGED SIDE. `| Time | Task |` has no `project` column,
+  // so its Task cells split on a colon.
+  const merged = !keys.includes('project');
 
   /** @type {VaultEntry[]} */
   const entries = [];
@@ -1754,14 +1794,33 @@ function parseAnchoredBlock(md, opts) {
       } else if (keys[c] === 'project') {
         entry.project = raw === '' ? null : vaultProjectCode(raw, projects);
       } else if (keys[c] === 'task') {
-        const { label, note } = TT.decodeTaskCell(raw);
-        entry.label = label;
-        entry.note = note;
+        if (merged) {
+          const { project, label, note } = TT.decodeMergedTaskCell(raw);
+          entry.project = project;
+          entry.label = label;
+          entry.note = note;
+        } else {
+          const { label, note } = TT.decodeTaskCell(raw);
+          entry.label = label;
+          entry.note = note;
+        }
       } else if (keys[c] === 'bill') {
         // exactly `✓` or exactly blank. Anything else is a hand edit whose intent TT
         // cannot know, and this cell decides money — so it refuses instead of guessing.
         if (raw === BILL_YES) entry.billable = true;
         else if (raw === '') entry.billable = false;
+        else return vaultQuarantine('bad-bill-cell');
+      } else if (keys[c] === '$') {
+        // SDD-004's spelling of the same decision, and it refuses the same way. `0` rather than a
+        // blank, so the column reads as one symbol at two states instead of a mark and an absence
+        // — a blank `$` cell is therefore NOT a reading, it is a cell TT cannot account for.
+        //
+        // The refusal reports `bad-bill-cell`, which names the MODEL FIELD this cell decides, not
+        // the header it was spelled with. One failure, one reason: a second name for "the
+        // billability cell cannot be read" would put DD-007's two-vocabulary cost into the
+        // diagnostics as well as the file.
+        if (raw === BILL_YES) entry.billable = true;
+        else if (raw === DOLLAR_NO) entry.billable = false;
         else return vaultQuarantine('bad-bill-cell');
       } else {
         (vaultCells || (vaultCells = {}))[keys[c]] = raw;
@@ -2036,6 +2095,8 @@ TT.serializeVaultBlock = function (entries, opts) {
   const timeSeparator = (opts && opts.timeSeparator) || undefined; // absent ⇒ `unicode`, today's bytes
   const projects = (opts && opts.projects) || undefined; // absent ⇒ the bare project code
   const keys = headers.map((label) => label.toLowerCase());
+  // SDD-004's gate, the same condition the parser computes and for the same reason — read it there
+  const merged = !keys.includes('project');
 
   // CELLS, not finished lines — `vaultAlignedTable` cannot know a column's width until the last
   // row is in hand, so the rows are collected and emitted together at the end (DD-023 half 1).
@@ -2046,8 +2107,12 @@ TT.serializeVaultBlock = function (entries, opts) {
         if (key === 'time') return TT.fmtTimeCell(entry, timeSeparator);
         if (key === 'mode') return TT.encodeTagsCell(entry.tags);
         if (key === 'project') return entry.project ? vaultProjectCell(entry.project, projects) : '';
-        if (key === 'task') return TT.encodeTaskCell({ label: entry.label, note: entry.note });
+        if (key === 'task')
+          return merged
+            ? TT.encodeMergedTaskCell({ project: entry.project, label: entry.label, note: entry.note }, projects)
+            : TT.encodeTaskCell({ label: entry.label, note: entry.note });
         if (key === 'bill') return entry.billable ? BILL_YES : '';
+        if (key === '$') return entry.billable ? BILL_YES : DOLLAR_NO;
         // a vocabulary column TT has no model field for — re-emitted verbatim from the raw
         // cell the parser carried. Empty today (SB-059 gave `Mode` a home); SB-044's
         // settings-extended vocabulary is what refills it
@@ -2063,15 +2128,23 @@ TT.serializeVaultBlock = function (entries, opts) {
   //
   // This composes with detection because isTotalsRow keys on the CELL SHAPE
   // (TOTALS_CELL_RE), not on position — the two rules share that regex, which is what makes
-  // them one decision. Fallbacks keep a degenerate header set writable: no `Time` column puts
-  // the hours in column 0, no `Bill` column puts the billable total in the last one, and if
-  // those collide the hours win (a one-column block has nowhere else to put them).
+  // them one decision. Fallbacks keep a degenerate header set writable: no billability column at
+  // all puts that total in the last one, no `Time` column puts the hours in column 0, and if those
+  // collide the hours win (a one-column block has nowhere else to put them).
+  //
+  // THE LABEL FOLLOWS THE COLUMN, exactly as the header does (SDD-004): ` billable` under `Bill`,
+  // bare under `$`. It is not decoration — it is 9 characters, and `vaultAlignedTable` pads the
+  // whole column to its widest cell. `**3h billable**` under `$` would make the new block 80
+  // characters against the old shape's 81, which is the entire measured reason for the change
+  // gone. `TOTALS_CELL_RE` needs no edit for it: ` billable` is already optional there, so
+  // detection reads both spellings and the two rules stay one decision.
   const { min, bill } = vaultTotals(rows);
   const totals = headers.map(() => '');
   const timeAt = keys.indexOf('time') >= 0 ? keys.indexOf('time') : 0;
-  const billAt = keys.indexOf('bill') >= 0 ? keys.indexOf('bill') : headers.length - 1;
+  const dollarAt = keys.indexOf('$');
+  const billAt = keys.indexOf('bill') >= 0 ? keys.indexOf('bill') : dollarAt >= 0 ? dollarAt : headers.length - 1;
   totals[timeAt] = '**' + TT.fmtHours(min) + 'h**';
-  if (billAt !== timeAt) totals[billAt] = '**' + TT.fmtHours(bill) + 'h billable**';
+  if (billAt !== timeAt) totals[billAt] = '**' + TT.fmtHours(bill) + 'h' + (billAt === dollarAt ? '' : ' billable') + '**'; // prettier-ignore
   cellRows.push(totals);
   // `lines` is `['## heading', '', header, delimiter, ...rows]` at this point, so everything from
   // index 2 to the end IS the payload — taken before the blank line and the revision line are

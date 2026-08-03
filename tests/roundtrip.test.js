@@ -799,6 +799,9 @@ describe('vault merged Task-cell codec (SDD-004)', () => {
     { name: 'a colon in the NOTE', v: { project: 'INT', label: 'Standup', note: 'ratio 3:1 today' } },
     { name: 'a colon in the project code', v: { project: 'A:B', label: 'Work', note: '' } },
     { name: 'a pipe and a backslash across all three', v: { project: 'C\\D', label: 'a|b', note: 'c\\d' } },
+    // a project code TT carried VERBATIM out of a five-column note with no catalog: it already
+    // looks like a link, and must not come back as the bare inner text
+    { name: 'a bare code that already looks like a wikilink', v: { project: '[[Home]]', label: 'Tidy', note: '' } },
     { name: 'a <br> in the label, with a project', v: { project: 'LIFE', label: 'The <br> tag', note: 'x' } },
     { name: 'a label that begins with "- ", with a project', v: { project: 'LIFE', label: '- odd', note: 'n' } },
     { name: 'everything at once', v: { project: 'A:B', label: '- a|b <br> c: d', note: '- e\\f <br> g: h' } },
@@ -1364,6 +1367,12 @@ describe('vault block serialize + splice (SB-055)', () => {
     E({ durMin: 30, project: '[[Home]]', tags: ['#rest'] }),
   ];
 
+  // SDD-004 made the five columns a REQUEST rather than the default — `VAULT_COLUMNS` is
+  // `['Time', 'Mode', 'Task', '$']` now. Every golden below that pins the OLD shape names it
+  // explicitly, so each keeps testing exactly what it was written to test and the five-column path
+  // keeps its coverage. The four-column shape has its own goldens in the SDD-004 describe.
+  const FIVE = ['Time', 'Mode', 'Project', 'Task', 'Bill'];
+
   it('emits SB-045’s exact frozen shape, in Obsidian’s aligned form (DD-023)', () => {
     // THE HAND-WRITTEN ANCHOR GOLDEN. Every other byte fixture in this file is anchored through
     // this one and through the real-Obsidian byte-identity test below; these columns were widened
@@ -1371,7 +1380,7 @@ describe('vault block serialize + splice (SB-055)', () => {
     // and totals row included; the delimiter is derived and framed like any other cell), NOT by
     // pasting what the emitter happened to print. A golden generated from its own subject asserts
     // only that the function is deterministic.
-    expect(TT.serializeVaultBlock(DAY, { revision: 8 })).toBe(
+    expect(TT.serializeVaultBlock(DAY, { revision: 8, headers: FIVE })).toBe(
       [
         '## Time Log',
         '',
@@ -1400,7 +1409,7 @@ describe('vault block serialize + splice (SB-055)', () => {
   });
 
   it('emits the header row and the totals row even on a ZERO-entry day (no header = no schema)', () => {
-    expect(TT.serializeVaultBlock([], { revision: 1 })).toBe(
+    expect(TT.serializeVaultBlock([], { revision: 1, headers: FIVE })).toBe(
       [
         '## Time Log',
         '',
@@ -1803,7 +1812,9 @@ describe('vault block round-trip (SB-055)', () => {
       // for TT.entryMinutes — which is exactly what it exists to catch (end-gate review).
       const entries = TT.parseVaultBlock(FULL_DAY, { date: TT.todayStr() }).entries;
       expect(entries.filter((e) => TT.isRunning(e))).toHaveLength(1);
-      const region = TT.serializeVaultBlock(entries, { revision: 8 });
+      // FULL_DAY is a five-column block, so the totals row is asked for in its own shape (SDD-004
+      // made four the default) — the subject here is the arithmetic, not the column set
+      const region = TT.serializeVaultBlock(entries, { revision: 8, headers: ['Time', 'Mode', 'Project', 'Task', 'Bill'] }); // prettier-ignore
       expect(region).toContain('| **8.25h**   |        |                 |                                              | **6.5h billable** |'); // prettier-ignore
       expect(region).toContain('| 17:34→      |'); // the running row is still written, open-ended
     });
@@ -2330,6 +2341,481 @@ describe('vault block — end-gate review regressions (SB-055)', () => {
   });
 });
 
+// ---- SDD-004 / PLAN-018 task 2: the four-column daily block ----
+// The block drops from five columns to four. `Project` folds into `Task`, `Bill` becomes `$`.
+// The codec is task 1's, already proven symmetric; this is the wiring.
+//
+// THE GATE IS `!keys.includes('project')`, COMPUTED ONCE PER BLOCK from the header row, and it
+// is keyed on the ABSENCE of `project`, never on the presence of `$`. The merged codec exists
+// precisely because there is no separate project column, so that is the direct condition; keying
+// on `$` would be a coincidence of this one change and would break the moment a block carries one
+// without the other. This is SB-045's "the header row is the schema" applied one level down.
+//
+// NOTHING MIGRATES, AND THAT IS THE DESIGN. `serializeVaultBlock` re-emits each block's OWN header
+// set, so the six TT-written notes already on disk keep five columns forever. Terje ruled no
+// migration. The six below are those notes, byte-for-byte off disk on 2026-08-03 — they are the
+// complete population that will ever reach the gate's false branch, because TT writes the merged
+// shape from here on.
+//
+// THE VOCABULARY GAINS EXACTLY ONE WORD, `$`. Widening `VAULT_KEYS` is a safety act, never a
+// formality (SB-044): the header vocabulary is the only thing standing between DD-012 adoption and
+// TT importing the 80 pre-cutover notes SB-049 ruled must stay untouched and invisible. Those head
+// `| Time | Cat | Project | Description |`, and the guard for that is in the DD-012 describe below
+// — it must stay green and must never be weakened. Measured across all 91 notes in the live vault
+// on 2026-08-03, before and after: 82 quarantine `unknown-header`, 6 parse, 3 `no-table`, and the
+// verdict set is identical. So `$` opens nothing.
+//
+// ## Verified red-green: 2026-08-03
+describe('the four-column daily block (SDD-004)', () => {
+  const E = (o) => ({ id: 'runtime-id', date: '2026-08-03', start: null, end: null, durMin: null, project: null, label: '', note: '', billable: false, ...o }); // prettier-ignore
+  /** Strip the ephemeral runtime id (DD-008: it is never written to disk). */
+  const stripIds = (entries) => entries.map(({ id, ...rest }) => rest);
+  const PROJECTS = [
+    { code: 'LIFE', name: 'Lifelines', clientId: null, vaultNote: 'Lifelines Tycoon' },
+    { code: 'INT', name: 'Internal', clientId: null, vaultNote: null },
+  ];
+  const DAY = [
+    E({ start: 780, end: 960, project: 'LIFE', label: 'Game Design', note: 'Card hand', billable: true, tags: ['#deep'] }), // prettier-ignore
+    E({ start: 960, end: 990, project: 'INT', label: 'Agentic workflows', billable: false, tags: ['#learn'] }),
+  ];
+
+  // ---- the new shape, to the byte ----
+  it('serializes a new day to SDD-004’s exact four-column bytes', () => {
+    const lines = TT.serializeVaultBlock(DAY, { revision: 1, projects: PROJECTS }).split('\n');
+    expect(lines.slice(0, -1)).toEqual([
+      '## Time Log',
+      '',
+      '| Time        | Mode   | Task                                | $      |',
+      '| ----------- | ------ | ----------------------------------- | ------ |',
+      '| 13:00→16:00 | #deep  | [[LIFE]]:Game Design<br>- Card hand | ✓      |',
+      '| 16:00→16:30 | #learn | INT:Agentic workflows               | 0      |',
+      '| **3.5h**    |        |                                     | **3h** |',
+      '',
+    ]);
+    expect(lines[lines.length - 1]).toMatch(/^`revision: 1 · [0-9a-f]{4}`$/);
+  });
+
+  it('is 71 characters wide where the five-column block was 81 — the measured reason for the change', () => {
+    const width = (md) => Math.max(...md.split('\n').filter((l) => l.startsWith('|')).map((l) => l.length)); // prettier-ignore
+    expect(width(TT.serializeVaultBlock(DAY, { revision: 1, projects: PROJECTS }))).toBe(71);
+    const five = TT.serializeVaultBlock(DAY, { revision: 1, headers: ['Time', 'Mode', 'Project', 'Task', 'Bill'] });
+    expect(width(five)).toBe(81);
+  });
+
+  it('round-trips the new shape — parse gives back the entries that were written', () => {
+    const md = TT.serializeVaultBlock(DAY, { revision: 1, projects: PROJECTS });
+    const parsed = TT.parseVaultBlock(md, { date: '2026-08-03' });
+    expect(parsed.quarantine).toBe(false);
+    expect(parsed.headers).toEqual(['Time', 'Mode', 'Task', '$']);
+    expect(stripIds(parsed.entries)).toEqual(stripIds(DAY));
+    // and it is a fixed point: writing what was read changes not one byte
+    expect(TT.serializeVaultBlock(parsed.entries, { revision: 1, projects: PROJECTS })).toBe(md);
+  });
+
+  it('the totals row needs no regex change — `**3h**` under `$` already matches', () => {
+    // TOTALS_CELL_RE makes ` billable` optional, so detection is unmoved. Asserted through the
+    // public surface rather than trusted: a block whose totals row says `**3h**` must parse, and
+    // its totals row must NOT come back as a fourth entry.
+    const md = TT.serializeVaultBlock(DAY, { revision: 1 });
+    expect(md).toContain('| **3h** |');
+    expect(md).not.toContain('billable');
+    expect(TT.parseVaultBlock(md, { date: '2026-08-03' }).entries).toHaveLength(2);
+  });
+
+  it('the totals label follows the COLUMN, not the code path — `billable` under `Bill`, bare under `$`', () => {
+    // The word is what makes the five-column block 81 wide and the four-column one 71; SDD-004's
+    // width table is computed with `**3h billable**` under `Bill` and `**3h**` under `$`.
+    const five = TT.serializeVaultBlock(DAY, { revision: 1, headers: ['Time', 'Mode', 'Project', 'Task', 'Bill'] });
+    expect(five).toContain('**3h billable**');
+  });
+
+  // ---- the `$` cell ----
+  it('the `$` cell is exactly `✓` or exactly `0`, and quarantines anything else', () => {
+    const block = (dollar) =>
+      [
+        '## Time Log',
+        '',
+        '| Time | Task | $ |',
+        '|---|---|---|',
+        '| 09:00→10:00 | Work | ' + dollar + ' |',
+        '| **1h** | | **0h** |',
+        '',
+        '`revision: 1`',
+      ].join('\n');
+    expect(TT.parseVaultBlock(block('✓'), { date: '2026-08-03' }).entries[0].billable).toBe(true);
+    expect(TT.parseVaultBlock(block('0'), { date: '2026-08-03' }).entries[0].billable).toBe(false);
+    // a BLANK `$` cell is not a reading — `bill` spells non-billable as blank, `$` spells it `0`,
+    // and guessing between two vocabularies is exactly what this column refuses to do
+    for (const bad of ['', '—', 'x', 'yes', '1', '✔']) {
+      expect(TT.parseVaultBlock(block(bad), { date: '2026-08-03' })).toEqual({
+        quarantine: true,
+        reason: 'bad-bill-cell',
+      });
+    }
+    // …but framing whitespace is the TABLE's, not the cell's: every cell is trimmed on read
+    // (vaultRowCells), so `|  ✓  |` is the same value as `| ✓ |` and always was
+    expect(TT.parseVaultBlock(block(' ✓ '), { date: '2026-08-03' }).entries[0].billable).toBe(true);
+  });
+
+  it('`bill` is untouched — it still reads `✓` or blank, and refuses `0`', () => {
+    const block = (bill) =>
+      [
+        '## Time Log',
+        '',
+        '| Time | Task | Bill |',
+        '|---|---|---|',
+        '| 09:00→10:00 | Work | ' + bill + ' |',
+        '| **1h** | | **0h billable** |',
+        '',
+        '`revision: 1`',
+      ].join('\n');
+    expect(TT.parseVaultBlock(block('✓'), { date: '2026-08-03' }).entries[0].billable).toBe(true);
+    expect(TT.parseVaultBlock(block(''), { date: '2026-08-03' }).entries[0].billable).toBe(false);
+    expect(TT.parseVaultBlock(block('0'), { date: '2026-08-03' }).reason).toBe('bad-bill-cell');
+  });
+
+  // ---- the gate's FALSE branch: the six real notes, off disk ----
+  // Read from `Calendar/Daily` on 2026-08-03. None of their Task cells contains a colon, which is
+  // why neither branch would decode them differently — but the gate is what makes that a
+  // guarantee rather than a fact about today's data.
+  const REAL_NOTES = [
+    {
+      day: '2026-07-27',
+      block: [
+        '## Time Log',
+        '',
+        '| Time | Mode | Project | Task | Bill |',
+        '|---|---|---|---|---|',
+        '| 11:00→15:30 | | TUR | Obsidian backend<br>- Setup new tt instance | ✓ |',
+        '| 17:00→23:00 | | INT | Agentic workflows | |',
+        '| **10.5h** | | | | **4.5h billable** |',
+        '',
+        '`revision: 9 · 3bcc`',
+      ].join('\n'),
+      entries: [
+        {
+          date: '2026-07-27',
+          start: 660,
+          end: 930,
+          durMin: null,
+          project: 'TUR',
+          label: 'Obsidian backend',
+          note: 'Setup new tt instance',
+          billable: true,
+        },
+        {
+          date: '2026-07-27',
+          start: 1020,
+          end: 1380,
+          durMin: null,
+          project: 'INT',
+          label: 'Agentic workflows',
+          note: '',
+          billable: false,
+        },
+      ],
+      rewritten: [
+        '## Time Log',
+        '',
+        '| Time        | Mode | Project | Task                                        | Bill              |',
+        '| ----------- | ---- | ------- | ------------------------------------------- | ----------------- |',
+        '| 11:00→15:30 |      | TUR     | Obsidian backend<br>- Setup new tt instance | ✓                 |',
+        '| 17:00→23:00 |      | INT     | Agentic workflows                           |                   |',
+        '| **10.5h**   |      |         |                                             | **4.5h billable** |',
+        '',
+        '`revision: 9 · 3bcc`',
+      ].join('\n'),
+    },
+    {
+      day: '2026-07-28',
+      block: [
+        '## Time Log',
+        '',
+        '| Time        | Mode | Project | Task              | Bill            |',
+        '| ----------- | ---- | ------- | ----------------- | --------------- |',
+        '| 14:30→20:00 |      | LIFE    | Game Design       |                 |',
+        '| 11:00→13:30 |      | INT     | Agentic workflows |                 |',
+        '| **8h**      |      |         |                   | **0h billable** |',
+        '',
+        '`revision: 10 · 7ddc`',
+      ].join('\n'),
+      entries: [
+        {
+          date: '2026-07-28',
+          start: 870,
+          end: 1200,
+          durMin: null,
+          project: 'LIFE',
+          label: 'Game Design',
+          note: '',
+          billable: false,
+        },
+        {
+          date: '2026-07-28',
+          start: 660,
+          end: 810,
+          durMin: null,
+          project: 'INT',
+          label: 'Agentic workflows',
+          note: '',
+          billable: false,
+        },
+      ],
+      rewritten: [
+        '## Time Log',
+        '',
+        '| Time        | Mode | Project | Task              | Bill            |',
+        '| ----------- | ---- | ------- | ----------------- | --------------- |',
+        '| 14:30→20:00 |      | LIFE    | Game Design       |                 |',
+        '| 11:00→13:30 |      | INT     | Agentic workflows |                 |',
+        '| **8h**      |      |         |                   | **0h billable** |',
+        '',
+        '`revision: 10 · 7ddc`',
+      ].join('\n'),
+    },
+    {
+      day: '2026-07-29',
+      block: [
+        '## Time Log',
+        '',
+        '| Time        | Mode | Project | Task              | Bill            |',
+        '| ----------- | ---- | ------- | ----------------- | --------------- |',
+        '| 16:00→17:00 |      | INT     | Agentic workflows |                 |',
+        '| 17:00→      |      | LIFE    | Game Design       |                 |',
+        '| **1h**      |      |         |                   | **0h billable** |',
+        '',
+        '`revision: 5 · c102`',
+      ].join('\n'),
+      entries: [
+        {
+          date: '2026-07-29',
+          start: 960,
+          end: 1020,
+          durMin: null,
+          project: 'INT',
+          label: 'Agentic workflows',
+          note: '',
+          billable: false,
+        },
+        {
+          date: '2026-07-29',
+          start: 1020,
+          end: null,
+          durMin: null,
+          project: 'LIFE',
+          label: 'Game Design',
+          note: '',
+          billable: false,
+        },
+      ],
+      rewritten: [
+        '## Time Log',
+        '',
+        '| Time        | Mode | Project | Task              | Bill            |',
+        '| ----------- | ---- | ------- | ----------------- | --------------- |',
+        '| 16:00→17:00 |      | INT     | Agentic workflows |                 |',
+        '| 17:00→      |      | LIFE    | Game Design       |                 |',
+        '| **1h**      |      |         |                   | **0h billable** |',
+        '',
+        '`revision: 5 · c102`',
+      ].join('\n'),
+    },
+    {
+      day: '2026-07-30',
+      block: [
+        '## Time Log',
+        '',
+        '| Time        | Mode | Project | Task              | Bill            |',
+        '| ----------- | ---- | ------- | ----------------- | --------------- |',
+        '| 12:20→14:00 |      | INT     | Agentic workflows |                 |',
+        '| 14:00→19:30 |      | LIFE    | Game Design       |                 |',
+        '| **7.17h**   |      |         |                   | **0h billable** |',
+        '',
+        '`revision: 7 · 1658`',
+      ].join('\n'),
+      entries: [
+        {
+          date: '2026-07-30',
+          start: 740,
+          end: 840,
+          durMin: null,
+          project: 'INT',
+          label: 'Agentic workflows',
+          note: '',
+          billable: false,
+        },
+        {
+          date: '2026-07-30',
+          start: 840,
+          end: 1170,
+          durMin: null,
+          project: 'LIFE',
+          label: 'Game Design',
+          note: '',
+          billable: false,
+        },
+      ],
+      rewritten: [
+        '## Time Log',
+        '',
+        '| Time        | Mode | Project | Task              | Bill            |',
+        '| ----------- | ---- | ------- | ----------------- | --------------- |',
+        '| 12:20→14:00 |      | INT     | Agentic workflows |                 |',
+        '| 14:00→19:30 |      | LIFE    | Game Design       |                 |',
+        '| **7.17h**   |      |         |                   | **0h billable** |',
+        '',
+        '`revision: 7 · 1658`',
+      ].join('\n'),
+    },
+    {
+      day: '2026-07-31',
+      block: [
+        '## Time Log',
+        '',
+        '| Time        | Mode | Project | Task              | Bill            |',
+        '| ----------- | ---- | ------- | ----------------- | --------------- |',
+        '| 17:00→21:00 |      | LIFE    | Game dev          | ✓               |',
+        '| 16:00→17:00 |      | LIFE    | Game Design       | ✓               |',
+        '| 15:00→16:00 |      | INT     | Agentic workflows |                 |',
+        '| **6h**      |      |         |                   | **5h billable** |',
+        '',
+        '`revision: 12 · b994`',
+      ].join('\n'),
+      entries: [
+        {
+          date: '2026-07-31',
+          start: 1020,
+          end: 1260,
+          durMin: null,
+          project: 'LIFE',
+          label: 'Game dev',
+          note: '',
+          billable: true,
+        },
+        {
+          date: '2026-07-31',
+          start: 960,
+          end: 1020,
+          durMin: null,
+          project: 'LIFE',
+          label: 'Game Design',
+          note: '',
+          billable: true,
+        },
+        {
+          date: '2026-07-31',
+          start: 900,
+          end: 960,
+          durMin: null,
+          project: 'INT',
+          label: 'Agentic workflows',
+          note: '',
+          billable: false,
+        },
+      ],
+      rewritten: [
+        '## Time Log',
+        '',
+        '| Time        | Mode | Project | Task              | Bill            |',
+        '| ----------- | ---- | ------- | ----------------- | --------------- |',
+        '| 17:00→21:00 |      | LIFE    | Game dev          | ✓               |',
+        '| 16:00→17:00 |      | LIFE    | Game Design       | ✓               |',
+        '| 15:00→16:00 |      | INT     | Agentic workflows |                 |',
+        '| **6h**      |      |         |                   | **5h billable** |',
+        '',
+        '`revision: 12 · b994`',
+      ].join('\n'),
+    },
+    {
+      day: '2026-08-03',
+      block: [
+        '## Time Log',
+        '',
+        '| Time        | Mode | Project | Task                       | Bill            |',
+        '| ----------- | ---- | ------- | -------------------------- | --------------- |',
+        '| 13:00→16:00 |      | LIFE    | Game Design<br>- Card hand | ✓               |',
+        '| 16:00→16:30 |      | INT     | Agentic workflows          |                 |',
+        '| **3.5h**    |      |         |                            | **3h billable** |',
+        '',
+        '`revision: 8 · db32`',
+      ].join('\n'),
+      entries: [
+        {
+          date: '2026-08-03',
+          start: 780,
+          end: 960,
+          durMin: null,
+          project: 'LIFE',
+          label: 'Game Design',
+          note: 'Card hand',
+          billable: true,
+        },
+        {
+          date: '2026-08-03',
+          start: 960,
+          end: 990,
+          durMin: null,
+          project: 'INT',
+          label: 'Agentic workflows',
+          note: '',
+          billable: false,
+        },
+      ],
+      rewritten: [
+        '## Time Log',
+        '',
+        '| Time        | Mode | Project | Task                       | Bill            |',
+        '| ----------- | ---- | ------- | -------------------------- | --------------- |',
+        '| 13:00→16:00 |      | LIFE    | Game Design<br>- Card hand | ✓               |',
+        '| 16:00→16:30 |      | INT     | Agentic workflows          |                 |',
+        '| **3.5h**    |      |         |                            | **3h billable** |',
+        '',
+        '`revision: 8 · db32`',
+      ].join('\n'),
+    },
+  ];
+
+  for (const note of REAL_NOTES) {
+    it(`the real ${note.day} note still parses to exactly what it parsed to before SDD-004`, () => {
+      const parsed = TT.parseVaultBlock(note.block, { date: note.day });
+      expect(parsed.quarantine).toBe(false);
+      expect(parsed.headers).toEqual(['Time', 'Mode', 'Project', 'Task', 'Bill']);
+      expect(parsed.verified).toBe(true); // the digest on disk still verifies
+      expect(stripIds(parsed.entries)).toEqual(note.entries);
+    });
+    it(`the real ${note.day} note re-emits its OWN five columns, byte for byte`, () => {
+      const parsed = TT.parseVaultBlock(note.block, { date: note.day });
+      const res = TT.writeVaultBlock(note.block, parsed.entries, { date: note.day });
+      expect(res.quarantine).toBe(false);
+      expect(res.md).toBe(note.rewritten);
+      // the merged codec must not touch it: a `Project` column means the Task cell is label+note,
+      // so no cell in the re-emitted block carries a merge joint
+      expect(res.md).toMatch(/^\| Time +\| Mode +\| Project +\| Task +\| Bill +\|$/m);
+      expect(res.md).not.toContain('$');
+    });
+  }
+
+  it('a block carrying BOTH `Project` and `$` takes the label-only branch — the gate is not keyed on `$`', () => {
+    // The coincidence guard. `$` and the merged cell arrived together, but they are independent:
+    // a header set with a project column means the Task cell is label+note, whatever the
+    // billability column is spelled.
+    const md = [
+      '## Time Log',
+      '',
+      '| Time | Project | Task | $ |',
+      '|---|---|---|---|',
+      '| 09:00→10:00 | LIFE | Meeting: standup | ✓ |',
+      '| **1h** | | | **1h** |',
+      '',
+      '`revision: 1`',
+    ].join('\n');
+    const parsed = TT.parseVaultBlock(md, { date: '2026-08-03' });
+    expect(parsed.quarantine).toBe(false);
+    expect(parsed.entries[0].project).toBe('LIFE'); // from the Project column, not from the colon
+    expect(parsed.entries[0].label).toBe('Meeting: standup'); // the colon is content here
+  });
+});
+
 // ---- the payload digest (SB-080 / DD-009) ----
 // The block's bottom anchor carries a digest of its table payload, so the corruption SB-051
 // measured on the real vault becomes DETECTED rather than silently imported: Obsidian
@@ -2350,7 +2836,10 @@ describe('vault block payload digest (SB-080 / DD-009)', () => {
     E({ start: 540, end: 930, project: '[[Planning]]', label: 'Daily planning ritual', billable: true }),
     E({ durMin: 30, project: '[[Home]]', label: 'Tidying' }),
   ];
-  const WRITTEN = host(TT.serializeVaultBlock(DAY, { revision: 3 }));
+  // Five columns, asked for explicitly: SDD-004 made four the default, and the mutations below
+  // name `| Bill |` and the ` billable` totals cell. The digest itself is column-agnostic — what
+  // this fixture must be is STABLE, so that `115d`-class literals keep meaning what they meant.
+  const WRITTEN = host(TT.serializeVaultBlock(DAY, { revision: 3, headers: ['Time', 'Mode', 'Project', 'Task', 'Bill'] })); // prettier-ignore
 
   it('TT always writes a digest — the digest-less shape is a read concession, never an emitter option', () => {
     expect(TT.serializeVaultBlock(DAY, { revision: 3 })).toMatch(/\n`revision: 3 · [0-9a-f]{4}`$/);
@@ -2681,7 +3170,10 @@ describe('vault Mode tags + Project vaultNote (SB-059)', () => {
       E({ start: 540, end: 930, project: 'LT-01', label: 'Systems pass', tags: ['#deep'], billable: true }),
       E({ durMin: 30, project: 'FAG', label: 'Invoicing', tags: ['#admin', '#rest'] }),
     ];
-    const region = TT.serializeVaultBlock(day, { revision: 4, projects: PROJECTS });
+    // SB-059's subject is the `Project` COLUMN's wikilink rendering, so the five columns are asked
+    // for by name — SDD-004 made four the default, and there the link is rendered by the merged
+    // cell instead (`[[LT-01]]:Systems pass`, the CODE in the brackets, covered in its own describe)
+    const region = TT.serializeVaultBlock(day, { revision: 4, projects: PROJECTS, headers: ['Time', 'Mode', 'Project', 'Task', 'Bill'] }); // prettier-ignore
     // the bytes first — a round-trip that agrees with itself about the wrong shape is no proof
     expect(containsRow(region, '| 09:00→15:30 | #deep | [[Lifelines Tycoon]] | Systems pass | ✓ |')).toBe(true);
     expect(containsRow(region, '| 30m | #admin #rest | FAG | Invoicing | |')).toBe(true);
@@ -2918,10 +3410,13 @@ describe('adopting a hand-made daily note (SB-091 / DD-012)', () => {
     expect(parsed.quarantine).toBe(false);
     expect(parsed.adopted).toBe(true);
     expect(parsed.entries).toEqual([]); // an empty region is zero entries, not a refusal
+    // An empty region declares no schema, so the write brings the CANONICAL one — which SDD-004
+    // made the four-column shape. This is the one adoption case that gets the new columns, and it
+    // is correct: there is no header row here to preserve.
     const res = TT.writeVaultBlock(EMPTY_REGION, [E({ durMin: 45, label: 'First hour' })]);
     expect(res.quarantine).toBe(false);
     expect(res.adopted).toBe(true);
-    expect(containsRow(res.md, '| 45m | | | First hour | |')).toBe(true);
+    expect(containsRow(res.md, '| 45m | | First hour | 0 |')).toBe(true);
   });
 
   it('NEVER reports `verified` on an adopted block, in either shape', () => {
