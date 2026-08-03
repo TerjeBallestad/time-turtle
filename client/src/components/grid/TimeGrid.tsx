@@ -96,7 +96,12 @@ export function TimeGrid({ date, entries, state, ui, compact }: TimeGridProps) {
     <div className={[styles.grid, !admin && styles.employee].filter(Boolean).join(' ')}>
       {!compact && (
         <div className={styles.header}>
-          {(admin ? ['time', 'task', 'note', 'bill'] : ['time', 'task', 'note']).map((header) => (
+          {/* SDD-004: the admin column's heading is the `$` symbol, matching the chip below it.
+              `TT.t` falls back to the key when there is no translation, and `$` deliberately has
+              none — a symbol is not a word, so it reads the same in both languages. The employee
+              list is unchanged and still ends at `note`: employees have no bill column at all
+              (SB-011/SB-022), and EntryRow renders the cell behind the same admin check. */}
+          {(admin ? ['time', 'task', 'note', '$'] : ['time', 'task', 'note']).map((header) => (
             <span key={header} className={styles.headerCell}>
               {TT.t(header)}
             </span>
