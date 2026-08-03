@@ -1712,7 +1712,11 @@ const VAULT_COLUMNS = ['Time', 'Mode', 'Task', '$'];
 // re-declares what it guards goes stale silently, and this particular list going stale is how a
 // column TT can READ ends up being one TT cannot WRITE. SDD-004 is the case in point — `$` was
 // added here, and the hand-kept copy in that guard did not notice.
-export const VAULT_HEADER_VOCABULARY = /** @type {const} */ (['time', 'mode', 'project', 'task', 'bill', '$']);
+// Deliberately NOT `/** @type {const} */` — unlike the quarantine reasons, this list is READ
+// against arbitrary header text (`VAULT_KEYS.includes(key)`), so narrowing it to a literal tuple
+// makes every such check a type error.
+/** @type {string[]} */
+export const VAULT_HEADER_VOCABULARY = ['time', 'mode', 'project', 'task', 'bill', '$'];
 const VAULT_KEYS = VAULT_HEADER_VOCABULARY;
 const BILL_YES = '✓'; // U+2713. SB-045: `✓` or blank — never `—`, and nothing else parses.
 // The `$` column's own two spellings (SDD-004). It is NOT `bill` renamed: `bill` spells
