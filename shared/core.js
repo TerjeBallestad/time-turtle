@@ -1149,7 +1149,7 @@ TT.encodeMergedTaskCell = function (v, projects) {
   // what wrote it — an unescaped colon in a project-less cell would decode as a project on the next
   // read. THE COST, named because this file names its costs: every colon a person types into a
   // four-column Task cell comes back as a literal `\:` in the note. `\|` and `\<br>` are rare in
-  // real text; a colon in a label is not. SB-175 is the gate that judges whether that is tolerable.
+  // real text; a colon in a label is not. SB-179 is the gate that judges whether that is tolerable.
   if (!code) return task;
   const project = projects && projects.find((candidate) => candidate.code === code);
   let prefix;

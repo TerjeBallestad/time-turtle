@@ -2949,7 +2949,7 @@ describe('the four-column daily block (SDD-004)', () => {
   it('a hand-made block ADOPTED with a colon in its Task cell files the entry against that project', () => {
     // Not a hypothetical: `| Time | Task |` is the shape SB-049's own adoption tests use, and DD-012
     // adopts a note that carries the heading and a well-formed table with no anchor at all. Whether
-    // this reading is the RIGHT one for a hand-typed colon is Terje's call (SB-175) — this pins what
+    // this reading is the RIGHT one for a hand-typed colon is Terje's call (SB-179) — this pins what
     // it does today, so a change to it cannot be silent.
     const md = [
       '# Monday',
