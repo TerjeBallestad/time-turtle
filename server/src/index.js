@@ -3,61 +3,9 @@ import express from 'express';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
-import {
-  PORT,
-  HOST,
-  MD_DIR_LOCKED,
-  isLoopbackHost,
-  isLoopbackHostHeader,
-  isLoopbackPeer,
-  ADMIN_EMAIL,
-  DEFAULT_ADMIN_PASSWORD,
-} from './config.js';
-import { shapeTarget, activeShape, shapeLocked } from './backend.js';
+import { PORT, HOST, isLoopbackHostHeader, isLoopbackPeer, ADMIN_EMAIL, DEFAULT_ADMIN_PASSWORD } from './config.js';
 import { verifyPassword, makeToken, readSessionCookie, sessionCookie, clearCookie } from './auth.js';
-// SB-056: the split is at the import site on purpose. `db` is IDENTITY ONLY here — users,
-// passwords, token versions, the first-run seed — and every TIMESHEET-STORAGE read/write goes
-// through `store`, which is where SB-057's vault implementation lands. If a new `db.` call
-// appears below that is not about a user account, it belongs on `store`. See store.js's header.
 import * as db from './db.js';
-import * as store from './store.js';
-// SB-056: `writeMirror` is NOT imported here any more — every mirror write goes through
-// `store.mirror`, which is off under `vault` (DD-011). See store.js.
-import { mirrorTarget, mirrorPath, mirrorBlockFor, acknowledgeMirrorBlock, retireMirrors } from './markdown.js';
-// PLAN-013 / DD-018: the shape-switch preflight. Its own module because the boot banner below
-// needs the same numbers with no HTTP in the room — see shape-preflight.js's header.
-import { shapePreflight, strandingBannerLines } from './shape-preflight.js';
-// SB-057: the sync engine. Imported here and nowhere else in the API layer — the routes have no
-// business knowing the vault is being watched, and the only thing this file does with it is start
-// it once the server is answering.
-import { startVaultSync, scanVault, vaultSyncConfig, forgetOwnWrites, setVaultRewriter } from './vault-sync.js';
-import { rewriteVaultDate, setVaultCheckpointHook } from './vault-write.js';
-import { vaultCheckpoint } from './vault-checkpoint.js';
-
-// SB-057: the two arbitration verdicts that need a WRITE are handed back to the writer HERE, at
-// the one place that already imports both. The engine never imports the writer, so the dependency
-// runs one way: store → vault-write → vault-sync → db.
-setVaultRewriter((date, rev) => {
-  const config = vaultSyncConfig();
-  if (config) rewriteVaultDate(config.userId, date, rev);
-});
-
-// SB-068: and the same trick for the checkpoint. The writer owns the WHEN (its first write of a
-// calendar day, which is the only place that moment exists — `tt serve` runs detached for weeks,
-// so a per-boot hook would mean a per-fortnight checkpoint); this module owns the WHAT.
-//
-// Wired at module load and not inside `app.listen`, because the trigger is a write and not a
-// boot: a save arriving during the boot scan must find the hook already in place. Resolving the
-// config PER CALL rather than closing over one is what makes the checkpoint follow the vault when
-// Settings → Vault re-points it — the same reason the rewriter above does.
-setVaultCheckpointHook((day) => {
-  const config = vaultSyncConfig();
-  if (config) vaultCheckpoint(config.root, day);
-});
-// SB-140 / DD-024: where Obsidian says this person's vaults are, so the first run can offer rather
-// than ask them to type a path. Read-only, one known path, and injectable so no test ever reads
-// the real registry.
-import { readObsidianVaults, directoryExists, ICLOUD_VAULT_PREFIX } from './obsidian-registry.js';
 import { teamReport } from './reports.js';
 import TT from '../../shared/core.js';
 
@@ -66,411 +14,20 @@ import TT from '../../shared/core.js';
 /** @typedef {import('express').NextFunction} NextFunction */
 /** @typedef {import('../../shared/types.ts').User} User */
 
-// ---- SB-056 / DD-006 consequence 1: the single-user guard ----
-//
-// A vault belongs to ONE person. There is no sane answer to whose `Calendar/Daily/2026-07-26.md`
-// two employees' entries land in, so this is ruled out by construction rather than deferred to
-// a merge story nobody wants to write. It is also what makes the seam line in store.js correct:
-// identity stays in SQLite under both shapes precisely BECAUSE the vault holds one user.
-//
-// THREE DIRECTIONS, and the third is the one the ticket does not spell out:
-//   1. `POST /api/users` under `personal`             → 403 (in the user-management routes)
-//   2. switching TO `personal` with >1 user stored    → 403 (in PUT /api/state)
-//   3. BOOTING with an effective `personal` shape against a data dir that already holds
-//      several users → the server refuses to start (before app.listen).
-//
-// Direction 3 exists because no runtime guard can fire there: nobody wrote anything, the
-// combination simply arrived — a copied data dir, a restored backup, `TT_SHAPE=personal` typed
-// on the wrong machine. Two alternatives were considered and rejected. Falling back to `team`
-// would restart the mirror INTO the vault, re-creating the two-representations hazard DD-011
-// just closed. A refused-writes read-only mode is more surface, and the recovery still needs a
-// shell. Refusing to start is the loudest available reading of DD-006's "loud and explicit",
-// and it is the only one that cannot be mistaken for working.
-//
-// It is a SHAPE claim, not a role claim — under `personal` there is exactly one user and they
-// are an admin — so its evidence uses an admin session and that is the right evidence here,
-// not a shortcut around the role-evidence rule.
-
-/** The ONLY string that beats a stored `personal` setting. It belongs verbatim in every refusal. */
-const SHAPE_RECOVERY = 'TT_SHAPE_LOCK=1 TT_SHAPE=team';
-const SECOND_USER_REFUSAL =
-  'a vault belongs to one person, so the personal shape allows exactly one user (DD-006): there is no answer to whose daily note a second person’s hours would land in. Switch to the team shape to add users.';
-/** @param {number} count how many users are already stored */
-const shapeSwitchRefusal = (count) =>
-  `cannot switch to the personal shape: a vault belongs to one person and this install has ${count} users (DD-006). Delete the others first, or stay on the team shape.`;
-/**
- * DD-024 Amendment 1 §3: storing `personal` on a process bound to a non-loopback address.
- *
- * The boot guard's own recovery line, because it is the same recovery — but it cannot be the boot
- * guard, which fires only when the shape is ALREADY `personal` at module load. Under DD-024 the
- * common path is the other one.
- */
-const BIND_REFUSAL =
-  'cannot store the personal shape on this process: it is bound to a non-loopback address, and the personal shape has no login (DD-015), so it would serve an unauthenticated timesheet to that network — or, once it refuses every non-loopback peer, to nobody at all. Recover with:  unset TT_HOST';
-/**
- * DD-024 Amendment 1 §3: may this process store `personal` AT ALL, given what it is bound to?
- *
- * ITS PREDICATE IS EXACT. `BIND_HOST` `undefined` — the ordinary install with no `TT_HOST` — must
- * NOT refuse, or every first run breaks: an unset `TT_HOST` binds every interface, loopback among
- * them, and DD-024 clause 4's per-request peer refusal is sufficient there. What it catches is
- * `TT_HOST` SET to a routable address: loopback is then never bound at all, so after the answer the
- * process serves NOBODY from ANYWHERE for the life of the process. That is worse than a refusal and
- * it is silent.
- *
- * `isLoopbackHost` is reused rather than joined by a fourth predicate — it reads an
- * operator-supplied value, which is exactly what `BIND_HOST` is.
- *
- * IT IS ITS OWN FUNCTION rather than a line in `shapeStoreRefusal`, because the three doors do not
- * share refusal SEMANTICS even though they share the rules. `PUT /api/state` is compare-not-reject
- * — the client re-sends the whole settings object on every debounce and `useServerSync` re-queues
- * any non-409 forever, so a blanket refusal there is a permanent toast loop — while the two POST
- * doors refuse outright. That door composes THIS function inside its own change detection; the two
- * POST doors take the whole list below.
- * @param {string} shape the shape the caller wants stored @returns {string | null} the refusal, or null
- */
-function bindRefusal(shape) {
-  return shape === 'personal' && BIND_HOST != null && !isLoopbackHost(BIND_HOST) ? BIND_REFUSAL : null;
-}
-/**
- * EVERY REASON A SHAPE MAY NOT BE STORED, worded once — a shape-transition door is a second door
- * into one decision, never a second decision. Three doors call this: `POST /api/first-run`,
- * `POST /api/shape` and `PUT /api/state` (the last through `bindRefusal` alone, for the reason
- * above). A door that refuses less than its siblings is a bypass, and three inlined copies of a
- * growing list is how one comes to refuse less.
- *
- * ORDER MATTERS and is the order the existing doors already applied: the lock first (DC-002, it is
- * env-only and beats any write), then DD-006's one-person rule, then the bind.
- * @param {string} shape the shape the caller wants stored @returns {string | null} the refusal, or null
- */
-function shapeStoreRefusal(shape) {
-  if (shapeLocked()) return 'the instance shape is locked by server configuration (TT_SHAPE_LOCK)';
-  // DD-006 consequence 1, direction 2. Compared against the EFFECTIVE shape rather than the stored
-  // one, because that is the shape the caller is actually moving away from.
-  if (shape === 'personal' && activeShape() !== 'personal') {
-    const users = db.listUsers().length;
-    if (users > 1) return shapeSwitchRefusal(users);
-  }
-  return bindRefusal(shape);
-}
-
-/** Is the effective shape one that permits only a single user? @returns {boolean} */
-function singleUserShape() {
-  return activeShape() === 'personal';
-}
-
-/**
- * SB-098 item 4: DD-015's OPEN STATE — the one install configuration where the shape question
- * has two real answers and nobody has given one, so the app asks (`AppState.shapeOpen`).
- *
- * All three conditions, and each rules out a different install that must NOT be asked:
- *   `source === 'default'` — nothing stored, no TT_SHAPE, no TT_SHAPE_LOCK. An install that
- *      answered by env or by lock has answered; re-asking would let a modal overwrite what
- *      its operator typed on the command line. This one condition also subsumes the lock,
- *      which is why there is no separate `shapeLocked()` term.
- *   exactly one user — more than one has ANSWERED BY EXISTING (DD-015), and the boot rule
- *      above stamps those `team` silently. The count is re-checked HERE, per request, because
- *      the boot rule runs once: an open-state install that adds a second user mid-session
- *      leaves the open state the moment it does, without waiting for a restart.
- *   the caller is an admin — "ask at first admin login". Under the open state the single user
- *      IS the admin, so this never fires today; it is here so that the modal can never appear
- *      to an employee if some later path opens the state on a multi-user box.
- *
- * Resolved SERVER-SIDE, like every other shape decision. The client renders the question; it
- * does not get to decide whether it is being asked.
- *
- * THE FIRST TWO CONDITIONS ARE `firstRunOpen()`, CALLED RATHER THAN RESTATED (declared far below,
- * next to the routes it gates — a function declaration, so the hoist is real and not a trick). They
- * were a second copy until the end-gate review: DD-024's credential-free surface and this modal are
- * two views of ONE open state, and a copy is how they come to disagree about whether the question
- * is owed. Only the role condition belongs to this one, because only this one has a resolved user.
- * @param {User} user @returns {boolean}
- */
-function shapeQuestionOpen(user) {
-  return firstRunOpen() && user.role === 'admin';
-}
-
-// ---- SB-098 / DD-015: the loopback bind, and it is NOT best-effort ----
-//
-// The personal shape serves a person's timesheet with NO AUTHENTICATION (item 1 below, in
-// requireUser). Two things make that acceptable and both are load-bearing; this is the second.
-// Bound to 0.0.0.0, "no login" means no login for anyone on the same wifi — every colleague on
-// the office network reads and WRITES the vault owner's hours by typing an IP.
-//
-// So a non-loopback TT_HOST under `personal` REFUSES TO START rather than being ignored or
-// quietly overridden. The alternatives were considered and are both worse. Ignoring it leaves
-// an operator believing the box is reachable when it is not — annoying but safe — while
-// HONOURING it is the catastrophe, and "clamp it to loopback and log a line" is the same
-// silent-divergence failure this whole map exists to kill, on the one setting where being
-// wrong is unrecoverable: bytes served to the wrong network cannot be recalled.
-//
-// IT IS THE FIRST THING THAT RUNS, ahead even of `seedIfEmpty` — further ahead than the
-// ordering rule below strictly demands, because it can be: it needs the shape and the env and
-// nothing else. A boot refused here has not created an admin user, not seeded demo data, not
-// stamped a shape or a cutover and not swept a mirror. The one refusal whose subject is "the
-// wrong people can read this" should leave the least behind.
-//
-// It is a shape decision resolved SERVER-SIDE (shapeTarget: env, lock, stored row) — nothing a
-// client sends reaches it, and there is no request in flight when it runs.
-if (singleUserShape() && HOST && !isLoopbackHost(HOST)) {
-  console.error(
-    `[time-turtle] refusing to start: the personal shape has no login (DD-015), so it may only bind loopback — but TT_HOST=${JSON.stringify(HOST)} is not a loopback address.`,
-  );
-  console.error('[time-turtle] serving an unauthenticated timesheet on a reachable interface hands it to the network.');
-  console.error(`[time-turtle] recover with:  unset TT_HOST   (or run the team shape:  ${SHAPE_RECOVERY})`);
-  process.exit(1);
-}
-/**
- * The address `app.listen` binds.
- *
- * CORRECTED by DD-024 Amendment 1. This comment used to say *"under `personal` it is loopback,
- * always — the refusal above has already rejected every TT_HOST that is not"*. **That premise is
- * false on the path DD-024 makes standard.** `singleUserShape()` is `activeShape() === 'personal'`
- * and this line runs at MODULE LOAD, before the shape question is asked — so on every first run
- * the shape is still `team` here, the boot refusal above never fires, and this resolves to
- * `undefined`: the every-interface bind. The shape becomes `personal` seconds later and NOTHING
- * re-evaluates this. That is SB-162, and it was confirmed live.
- *
- * What is still true: an install that boots with the shape ALREADY resolved to `personal` (a
- * stored row, `TT_SHAPE=personal`) does bind loopback, and the refusal above did reject every
- * `TT_HOST` that would make it otherwise.
- *
- * The gap is covered at the request layer instead, in two places — the peer refusal registered
- * first on `app` below (clause 4), and `shapeStoreRefusal`'s bind refusal, which stops an install
- * bound to a ROUTABLE address from storing `personal` at all. Neither closes the socket; only a
- * restart does that, and by then this line has the right answer.
- */
-const BIND_HOST = singleUserShape() ? HOST || '127.0.0.1' : HOST || undefined;
-
 db.seedIfEmpty();
 
-// SB-056 / DD-006 consequence 1, direction 3: the boot refusal. See the single-user guard's
-// comment block above for why refusing to start is the right shape and what was rejected.
-//
-// IT RUNS BEFORE THE SWEEP, and the order is load-bearing. A process whose contract is "I
-// refuse to start" must not mutate the vault on its way out: with the sweep first, a copied
-// data dir booted into `personal` renamed every mirror file it could find and THEN exited 1
-// telling the operator to recover — leaving a spurious `.retired-<date>.md` behind from a boot
-// that never happened. Rename-only means no bytes were lost, but the file they were looking at
-// had moved for no reason.
-{
-  const users = db.listUsers().length;
-  if (singleUserShape() && users > 1) {
-    console.error(
-      `[time-turtle] refusing to start: the personal shape allows exactly one user (DD-006) and this data dir holds ${users}.`,
-    );
-    console.error(`[time-turtle] recover with:  ${SHAPE_RECOVERY}`);
-    console.error('[time-turtle] that combination beats the stored shape setting, which TT_SHAPE on its own does not.');
-    process.exit(1);
-  }
-}
-
-// ---- SB-100: what the boot answers for itself ----
-//
-// BOTH WRITES BELOW SIT AFTER THE REFUSAL, and that is the same load-bearing ordering the
-// retirement sweep has: a process whose contract is "I refuse to start" must not mutate the
-// data dir on its way out. A refused boot writes neither a shape nor a cutover.
-{
-  const target = shapeTarget();
-  // DD-015, the inference rule: more than one user has ANSWERED THE QUESTION BY EXISTING.
-  // Stamp `team`, silently, never ask — every deployed team install sails past this with no
-  // modal, and SB-098's first-run question never has to render a refusal it cannot resolve.
-  //
-  // Keyed on `source === 'default'`, NOT on the user count alone. `env`, `env-locked` and
-  // `setting` are all installs that have already answered, and re-answering one underneath its
-  // operator would turn the loud direction-3 boot refusal into silence — someone who types
-  // TT_SHAPE=personal at a five-user data dir must still be refused, not quietly overruled.
-  //
-  // `default` + one user is the OPEN state, and it deliberately stays open: SB-098 ships the
-  // asking, and a row written here would answer the question before anyone was asked.
-  if (target.source === 'default' && db.listUsers().length > 1) {
-    store.putSettings({ shape: 'team' });
-    console.log(
-      `[time-turtle] inferred shape: team — this data dir holds ${db.listUsers().length} users, which answers it (DD-015)`,
-    );
-  }
-  // DD-016, the cutover: the instant this install became `personal`. Stamped for the EFFECTIVE
-  // shape rather than only for a stored one, because `TT_SHAPE=personal` reaches the same live
-  // vault without ever writing a setting — and an unstamped vault store has no pre-cutover
-  // history at all, i.e. every entry eligible, which is DD-016's hazard inverted.
-  //
-  // It stamps the DATE, not the shape: the row written here must never turn an env choice into
-  // a stored one, or TT_SHAPE would stop being how you change your mind.
-  //
-  // Idempotent and first-stamp-wins. ENFORCING it — no vault write, no DD-012 adoption for
-  // entries dated before it — is SB-057's, because that is where a vault write first exists.
-  if (target.shape === 'personal') {
-    const at = store.stampVaultCutover();
-    console.log(`[time-turtle] vault cutover: ${at} — entries dated before it stay in SQLite (DD-016)`);
-
-    // ---- PLAN-013 / SB-115 / DD-018: what this boot just STRANDED ----
-    //
-    // DD-018 keeps the env path UNGATED on purpose — you cannot ask a boot, and an env var is the
-    // operator's answer — but it owes the same sentences the modal owes, because an env-switched
-    // install is precisely the one where nobody was in the room at the moment of stranding.
-    //
-    // PLACEMENT IS THE WHOLE THING, and it is why this is HERE and not in the `app.listen`
-    // callback: after the stamp, so the preflight reads the cutover now in force; before
-    // `retireMirrors()` below, so the mirror files are still there to count and so SB-115's
-    // ordering rule — ENTRIES FIRST, FILES LAST — is true where the per-file retirement lines
-    // already print. The listen banner is deliberately untouched: DD-018's mock is abbreviated and
-    // the composite `api on … · shape: … · storage: …` line is SB-073's.
-    //
-    // The SENTENCES are composed in shape-preflight.js, next to the numbers they describe; the
-    // EMISSION is here, one `console.log` per line, because the order rule is a claim about
-    // separate statements. An empty list is the silence rule and prints nothing.
-    //
-    // `db.listUsers()[0]` is safe HERE and would not be higher up: `seedIfEmpty()` guarantees a
-    // row and the single-user refusal has already run, so under `personal` there is exactly one.
-    //
-    // WRAPPED, for the same reason `retireMirrors` guards its `saveGuard` (server/src/markdown.js):
-    // this is a bare top-level call, so an unguarded throw would kill the server at import with a
-    // stack trace — and this whole block exists to print a log line. A boot that cannot say what it
-    // stranded still boots.
-    try {
-      for (const line of strandingBannerLines(db.listUsers()[0].id)) console.log('[time-turtle]   ' + line);
-    } catch (err) {
-      console.error(`[time-turtle] could not report what this boot stranded: ${/** @type {Error} */ (err).message}`);
-    }
-  }
-}
-
-// SB-056 / DD-011: the one-shot boot sweep. NOT optional and not redundant with the sweep
-// store.mirror does on every save — an install switched by `TT_SHAPE=personal` alone never
-// fires a settings write, so without this the mirror files would sit next to the daily notes
-// looking current until somebody happened to save. Idempotent; runs after seedIfEmpty so
-// listUsers() is populated on a first run, and after the refusal above so a server that is
-// not going to start touches nothing.
-if (!TT.shapeCapabilities(activeShape()).mirror) {
-  // PLAN-013: the total. `retireMirrors()` has always returned what it renamed and this call site
-  // has always discarded it. It belongs HERE and nowhere else — `retireMirrors` also runs on every
-  // save via `store.mirror`, so a total printed inside it would fire on every keystroke.
-  const retired = retireMirrors();
-  if (retired.length)
-    console.log(`[time-turtle] ${retired.length} mirror file${retired.length === 1 ? '' : 's'} retired in total`);
-}
-
 const app = express();
-
-// ---- SB-162 / DD-024 clause 4: a `personal` install answers only the machine it runs on ----
-//
-// CONFIRMED LIVE against Terje's own instance on 2026-07-27, from another machine on the wifi:
-//
-//     curl    http://192.168.1.91:3002/api/state                    → 403
-//     curl -H 'Host: localhost' http://192.168.1.91:3002/api/state  → 200, admin session, no credentials
-//
-// `BIND_HOST` is evaluated ONCE at module load (see its comment above). DD-024 moves the shape
-// question AFTER boot, so `singleUserShape()` is false at bind time on every personal install from
-// now on, the every-interface bind stands, and the shape becomes `personal` seconds later — at
-// which point `requireUser`'s no-identity branch hands out an admin session with no credential.
-// Before DD-024 that ordering was an accident of one person's boot order. This plan makes it the
-// standard path, so closing it belongs here rather than to a later cleanup.
-//
-// EVALUATED PER REQUEST, never cached. The shape changing at runtime IS the bug; a value resolved
-// once would reproduce it exactly.
-//
-// FIRST, ahead of the body parser, the routes and the static handler. A caller this refuses should
-// not get 4 MB of JSON parsed on its behalf, and the static client is refused on the same terms as
-// the API — serving the app to the LAN while refusing the API hands out a client that cannot talk
-// to anything, and it is the same bytes-to-the-wrong-network question either way.
-//
-// IT REFUSES TO SERVE AND DOES NOT RE-BIND, and the cost of that is real and belongs in writing:
-// THE PORT STAYS OPEN. The socket keeps listening on every interface for the life of the process,
-// so a port scan finds it and a TCP connection succeeds — only the response is empty. Re-binding
-// was rejected because a runtime `close()` + `listen()` can fail (address in use, TIME_WAIT) and
-// leaves a process with NO socket at all, which is worse than one that answers nothing, and it
-// drops requests in flight. The boot refusal's own reasoning applies: the guard whose subject is
-// *the wrong people can read this* should leave the least behind. The restart the person makes
-// anyway is what corrects the bind durably. Do not let a later reader believe the port closed.
-//
-// THE HOST CHECK IN `requireUser` STAYS AND IS NOT REDUNDANT WITH THIS. Two guards, two attacks:
-// the peer address stops another machine on the wifi; the Host header stops DNS rebinding in the
-// user's own browser, which arrives OVER LOOPBACK and is therefore invisible here. Deleting either
-// re-opens an attack the other never covered. `server/src/config.js` refuses to fold two loopback
-// predicates together for a related reason; this is the third and the same rule holds.
-//
-// `team` IS UNTOUCHED. There a LAN bind is the documented, wanted behaviour and there is a cookie
-// challenge in front of it — a colleague typing an IP is what a company install is FOR.
-const PEER_REFUSAL = 'this Time Turtle is a personal install: it answers only the machine it runs on.';
-app.use((req, res, next) => {
-  // THE CHEAP TERM FIRST, and the order is not style. This middleware is registered ahead of the
-  // routes AND the static handler, so it runs for every JS chunk, every stylesheet and the
-  // background image — while `singleUserShape()` reaches `getStoredShape()`, a synchronous SQLite
-  // read. Peer-first means a loopback caller never touches the database, and on a personal install
-  // every caller is a loopback caller. Both terms are pure, so the conjunction is unchanged, and
-  // the shape is still resolved PER REQUEST rather than cached, which is the property that matters.
-  if (!isLoopbackPeer(req.socket.remoteAddress) && singleUserShape()) {
-    // Nothing about the caller is reflected back, including the address it came from.
-    return res.status(403).json({ error: PEER_REFUSAL });
-  }
-  next();
-});
 
 app.use(express.json({ limit: '4mb' }));
 
 // ---- auth middleware ----
-/**
- * SB-098 / DD-015 depth 2, item 1: the implicit local session.
- *
- * Under `personal` there is exactly ONE human and the machine is theirs, so the cookie
- * challenge asks a question with one possible answer. `requireUser` resolves that answer
- * itself and the Login screen is never rendered. The user RECORD is untouched — `user_id 1`,
- * the schema, and every `user_id` join stay exactly as they are (depth 3, dropping `user_id`,
- * was rejected: it would make the two shapes two programs).
- *
- * THIS IS THE ONE PLACE AUTHENTICATION CAN BE SKIPPED, and it stays the one place. Two
- * properties are what make that safe, and neither is negotiable:
- *
- *   1. IT KEYS OFF THE EFFECTIVE SHAPE, resolved server-side by `shapeTarget()` from the env,
- *      the lock and the stored row. Nothing the client sends reaches this decision. A
- *      client-supplied shape hint here would not be a design smell, it would be a one-line
- *      auth bypass: any request could claim `personal` and skip the challenge. There is
- *      deliberately no header, no query parameter and no body field consulted below.
- *   2. IT IS LOOPBACK-ONLY. The boot block above refuses to start `personal` on a
- *      non-loopback bind, so "no login" cannot silently mean "no login for the whole office".
- *   3. SB-136: IT IS ADDRESSED-TO-LOOPBACK-ONLY. Property 2 covers the wifi; it does not cover
- *      a web page the user merely visited, because DNS REBINDING DEFEATS LOOPBACK — an
- *      attacker domain re-resolving to 127.0.0.1 is same-origin to the browser, so there is no
- *      preflight to fail and no opaque response to hide behind, and with no cookie to be
- *      missing the whole API is readable AND writable by that page. The `Host` header is the
- *      one thing the page cannot forge, so a Host that is not loopback is refused below.
- *
- * The COUNT CHECK is belt and braces rather than the guarantee: three separate guards already
- * make >1 user under `personal` unreachable (the boot refusal, the `POST /api/users` refusal
- * and the switch refusal), but if one of them were ever weakened, the failure mode without
- * this line is picking an arbitrary person's timesheet for an anonymous caller. With it, the
- * shape simply falls back to asking who you are, which is the safe direction.
- *
- * A REAL COOKIE STILL WINS where there is one — a session that survives a `team → personal`
- * switch keeps working rather than being silently re-pointed.
- * @param {Request} req @param {Response} res @param {NextFunction} next
- */
+/** @param {Request} req @param {Response} res @param {NextFunction} next */
 function requireUser(req, res, next) {
   const sess = readSessionCookie(req);
   const user = sess ? db.findUserById(sess.userId) : null;
   // SB-013: reject a token whose version is behind the stored one — the cookie was
   // issued before a password change, so its session is no longer trusted.
   if (!sess || !user || sess.tokenVersion !== db.getTokenVersion(user.id)) {
-    if (!TT.shapeCapabilities(activeShape()).identity) {
-      // SB-136, property 3. It sits INSIDE the no-identity branch and nowhere else: under
-      // `team` this block is never entered, so the demo instance's cookie challenge is
-      // untouched — and even here a REAL COOKIE STILL WINS, because a request carrying one
-      // never reaches this branch at all. 403, not 401: nothing about the caller's credentials
-      // would make this request acceptable.
-      //
-      // The refusal says nothing back about the Host it was sent — reflecting an
-      // attacker-chosen string into a response body is a habit worth not having.
-      if (!isLoopbackHostHeader(req.headers.host)) {
-        return res.status(403).json({ error: 'this request was not addressed to localhost' });
-      }
-      const only = db.listUsers();
-      // `findUserById`, not the list row, so `req.user` is byte-identical to what the cookie
-      // path produces — one session object, one shape, whichever way it was resolved.
-      const local = only.length === 1 ? db.findUserById(only[0].id) : null;
-      if (local) {
-        req.user = local;
-        return next();
-      }
-    }
     return res.status(401).json({ error: 'not authenticated' });
   }
   req.user = user;
@@ -532,67 +89,6 @@ app.post('/api/users/:id/password', requireUser, requireAdmin, (req, res) => {
 });
 
 // ---- state ----
-/**
- * SB-057: the daily notes TT has stopped writing to. Derived from `vault_index`, so it is sticky
- * across restarts by construction and needs no ledger of its own.
- *
- * The REASON CODE is carried raw and the wording is resolved on the surface
- * (`TT.vaultQuarantineText`), which is what lets SB-090 move a reason without touching the wire.
- * @returns {import('../../shared/types.ts').VaultQuarantinedNote[]}
- */
-function vaultQuarantinedNotes() {
-  // GATED ON THE SHAPE, and this is a privacy check rather than an optimisation. Every other field
-  // in `stateFor` is either stripped for employees, scoped to `user.id`, or admin-gated; this one
-  // would hand any authenticated caller the absolute filesystem paths of the vault owner's daily
-  // notes. Under `team` it happens to be empty today only because nothing writes `vault_index`
-  // there — not because anything checked — and a `personal → team` switch leaves those rows behind.
-  // Under `personal` there is exactly one user (DD-006 consequence 1), so there is nobody to leak to.
-  if (activeShape() !== 'personal') return [];
-  return store
-    .listVaultIndex()
-    .filter((row) => row.state === 'quarantined')
-    .map((row) => ({
-      path: row.path,
-      date: row.date,
-      reason: String(row.quarantineReason || ''),
-      detectedAt: row.quarantinedAt ?? null,
-    }));
-}
-/**
- * SB-133: the settings object AS IT GOES ON THE WIRE — `shape` is the value that was CHOSEN,
- * and ABSENT when nobody has chosen one. `getSettings()` keeps defaulting it to `team` for every
- * server-side reader, which is right (DD-015: `team` is the safe row); what is wrong is putting
- * that invented value in front of a client that PUTs the whole object back.
- *
- * That round trip was a live defect, not a tidiness point. An install started `TT_SHAPE=personal`
- * with nothing stored received `shape: 'team'` here, echoed it back with the first vault path
- * typed into Settings, and STORED it — and a stored value beats the env (SB-100's precedence,
- * working exactly as designed), so the backend derived to `sqlite` and the vault went quiet while
- * TT went on accepting hours. No error, no toast, no refusal: the silent divergence this whole
- * map exists to kill, arriving through the settings page.
- *
- * THE SEAM IS HERE AND NOT AT THE WRITE EDGE, because the write edge cannot tell the two apart.
- * An incoming `shape: 'team'` is either a person choosing Team or a client parroting a default it
- * was handed, and those are the same bytes; a server-side compare could only guess, and guessing
- * wrong in one direction stores a choice nobody made while guessing wrong in the other silently
- * swallows a real one. Nothing that was never SENT has to be guessed about. It also fixes the
- * class rather than the instance: the next instance-local field with a meaningful default would
- * do this again. (`mdDir` escapes only because its default is `''`, a value nobody can mean —
- * see the `getStoredShape` comment in db.js, which is the same distinction one field over.)
- *
- * The EFFECTIVE shape is not lost by this: it has its own field, `AppState.shape`, which is what
- * every client capability check already reads, and `shape?: Shape` in the type has said "absent
- * behaves as `team` AND is distinguishable from a stored `team`" since SB-100.
- * @returns {import('../../shared/types.ts').Settings & { mdDir: string }}
- */
-function wireSettings() {
-  const settings = store.getSettings();
-  const stored = store.getStoredShape();
-  if (stored) return { ...settings, shape: stored };
-  const { shape: _defaulted, ...rest } = settings;
-  return /** @type {import('../../shared/types.ts').Settings & { mdDir: string }} */ (rest);
-}
-
 // Employees never see hourly rates: stripped server-side, not just hidden in the UI.
 /** @param {User} user */
 function stateFor(user) {
@@ -605,36 +101,15 @@ function stateFor(user) {
   // segment's chip can render read-only (ruling 5) — but the per-entry money snapshot is
   // dropped (a server strip, not a UI hide) and releasedBy is admin-internal. Admins keep
   // the full segment.
-  const commits = store.getCommits(user.id);
+  const commits = db.getCommits(user.id);
   return {
     user,
-    version: store.getVersions(user.id),
-    mdDirLocked: MD_DIR_LOCKED,
-    // SB-100: the EFFECTIVE shape, not the stored one — the env and the lock can both beat
-    // the setting, and every client capability check reads this. Additive and read-only: this
-    // pair is the one wire change SB-056 makes, and "the team shape comes out byte-for-byte
-    // unchanged" is a claim about the DB and the mirror bytes, not about the envelope. The
-    // BACKEND is not on the wire: it is derived from the shape (DD-015), never chosen.
-    shape: activeShape(),
-    shapeLocked: shapeLocked(),
-    // SB-098: DD-015's open state. See shapeQuestionOpen — the client renders the question,
-    // it does not decide whether it is being asked.
-    shapeOpen: shapeQuestionOpen(user),
-    // SB-065: a standing mirror refusal is STATE, not a log line — a mirror that has
-    // quietly stopped updating still looks current, which is the failure this guards.
-    mirrorBlocked: mirrorBlockFor(user),
-    // SB-057: the same argument, one shape over. Under `personal` the vault IS the storage, so a
-    // silently quarantined day is a day whose hours stop syncing with no signal anywhere. Read-only
-    // and additive; empty under `team`, which has no vault. No resolution ACTION — SB-103 rules
-    // what a human may do about one, and every option there is additive on top of this.
-    vaultQuarantined: vaultQuarantinedNotes(),
-    // SB-133: `wireSettings()`, never `store.getSettings()` — the defaulted `shape` must not
-    // leave the server, because the client PUTs this object straight back.
-    settings: wireSettings(),
-    clients: store.getClients().map(strip),
-    projects: store.getProjects().map(strip),
-    tasks: store.getTasks(user.id),
-    entries: store.getEntries(user.id),
+    version: db.getVersions(user.id),
+    settings: db.getSettings(),
+    clients: db.getClients().map(strip),
+    projects: db.getProjects().map(strip),
+    tasks: db.getTasks(user.id),
+    entries: db.getEntries(user.id),
     commits: admin
       ? commits
       : commits.map((c) => ({
@@ -661,12 +136,12 @@ class ConflictError extends Error {
 }
 
 /**
- * SB-070: an entry id is the ONE caller-supplied string that reaches the mirror's `## commits`
- * section, and that section is deliberately not escaped (see the commits serializer in
+ * SB-070: an entry id is the ONE caller-supplied string that reaches the markdown codec's
+ * `## commits` section (`TT.serializeMd`), and that section is deliberately not escaped (see the commits serializer in
  * shared/core.js — every field in it is machine-generated, so encodeCell would be a no-op).
  * An id holding a `|` therefore splits its own frozen-money row: `  - a|b | 1250 | 60 | 100`
  * parses back to snapshot key `a` with rate NaN, silently rewriting COMMITTED money on a
- * mirror restore. Terje's ruling (option 1) closes it at the source instead of escaping the
+ * markdown round trip. Terje's ruling (option 1) closes it at the source instead of escaping the
  * section: reject the id at the API boundary, loud and explicit, server-side.
  *
  * The charset is what the machine already produces — `nid()` (`e<n>-<base36>`), and any
@@ -692,12 +167,12 @@ function entryIdError(entries) {
 }
 
 /**
- * SB-074: the commit SEGMENT KEY is the other caller-supplied string that reaches the mirror's
- * unescaped `## commits` section — and unlike an entry id (machine-minted by `nid()`) it is taken
+ * SB-074: the commit SEGMENT KEY is the other caller-supplied string that reaches the markdown
+ * codec's unescaped `## commits` section — and unlike an entry id (machine-minted by `nid()`) it is taken
  * verbatim from the request body. A key holding a `|` splits its own segment HEADER:
  * `- 2026-W30-2026-07|x | <ts>` parses back as key `2026-W30-2026-07` with committedAt `x`, so two
  * segments now share one key and `TT.commitSnapshot` (`commits.find(...)`, shared/core.js) takes
- * the first — the empty one. Committed money silently vanishes on a mirror restore. Same class as
+ * the first — the empty one. Committed money silently vanishes on a markdown round trip. Same class as
  * SB-070, same fix shape: reject at the API boundary, before anything writes.
  *
  * DERIVED, NOT RE-DECLARED. `TT.segmentKey` stays the one home of the grammar: a key is valid iff
@@ -732,7 +207,7 @@ function isSegmentKey(key) {
  * HONESTY NOTE (measured, see SB-074): this is defence in depth, not a live hole.
  * `reconcileCommits` never trusts a client `committedAt` — a new key is server-stamped and a
  * known key keeps the STORED segment verbatim — so today nothing hostile in this field can reach
- * the store. The guard exists so a future refactor that starts honouring the body cannot quietly
+ * the db. The guard exists so a future refactor that starts honouring the body cannot quietly
  * re-open the header split.
  *
  * Derived from the emitter, not hand-written: both the server (`new Date().toISOString()`) and the
@@ -789,84 +264,6 @@ function commitLedgerError(commits) {
 }
 
 /**
- * SB-056 / DD-008: the commit capability gate. Returns the refusal message when this request
- * would CHANGE the ledger under a shape that cannot hold one, or null when it may proceed.
- *
- * A CHANGE, not the presence of a ledger: an install that committed weeks under `team` and
- * then switched keeps re-sending those segments on every debounce, and refusing them would
- * wedge it forever (see the call site). So the incoming key SET is compared against the stored
- * one — identical rides along, any difference is refused. Order and duplicates do not matter:
- * `commitLedgerError` has already rejected a repeated key with a 400 before this runs.
- *
- * The wording comes from `TT.shapeOffReason` so this and Task 7's on-screen explanation
- * cannot claim different things.
- * @param {number} userId @param {any[]} incoming @returns {string | null}
- */
-function commitCapabilityRefusal(userId, incoming) {
-  const reason = TT.shapeOffReason('committing', activeShape());
-  if (!reason) return null;
-  const stored = new Set(store.getCommits(userId).map((segment) => segment.key));
-  const wanted = new Set(incoming.map((segment) => (segment == null ? undefined : segment.key)));
-  if (stored.size === wanted.size && [...stored].every((key) => wanted.has(key))) return null;
-  return reason;
-}
-
-/**
- * SB-102 / DD-017 §1: the FROZEN-DAY gate. Returns the refusal when this PUT would CHANGE
- * anything inside a day the personal shape holds read-only, or null when it may proceed.
- *
- * SHAPE-GATED AND ROLE-BLIND, and that is the entire point of DD-017. `pinCommittedEntries`
- * below cannot be reused for this: it runs `if (!admin)` and under `personal` the one user IS
- * the seeded admin (DD-015 depth 2), so the existing lock never fires for the only person there
- * is. It also PINS — silently reverting the edit — where this REFUSES, because a personal user
- * editing their own pre-vault history deserves to be told no rather than to watch a keystroke
- * evaporate.
- *
- * A CHANGE, NOT THE PRESENCE — same shape as `commitCapabilityRefusal` above and for the same
- * sharp reason. `db.putEntries` is DELETE-all-then-insert and the client PUTs its whole state,
- * so every frozen entry arrives on every debounce by construction; `useServerSync` re-queues any
- * non-409 failure and re-arms a 4 s timer forever, so refusing the presence of pre-vault history
- * would be a permanent toast loop for anyone with any history at all. Strictly worse than no
- * guard.
- *
- * Compared as SETS of canonicalised entries, which catches all four kinds of change at once: a
- * modified field, a row added, a row removed, and a row MOVED into or out of a frozen day (it is
- * in one subset and not the other). `TT.entryMatchKey` is the canonical form because it
- * normalises exactly the way `db.putEntries` does — project null→'', label/note trimmed, billable
- * truthy→1 — so a stored row re-sent by the client keys identically and cannot false-positive.
- * The id is prefixed because DD-017 freezes rows, not just their contents.
- *
- * `editedByAdmin` is deliberately not in the key: `pinEditedByAdmin` already pins it to the
- * stored value for every caller, so it cannot be moved through this route anyway.
- * @param {number} userId @param {any[]} incoming @returns {string | null}
- */
-function frozenEntryRefusal(userId, incoming) {
-  if (activeShape() !== 'personal') return null;
-  /** The same context `vault-write.js` builds. No `admin` — the personal branch never reads it. */
-  const ctx = {
-    shape: 'personal',
-    vaultCutover: store.getSettings().vaultCutover,
-    commits: store.getCommits(userId),
-  };
-  /** @param {any[] | undefined} entries @returns {string[]} the frozen rows, canonical and sorted */
-  const frozenSet = (entries) => {
-    /** @type {string[]} */
-    const keys = [];
-    for (const entry of entries || []) {
-      if (!entry || typeof entry.date !== 'string') continue;
-      // U+001E, one level up from entryMatchKey's U+001F join, so no id can spell its way
-      // into the date field and collide with a different row.
-      if (TT.readOnlyDay(entry.date, ctx)) keys.push(String(entry.id) + '\u001E' + TT.entryMatchKey(entry));
-    }
-    return keys.sort();
-  };
-  const stored = frozenSet(store.getEntries(userId));
-  const wanted = frozenSet(incoming);
-  if (stored.length === wanted.length && stored.every((key, i) => key === wanted[i])) return null;
-  return TT.FROZEN_ENTRY_REFUSAL;
-}
-
-/**
  * SDD-002 ruling 7 (PLAN-006): the never-referenced true-delete guard, mapped to 409.
  * Archive is the default path; a HARD delete is a code/id ABSENT from the collection-
  * replace PUT (there is no DELETE route). The server allows a hard delete only when the
@@ -885,8 +282,8 @@ class ReferencedDeleteError extends Error {}
 function guardReferencedDeletes(body) {
   if (body.projects !== undefined) {
     const incoming = new Set(body.projects.map((project) => String(project.code)));
-    for (const stored of store.getProjects()) {
-      if (!incoming.has(stored.code) && store.projectCodeReferenced(stored.code))
+    for (const stored of db.getProjects()) {
+      if (!incoming.has(stored.code) && db.projectCodeReferenced(stored.code))
         throw new ReferencedDeleteError(
           'cannot delete project ' + stored.code + ': it has logged entries (archive it)',
         );
@@ -894,8 +291,8 @@ function guardReferencedDeletes(body) {
   }
   if (body.clients !== undefined) {
     const incoming = new Set(body.clients.map((client) => String(client.id)));
-    for (const stored of store.getClients()) {
-      if (!incoming.has(stored.id) && store.clientReferenced(stored.id))
+    for (const stored of db.getClients()) {
+      if (!incoming.has(stored.id) && db.clientReferenced(stored.id))
         throw new ReferencedDeleteError('cannot delete client ' + stored.id + ': it has projects (archive it)');
     }
   }
@@ -914,10 +311,10 @@ function guardReferencedDeletes(body) {
  */
 function normalizeBillable(userId, body) {
   if (body.entries === undefined) return;
-  const projState = { projects: store.getProjects() };
+  const projState = { projects: db.getProjects() };
   /** @param {string | null} code */
   const derive = (code) => TT.projectBillable(projState, code ?? null);
-  const stored = new Map(store.getEntries(userId).map((entry) => [entry.id, entry]));
+  const stored = new Map(db.getEntries(userId).map((entry) => [entry.id, entry]));
   body.entries = body.entries.map((entry) => {
     const prior = stored.get(entry.id);
     if (prior) {
@@ -940,7 +337,7 @@ function normalizeBillable(userId, body) {
  */
 function pinEditedByAdmin(userId, body) {
   if (body.entries === undefined) return;
-  const stored = new Map(store.getEntries(userId).map((entry) => [entry.id, entry]));
+  const stored = new Map(db.getEntries(userId).map((entry) => [entry.id, entry]));
   body.entries = body.entries.map((entry) => {
     const prior = stored.get(entry.id);
     return { ...entry, editedByAdmin: !!(prior && prior.editedByAdmin) };
@@ -991,7 +388,7 @@ function deriveSnapshot(catalog, entries, key) {
  * @returns {{ pinnedKeys: Set<string> }}
  */
 function reconcileCommits(userId, body, isEmployee) {
-  const stored = store.getCommits(userId);
+  const stored = db.getCommits(userId);
   const storedByKey = new Map(stored.map((commit) => [commit.key, commit]));
   // Keys the employee cannot drop: approved-and-not-released (the ruling-5 lock).
   const lockedKeys = isEmployee ? stored.filter((commit) => TT.segmentApproved(commit)).map((c) => c.key) : [];
@@ -1014,12 +411,12 @@ function reconcileCommits(userId, body, isEmployee) {
       incomingKeys.push(key);
     }
   }
-  const effectiveEntries = body.entries !== undefined ? body.entries : store.getEntries(userId);
+  const effectiveEntries = body.entries !== undefined ? body.entries : db.getEntries(userId);
   /** @type {import('../../shared/types.ts').Catalog} */
   const catalog = {
-    settings: store.getSettings(),
-    clients: store.getClients(),
-    projects: store.getProjects(),
+    settings: db.getSettings(),
+    clients: db.getClients(),
+    projects: db.getProjects(),
     tasks: [],
     entries: [],
   };
@@ -1044,7 +441,7 @@ function reconcileCommits(userId, body, isEmployee) {
  */
 function pinCommittedEntries(userId, body, pinnedKeys) {
   if (body.entries === undefined || pinnedKeys.size === 0) return;
-  const stored = store.getEntries(userId);
+  const stored = db.getEntries(userId);
   const storedById = new Map(stored.map((entry) => [entry.id, entry]));
   /** @param {string} date */
   const isPinned = (date) => pinnedKeys.has(TT.segmentKey(date));
@@ -1108,72 +505,6 @@ app.put('/api/state', requireUser, (req, res) => {
     const badCommit = commitLedgerError(body.commits);
     if (badCommit) return res.status(400).json({ error: badCommit });
   }
-  // DC-002: with TT_MD_DIR_LOCK set the mirror path is env-only. Compare against the
-  // stored value rather than rejecting the key outright — the client PUTs the whole
-  // settings object, so an unchanged mdDir rides along with every currency/language edit.
-  if (
-    MD_DIR_LOCKED &&
-    body.settings &&
-    body.settings.mdDir !== undefined &&
-    String(body.settings.mdDir) !== store.getSettings().mdDir
-  ) {
-    return res.status(403).json({ error: 'mirror folder is locked by server configuration (TT_MD_DIR_LOCK)' });
-  }
-  // SB-100, DC-002 again: with TT_SHAPE_LOCK set the shape is env-only. Compare against
-  // the STORED value rather than rejecting the key — the client PUTs the whole settings object
-  // on every currency edit, and a blanket 403 would wedge it: `useServerSync` re-queues any
-  // non-409 failure and retries every 4 s forever, so an unchanged value has to ride along.
-  //
-  // SB-133: `getStoredShape()`, and now it really is the stored value the sentence above always
-  // claimed. `getSettings().shape` defaults to `team`, so a locked install with nothing stored
-  // used to let an incoming `team` through this guard and STORE it — a row the lock was there to
-  // prevent, invisible until the day someone removed TT_SHAPE_LOCK and the install moved. The
-  // ride-along is untouched: `stateFor` no longer sends a shape nobody chose, so an unchanged
-  // settings object carries no `shape` key at all, and one that does carries the stored value.
-  if (
-    shapeLocked() &&
-    body.settings &&
-    body.settings.shape !== undefined &&
-    String(body.settings.shape) !== store.getStoredShape()
-  ) {
-    return res.status(403).json({ error: 'the instance shape is locked by server configuration (TT_SHAPE_LOCK)' });
-  }
-  // SB-056 / DD-006 consequence 1, direction 2: refuse to switch TO `personal` while more than
-  // one user exists. Same compare-not-reject shape as the two locks above — the client re-sends
-  // the whole settings object, so this only fires on an actual CHANGE to `personal`.
-  if (body.settings && body.settings.shape === 'personal' && store.getSettings().shape !== 'personal') {
-    const users = db.listUsers().length;
-    if (users > 1) return res.status(403).json({ error: shapeSwitchRefusal(users) });
-    // DD-024 Amendment 1: the third door gets the bind refusal too, INSIDE the change detection
-    // above rather than beside the locks — this route is compare-not-reject on purpose, and a
-    // refusal that fired on an unchanged ride-along would wedge `useServerSync` permanently.
-    const bound = bindRefusal('personal');
-    if (bound) return res.status(403).json({ error: bound });
-  }
-  // SB-056 / DD-008: committing is a CAPABILITY of the shape, and under `personal` there is
-  // nowhere to persist a commit — the ledger belongs in weekly notes, which are phase 3.
-  //
-  // It refuses a CHANGE to the ledger, not its presence, which is the same shape the mdDir
-  // lock takes and for a sharper reason: `useServerSync` re-queues any non-409 failure and
-  // re-arms a 4 s timer forever, so a blanket 403 on `commits` would put anyone who committed
-  // anything BEFORE the switch into a permanent toast loop on every keystroke they log.
-  // Whether those pre-switch segments should still be RENDERED is SB-093, not this guard.
-  if (body.commits !== undefined) {
-    const refusal = commitCapabilityRefusal(req.user.id, body.commits);
-    if (refusal) return res.status(403).json({ error: refusal });
-  }
-  // SB-102 / DD-017 §1: under `personal`, editable ⇔ vault-bound. A day that does not reach a
-  // daily note cannot be typed into — and that has to be enforced HERE, not in the grid: a stale
-  // tab, a second machine and a hand-rolled PUT all arrive at this route. Same compare-not-reject
-  // shape as the guards above, so an unchanged frozen set rides along on every debounce.
-  //
-  // Before any write, and before `reconcileCommits`/`pinCommittedEntries` touch the body, so a
-  // refused PUT writes nothing at all — a 403 raised after `putEntries` is indistinguishable from
-  // outside the process.
-  if (body.entries !== undefined) {
-    const frozen = frozenEntryRefusal(req.user.id, body.entries);
-    if (frozen) return res.status(403).json({ error: frozen });
-  }
   const expected = body.version;
   if (expected !== undefined && (typeof expected !== 'object' || expected === null)) {
     return res.status(400).json({ error: 'version must be an object' });
@@ -1199,24 +530,24 @@ app.put('/api/state', requireUser, (req, res) => {
   // share one scope, so a commit write follows the same DC-001 409 semantics.
   const touchesPersonal = body.entries !== undefined || body.tasks !== undefined || body.commits !== undefined;
   try {
-    store.transaction(() => {
+    db.transaction(() => {
       // Checked inside the transaction so the compare and the write cannot be
       // split by another writer.
-      const current = store.getVersions(req.user.id);
+      const current = db.getVersions(req.user.id);
       if (touchesCatalog && expected?.catalog !== undefined && +expected.catalog !== current.catalog)
         throw new ConflictError('catalog', current);
       if (touchesPersonal && expected?.entries !== undefined && +expected.entries !== current.entries)
         throw new ConflictError('entries', current);
       // SDD-002 ruling 7: refuse to hard-delete a still-referenced code/id (archive instead).
       guardReferencedDeletes(body);
-      if (body.settings) store.putSettings(body.settings);
-      if (body.clients) store.putClients(body.clients);
-      if (body.projects) store.putProjects(body.projects);
-      if (body.tasks) store.putTasks(req.user.id, body.tasks);
-      if (body.entries) store.putEntries(req.user.id, body.entries);
-      if (body.commits !== undefined) store.putCommits(req.user.id, body.commits);
-      if (touchesCatalog) store.bumpCatalogVersion();
-      if (touchesPersonal) store.bumpEntriesVersion(req.user.id);
+      if (body.settings) db.putSettings(body.settings);
+      if (body.clients) db.putClients(body.clients);
+      if (body.projects) db.putProjects(body.projects);
+      if (body.tasks) db.putTasks(req.user.id, body.tasks);
+      if (body.entries) db.putEntries(req.user.id, body.entries);
+      if (body.commits !== undefined) db.putCommits(req.user.id, body.commits);
+      if (touchesCatalog) db.bumpCatalogVersion();
+      if (touchesPersonal) db.bumpEntriesVersion(req.user.id);
     });
   } catch (err) {
     if (err instanceof ConflictError)
@@ -1224,86 +555,41 @@ app.put('/api/state', requireUser, (req, res) => {
     if (err instanceof ReferencedDeleteError) return res.status(409).json({ error: err.message, conflict: true });
     return res.status(400).json({ error: 'save failed: ' + /** @type {Error} */ (err).message });
   }
-  // SB-057: the vault the engine watches is a SETTING, so the engine has to be re-pointed when it
-  // moves. Without this, configuring the vault folder for the first time does nothing until the
-  // next restart — a personal install that looks wired up and syncs nothing, which is the exact
-  // "perfect plumbing, no way to reach it" failure SB-063 already cost this repo once.
-  //
-  // `startVaultSync` stops first and is idempotent, so re-pointing at nothing correctly STOPS
-  // watching rather than leaving a watcher on the old folder. The scan that follows is
-  // fire-and-forget for the same reason the boot one is: a cold vault takes minutes and a save
-  // must not wait for it.
-  if (body.settings && (body.settings.vaultPaths !== undefined || body.settings.shape !== undefined)) {
-    forgetOwnWrites(); // echo records are keyed by path, and the paths may have just moved
-    if (startVaultSync())
-      void scanVault().catch((err) =>
-        console.error('[time-turtle] vault re-scan failed:', /** @type {Error} */ (err).message),
-      );
-  }
-  /** @type {string | null} */
-  let mirror = null;
-  /** @type {string | null} */
-  let mirrorError = null;
-  try {
-    mirror = store.mirror(req.user);
-  } catch (err) {
-    mirrorError = /** @type {Error} */ (err).message;
-    console.error('[time-turtle] markdown mirror failed:', mirrorError);
-  }
-  // SB-065: the DB write above already committed. A guard refusal is reported, never
-  // promoted to a 500 — "you cannot save at all" is a worse failure than a stale mirror.
-  res.json({
-    ok: true,
-    version: store.getVersions(req.user.id),
-    mirror,
-    mirrorError,
-    mirrorBlocked: mirrorBlockFor(req.user),
-    // SB-085's lesson, one shape over: the save that TRIPS a quarantine is the moment the client
-    // should learn about it, not the next reload.
-    vaultQuarantined: vaultQuarantinedNotes(),
-  });
+  res.json({ ok: true, version: db.getVersions(req.user.id) });
 });
 
-// ---- DD-024 clause 1: the first run, answered before the login it removes ----
+// ---- DD-024 clause 1: the first run, answered before the login ----
 //
-// DD-015 said "ask, at first admin login". DD-024 amends exactly that clause, because it does not
-// survive the shape it was written to introduce: in the open state the effective shape is `team`,
-// `team` carries `identity: true`, so `GET /api/state` 401s and the client renders `<Login>` —
-// and the gate that REMOVES the login is reachable only by clearing the login, with a password
-// printed once into a detached log file the person it is for has no reason to open.
+// A fresh install asks one question — start with example hours or empty — and it asks it BEFORE
+// `<Login>`, because the person holding a fresh install has not yet been shown the credential.
 //
 // So these two routes sit OUTSIDE `requireUser`. Nothing else does, and nothing else should: every
-// future route hung here has to re-earn the gate below rather than inherit it. That is DD-024's
-// own stated cost 1, and it is the cheapest wrong move available to a later session.
+// future route hung here has to re-earn the gate below rather than inherit it.
 //
 // DELIBERATELY NARROW (DD-024 deviation 1). `/api/state` is untouched and still 401s in the open
 // state. Widening it would make every field it carries unauthenticated for the sake of one boolean.
-const FIRST_RUN_CLOSED = 'the first run is over: this install has already answered what it is';
-const DEMO_UNDER_PERSONAL =
-  'the personal shape gets no demo content: its hours belong in your vault, and fabricated ones would be written into your real daily notes or frozen behind the cutover forever (DD-024 clause 3).';
+const FIRST_RUN_CLOSED = 'the first run is over: this install has already answered it';
 /**
- * Is the install in DD-015's OPEN STATE — the one configuration where the shape question has two
- * real answers and nobody has given one?
+ * Is the install still waiting for its first-run answer?
  *
- * The first two conditions of `shapeQuestionOpen`, and deliberately not a third copy of them: the
- * role condition drops out because there is no resolved user here, which is the entire point of
- * this surface. Re-derived per request rather than cached at boot, so an install that stores a
- * shape — or grows a second user — leaves the open state immediately rather than at the next
- * restart.
+ * Exactly one user AND nothing answered. `firstRunAnswered` counts a legacy `shape` row as an
+ * answer, so an install that answered the old shape question is never asked again. The user count
+ * closes the open state by itself: an install that grew a second user has plainly been set up.
+ * Re-derived per request rather than cached at boot.
  * @returns {boolean}
  */
 function firstRunOpen() {
-  return shapeTarget().source === 'default' && db.listUsers().length === 1;
+  return db.listUsers().length === 1 && !db.firstRunAnswered();
 }
 /**
  * Is this caller allowed to see the first-run surface at all?
  *
- * BOTH ADDRESS CHECKS, and the socket one is the load-bearing half. In the open state `BIND_HOST`
- * is `undefined` (see its comment above) so the server answers on EVERY INTERFACE — loopback is
- * not implied by anything here. SB-136's Host check alone does not survive that: `curl -H 'Host:
- * localhost' http://<lan-ip>:<port>/…` from any machine on the same wifi passes it, which is
- * SB-162, measured. The Host check stays anyway, because it stops a different attack — DNS
- * rebinding in the user's own browser arrives OVER LOOPBACK and is invisible to a peer check.
+ * BOTH ADDRESS CHECKS, and the socket one is the load-bearing half. With no `TT_HOST` the server
+ * answers on EVERY INTERFACE, so loopback is not implied by anything here. The Host check alone does
+ * not survive that: `curl -H 'Host: localhost' http://<lan-ip>:<port>/…` from any machine on the
+ * same wifi passes it, which is SB-162, measured. The Host check stays anyway, because it stops a
+ * different attack — DNS rebinding in the user's own browser arrives OVER LOOPBACK and is invisible
+ * to a peer check.
  * @param {Request} req @returns {boolean}
  */
 function firstRunCaller(req) {
@@ -1327,19 +613,17 @@ const notFound = (res) => res.status(404).json({ error: 'not found' });
 /**
  * DD-024 clause 2: is the seeded admin still carrying the password this repo publishes?
  *
- * THE WALL THIS EXISTS TO CLOSE IS ONE THIS PLAN BUILT. Moving the shape question in FRONT of the
- * login means a person who answers `team` lands on `<Login>` holding a credential nobody ever
- * showed them — `seedIfEmpty` announces it once, on stdout, which `tt serve` redirects into a
- * detached log file. Before this plan they at least met that wall after signing in.
+ * The first run sits in FRONT of the login, so a person who finishes it lands on `<Login>` holding
+ * a credential nobody ever showed them — `seedIfEmpty` announces it once, on stdout, which
+ * `tt serve` redirects into a detached log file.
  *
  * IT VERIFIES AGAINST THE PUBLISHED CONSTANT, never against `ADMIN_PASSWORD`. An operator who set
  * `TT_ADMIN_PASSWORD` supplied a real secret and gets no hint — they already know it. What is
  * stated back is a literal from a public MIT repo, and it stops being stated the moment the
  * password changes, because the answer is recomputed per request from the stored hash.
  *
- * The CALLER gate is not here: this rides on `GET /api/first-run`, behind `firstRunCaller` — the
- * same peer-socket + Host predicate as the first-run surface itself and as task 2's guard. Under
- * `team` the bind is every interface (see `BIND_HOST`), so a Host-header-only gate would read this
+ * The CALLER gate is not here: this rides on `GET /api/first-run`, behind `firstRunCaller`. The bind
+ * is every interface unless `TT_HOST` narrows it, so a Host-header-only gate would read this
  * credential out to any machine on the wifi. That is SB-162 with a password in it.
  * @returns {{ email: string, password: string } | null}
  */
@@ -1355,33 +639,12 @@ function defaultLoginHint() {
 // same bytes to a browser. Only the PEER gate produces a 404 here, because that is the caller who
 // must not learn the surface exists.
 //
-// WHAT THE ROUTE STILL SAYS ONCE THE QUESTION IS OVER IS DELIBERATELY THIN, and the end-gate review
-// is what made it thin. DD-024 clause 1 prices this route class on being "narrow and self-closing",
-// so the payload closes field by field even though the route does not:
-//
-//   • `vaults` / `vaultPrefix` — ONLY WHILE OPEN. They exist to prefill the vault step, which no
-//     longer runs, and an answered `team` install has no vault at all. Left unconditional they were
-//     a permanent unauthenticated read of every Obsidian vault path on the machine, re-read from
-//     disk on every request, for the life of the install. Nothing consumed them and nothing missed
-//     them; that is the whole argument for gating them.
-//   • `defaultLogin` — needed exactly WHEN `open` is false, which is why the route answers at all
-//     past the answer: `team` closes the first run and lands the person on `<Login>`. It is a
-//     published constant (DD-004), loopback-only, and it retires itself the moment the password
-//     changes. One probe on the 401 path decides both — first run or login, and if login, whether
-//     the starting password still works.
+// `defaultLogin` is needed exactly WHEN `open` is false, which is why the route answers at all past
+// the answer: the first run closes and lands the person on `<Login>`. It is a published constant
+// (DD-004), loopback-only, and it retires itself the moment the password changes.
 app.get('/api/first-run', (req, res) => {
   if (!firstRunCaller(req)) return notFound(res);
-  const open = firstRunOpen();
-  // SB-140: the vault prefill rides HERE rather than on a second endpoint. The vault step is one
-  // beat of one flow, and a second round trip is a second thing that can be slow or fail on the
-  // first screen a person ever sees. `readObsidianVaults` never throws — an absent or malformed
-  // registry is an empty list, and the client falls back to typing a path.
-  res.json({
-    open,
-    vaults: open ? readObsidianVaults() : [],
-    vaultPrefix: open ? ICLOUD_VAULT_PREFIX : '',
-    defaultLogin: defaultLoginHint(),
-  });
+  res.json({ open: firstRunOpen(), defaultLogin: defaultLoginHint() });
 });
 
 // POST is PERMANENTLY CLOSED once the question is answered — 409, not 404, because a loopback
@@ -1389,191 +652,19 @@ app.get('/api/first-run', (req, res) => {
 app.post('/api/first-run', (req, res) => {
   if (!firstRunCaller(req)) return notFound(res);
   if (!firstRunOpen()) return res.status(409).json({ error: FIRST_RUN_CLOSED });
-  const { shape, demo, vaultRoot } = req.body || {};
-  if (!TT.SHAPES.includes(shape))
-    return res.status(400).json({ error: 'shape must be one of ' + TT.SHAPES.join(', ') });
-  // SB-140: the vault root is VALIDATED BEFORE ANYTHING IS STORED, and the ordering is the whole
-  // point. A half-applied first run — shape stored, root refused — leaves the person in a
-  // `personal` install with no vault, with the open state over and the step that would have fixed
-  // it permanently closed. Four vault-shaped folders sit in the iCloud directory on the target
-  // machine while the registry names two of them, so a composed name really can miss.
-  //
-  // The refusal NAMES THE PATH, because the person is looking at a typo they cannot otherwise see.
-  // That is safe here in a way it is not in the peer refusals above: this caller supplied the
-  // string and is on loopback.
-  if (vaultRoot !== undefined) {
-    if (typeof vaultRoot !== 'string' || !vaultRoot || !directoryExists(vaultRoot))
-      return res.status(400).json({ error: 'no folder at ' + JSON.stringify(String(vaultRoot)) });
-  }
-  // DD-024 clause 3 (Rook's provisional ruling, Terje-overridable at no cost): under `personal`
-  // there is no demo content at all, so asking for it is REFUSED rather than silently ignored.
-  // Ignoring it would leave the person believing they had asked for something.
-  //
-  // BEFORE ANY WRITE, so a refused first run stores nothing and can simply be answered again. A
-  // half-applied first run is worse than a rejected one.
-  if (demo && shape === 'personal') return res.status(403).json({ error: DEMO_UNDER_PERSONAL });
-  // THE SAME REFUSAL LIST THE OTHER TWO DOORS CARRY (DD-024 Amendment 1 §3). This is a third door
-  // into one decision, never a third decision — `POST /api/shape` and `PUT /api/state` apply these
-  // in this order and so does this. A door that refuses less than its siblings is a bypass.
-  const refusal = shapeStoreRefusal(shape);
-  if (refusal) return res.status(403).json({ error: refusal });
-  // ONE PARTIAL `putSettings`, deliberately. SB-133 is the standing finding that a whole-settings
-  // PUT flips an env-only `personal` install to `team`; this route must not be a second instance
-  // of it. `putSettings` writes only the keys present and stamps the DD-016 cutover itself for
-  // `personal`, so nothing that can store the shape can skip the stamp. Task 3 adds
-  // `vaultPaths: { root }` to this same write.
-  store.transaction(() => {
-    // SB-140: only `root` travels. `putSettings` rebuilds `vaultPaths` key by key from
-    // `TT.VAULT_PATHS_DEFAULT`, so the sub-paths keep their defaults without being restated here —
-    // and a second copy of them would be the drift `TT.VAULT_PATHS_DEFAULT`'s own comment forbids.
-    store.putSettings(vaultRoot ? { shape, vaultPaths: { root: vaultRoot } } : { shape });
-  });
-  // THE THIRD DOOR HAS TO DO WHAT THE OTHER TWO DO. `PUT /api/state` and `POST /api/shape` both
-  // re-point the sync engine after storing a shape or a vault path, because the vault the engine
-  // watches is a SETTING and `startVaultSync()` ran once at boot — when this install was still
-  // `team` with no root. Without this the person finishes the first run, lands in an install whose
-  // sidebar says `synced → vault`, and nothing watches the vault until the next restart. That is
-  // SB-063's failure shape and it is exactly what SB-140 exists to prevent, one screen later.
-  //
-  // Idempotent and stop-first, so it is safe under `team` too, where it correctly stops nothing.
-  // The scan is fire-and-forget for the same reason the boot one is: a cold vault takes minutes and
-  // the person is waiting on this response to see their app.
-  forgetOwnWrites();
-  if (startVaultSync())
-    void scanVault().catch((err) =>
-      console.error('[time-turtle] vault re-scan failed:', /** @type {Error} */ (err).message),
-    );
-  // AFTER the shape, and outside its transaction. DD-024 clause 3's whole mechanism is that the
-  // seed happens PAST the answer — under `team` there is then no cutover for the demo rows to land
-  // before, which is what dissolves SB-146 without touching DD-017's freeze.
-  const seeded = demo ? store.seedDemoContent() : false;
-  res.json({ ok: true, shape, demo: seeded });
-});
-
-// ---- SB-098 / SB-139: the deliberate shape-choosing gesture ----
-//
-// Choosing what this install IS is not a settings edit, and this is the channel that says so.
-// SB-098 needed it: the first-run question must store an answer that is EQUAL to the shape
-// already in force (an unstored install resolves to `team`, so "my company's" is the shape the
-// user is already effectively on), and it must do that from a modal that holds no settings
-// object to round-trip. Sending the whole settings object to answer one question is precisely
-// the class of bug SB-133 just closed.
-//
-// WHY A POST AND NOT A 403 ON THE SHARED PUT. `useServerSync` re-queues any non-409 failure and
-// re-arms a 4 s timer forever, so a blanket refusal on `PUT /api/state` wedges the client
-// permanently — SB-139's stated constraint, and the reason the two existing shape guards
-// compare against the stored value instead of rejecting the key. Nothing debounced or retried
-// reaches this route, so it may refuse outright, loudly, the way SB-056 refuses a second user.
-//
-// SB-139 IS NOT CLOSED BY THIS. `PUT /api/state` still accepts `shape`, so a hand-rolled client
-// can still store one without coming through here. Narrowing that is the other half of SB-139
-// and it moves SB-100's guard suites, which this ticket was told to keep green and untouched —
-// see the resolution comment on SB-098. What lands here is the channel, built once.
-app.post('/api/shape', requireUser, requireAdmin, (req, res) => {
-  const { shape } = req.body || {};
-  if (!TT.SHAPES.includes(shape))
-    return res.status(400).json({ error: 'shape must be one of ' + TT.SHAPES.join(', ') });
-  // The same refusals the shared PUT applies, in the same order — this is a second door into one
-  // decision, never a second decision. They were inlined here and in `PUT /api/state`; DD-024
-  // Amendment 1 added a THIRD (the bind refusal) and three copies of a growing list is how one
-  // door comes to refuse less than its siblings, so the list moved to `shapeStoreRefusal`.
-  const refusal = shapeStoreRefusal(shape);
-  if (refusal) return res.status(403).json({ error: refusal });
-  // NO `bumpCatalogVersion()`, and that is a considered omission rather than a forgotten line.
-  //
-  // `shape` is instance-local: it never travels to the vault or the mirror, it is not one of the
-  // catalog COLLECTIONS DC-001's version guards, and storing it cannot clobber another client's
-  // edit — so there is no lost update for a bump to prevent here.
-  //
-  // Bumping it does real harm, measured: this route's caller reloads afterwards, and a reload
-  // hands `useServerSync` a whole new state object while leaving its cached `versionRef` on the
-  // pre-bump number (it is re-baselined only on the FIRST load and after a 409). Every reference
-  // in the new state differs, so the hook immediately queues a full PUT — carrying the stale
-  // version, straight into a 409. The client recovers by reloading, but the patch it was holding
-  // is dropped by design, so the user's next keystrokes vanish with a "someone else saved first"
-  // toast on a single-user install. The browser suite caught it as an empty markdown mirror.
-  //
-  // That staleness is a pre-existing defect on the `load()`-after-write paths (the Settings shape
-  // toggle, renameProject, renameClient) and it is NOT fixed here: `useServerSync`'s 409 handling
-  // is SB-105, which Terje is ruling separately. This route simply declines to add a new way in.
-  store.transaction(() => {
-    // putSettings stamps the DD-016 cutover for `personal` itself, so nothing that can store
-    // the shape can skip it — including this route.
-    store.putSettings({ shape });
-  });
-  // The vault the engine watches is decided by the shape, so re-point it here for the same
-  // reason the settings PUT does: without this, answering "personal" leaves the sync engine
-  // idle until the next restart.
-  forgetOwnWrites();
-  if (startVaultSync())
-    void scanVault().catch((err) =>
-      console.error('[time-turtle] vault re-scan failed:', /** @type {Error} */ (err).message),
-    );
-  console.log(`[time-turtle] instance shape chosen: ${shape} (stored)`);
-  // The EFFECTIVE shape after the write, not the one that was asked for — they differ if a
-  // lock or an env value is in play, and the caller reloads against what is actually in force.
-  res.json({ ok: true, shape: activeShape(), version: store.getVersions(req.user.id) });
-});
-
-// ---- markdown mirror (SB-065) ----
-// The acknowledgement seam for the never-clobber guard: "yes, I dealt with it — overwrite
-// on the next save". Clearing is all it does; nothing is written here, so acknowledging by
-// mistake still costs nothing until the user saves again. Admins may clear another user's
-// block, because an admin cross-user edit can be the write that trips it and the target may
-// never log in to clear it themselves.
-app.post('/api/mirror/acknowledge', requireUser, (req, res) => {
-  const requested = req.body && req.body.userId !== undefined ? +req.body.userId : req.user.id;
-  if (requested !== req.user.id && req.user.role !== 'admin') return res.status(403).json({ error: 'admin only' });
-  const target = requested === req.user.id ? req.user : db.findUserById(requested);
-  if (!target) return res.status(404).json({ error: 'no such user' });
-  const path = mirrorPath(target);
-  const cleared = acknowledgeMirrorBlock(path);
-  res.json({ ok: true, cleared, path });
-});
-
-// SB-095: the cross-user READ that makes the line above reachable. `GET /api/state` reports
-// only the session user's block, so an admin could neither see nor clear an employee's —
-// even though the acknowledge route has taken `{userId}` since SB-065. The write plumbing
-// was built and unreachable; this is the missing read.
-//
-// Shape follows SB-086 rather than inventing a third: several users' blocks come back as a
-// LIST under the plural name (`mirrorBlocks`), where the one-mirror routes carry a singular
-// `mirrorBlocked`. Each block additionally carries `userId`/`userName`, because the guard is
-// keyed by PATH and the acknowledge call is keyed by USER — without the identity the admin
-// has a report it cannot act on.
-//
-// The caller's own block is INCLUDED. "Every block on this instance" is a claim with no
-// exception to remember, and the client already renders its own from /api/state, so it drops
-// the duplicate there — one filter in one place beats a server-side carve-out.
-app.get('/api/mirror/blocks', requireUser, requireAdmin, (req, res) => {
-  /** @type {import('../../shared/types.ts').MirrorBlock[]} */
-  const mirrorBlocks = [];
-  for (const user of db.listUsers()) {
-    const block = mirrorBlockFor(user);
-    if (block) mirrorBlocks.push({ ...block, userId: user.id, userName: user.name });
-  }
-  res.json({ mirrorBlocks });
-});
-
-// ---- PLAN-013 / SB-115 / DD-018: the shape-switch preflight ----
-//
-// "What would this switch cost", answered by the server before the gesture. DD-018's ruling is
-// that the numbers are COMPUTED, never asserted in prose — so SB-116's modal reads its 214 off
-// this, and the boot banner reads the same numbers out of the same module with no HTTP in the
-// room. A thin adapter on purpose: everything true about the answer lives in shape-preflight.js.
-//
-// SAME GATE AS `/api/mirror/blocks` ABOVE, and for the same reason: the `mirrors` list is other
-// users' file paths. `requireUser, requireAdmin`. The entry and commit counts are the CALLER's
-// own (`req.user.id`) — no other user's entry content leaves this route.
-//
-// `to` EQUAL TO THE CURRENT SHAPE IS ANSWERED NORMALLY, not refused. This is a read; what to do
-// about a no-op switch is the caller's business, and a 409 here would make the modal special-case
-// a state it can already see.
-app.get('/api/shape/preflight', requireUser, requireAdmin, (req, res) => {
-  const to = req.query.to;
-  if (typeof to !== 'string' || !TT.SHAPES.includes(/** @type {any} */ (to)))
-    return res.status(400).json({ error: 'to must be one of ' + TT.SHAPES.join(', ') });
-  res.json(shapePreflight(req.user.id, to));
+  const body = req.body ?? {};
+  // The body is `{ demo?: boolean }` and nothing else. Refused BEFORE anything is stored, so a
+  // malformed answer leaves the install open and it can simply be answered again.
+  const valid =
+    typeof body === 'object' &&
+    !Array.isArray(body) &&
+    Object.keys(body).every((key) => key === 'demo') &&
+    (body.demo === undefined || typeof body.demo === 'boolean');
+  if (!valid) return res.status(400).json({ error: 'the first-run answer is { demo?: boolean } and nothing else' });
+  db.stampFirstRun();
+  // AFTER the answer is stored, and outside any transaction: `seedDemoContent` opens its own.
+  const seeded = body.demo ? db.seedDemoContent() : false;
+  res.json({ ok: true, demo: seeded });
 });
 
 // ---- team reports (admin) ----
@@ -1612,15 +703,13 @@ app.get('/api/users/:id/timesheet', requireUser, requireAdmin, (req, res) => {
   if (!target) return res.status(404).json({ error: 'no such user' });
   res.json({
     user: target,
-    // SB-133: the same rule as `stateFor` — both OUTBOUND seams say what was chosen, so no
-    // client anyone writes against either of them can echo a default back as a decision.
-    settings: wireSettings(),
-    clients: store.getClients(),
-    projects: store.getProjects(),
-    tasks: store.getTasks(id),
-    entries: store.getEntries(id),
-    commits: store.getCommits(id), // money PRESENT — admin
-    version: store.getVersions(id),
+    settings: db.getSettings(),
+    clients: db.getClients(),
+    projects: db.getProjects(),
+    tasks: db.getTasks(id),
+    entries: db.getEntries(id),
+    commits: db.getCommits(id), // money PRESENT — admin
+    version: db.getVersions(id),
   });
 });
 
@@ -1643,19 +732,6 @@ app.put('/api/users/:id/entries', requireUser, requireAdmin, (req, res) => {
   // too, so a piped id corrupts the target's frozen money exactly the same way.
   const badId = entryIdError(body.entries);
   if (badId) return res.status(400).json({ error: badId });
-  // SB-102 / DD-017 §1 — END-GATE REVIEW FINDING, DELIBERATELY NOT FIXED HERE. See SB-149.
-  //
-  // This route writes entries and does NOT consult `frozenEntryRefusal`, so under `personal` a
-  // hand-rolled PUT changes a pre-vault or frozen day that `PUT /api/state` refuses. Measured
-  // against a live server: the guarded route said 403, this one said 200 and stored the edit.
-  // `requireAdmin` gates nothing here — the one user IS the seeded admin (DD-015 depth 2).
-  //
-  // It is left open on purpose rather than overlooked. Closing it means reversing the ruling
-  // written out at the ledger-write site below — "the ENTRY edit still lands… It is the ledger
-  // that is frozen, not the timesheet" — which a previous end-gate review put there with its
-  // reasoning, and which `tests/shape-committing.test.js` asserts. DD-017 §1 says the opposite
-  // for `personal`. Two recorded rulings disagree, and picking the winner is not a call an
-  // executing agent gets to make quietly, so it is filed with the evidence instead.
   // DC-001 optimistic concurrency (mirrors the self path's optional-version shape): a
   // `version` (StateVersion, the entries scope) makes the write conditional — if the
   // target's entries moved since the Review tab loaded (the employee logged an hour, or a
@@ -1666,7 +742,7 @@ app.put('/api/users/:id/entries', requireUser, requireAdmin, (req, res) => {
     return res.status(400).json({ error: 'version must be an object' });
   }
 
-  const stored = store.getEntries(id);
+  const stored = db.getEntries(id);
   const storedById = new Map(stored.map((entry) => [entry.id, entry]));
   // Mark the lines the admin actually changed (or added); an unchanged line keeps its
   // prior marker, so a re-save never clears an earlier admin correction.
@@ -1704,13 +780,13 @@ app.put('/api/users/:id/entries', requireUser, requireAdmin, (req, res) => {
 
   /** @type {import('../../shared/types.ts').Catalog} */
   const catalog = {
-    settings: store.getSettings(),
-    clients: store.getClients(),
-    projects: store.getProjects(),
+    settings: db.getSettings(),
+    clients: db.getClients(),
+    projects: db.getProjects(),
     tasks: [],
     entries: [],
   };
-  const commits = store.getCommits(id);
+  const commits = db.getCommits(id);
   let commitsChanged = false;
   const reFrozen = commits.map((seg) => {
     if (!affected.has(seg.key)) return seg; // untouched committed segment — frozen verbatim
@@ -1733,67 +809,40 @@ app.put('/api/users/:id/entries', requireUser, requireAdmin, (req, res) => {
   });
 
   try {
-    store.transaction(() => {
+    db.transaction(() => {
       // DC-001: compare-and-write inside the transaction so a concurrent writer cannot
       // split the check from the save. A version-less PUT skips the guard (unconditional).
       if (expected?.entries !== undefined) {
-        const current = store.getVersions(id);
+        const current = db.getVersions(id);
         if (+expected.entries !== current.entries) throw new ConflictError('entries', current);
       }
-      store.putEntries(id, marked);
-      // SB-056 / DD-008: the THIRD ledger-write site, and the one the first pass missed. Under
-      // `personal` the re-freeze is skipped and the stored ledger is left verbatim — the ENTRY edit
-      // still lands, because refusing it would wedge an admin out of correcting any week that
-      // was ever committed, which is the same failure the ride-along exists to prevent. It is
-      // the ledger that is frozen, not the timesheet. (Whether pre-switch segments should still
-      // be rendered at all is SB-093, not this guard.)
-      //
-      // SB-102 / DD-017 §1 CONTRADICTS THE SENTENCE ABOVE for `personal`, where editable ⇔
-      // vault-bound makes the timesheet frozen too. Both rulings are currently in the repo and
-      // one of them has to be withdrawn in writing. SB-149 carries the evidence and the choice;
-      // until it is ruled, this route behaves exactly as it did before PLAN-015.
-      if (commitsChanged && !TT.shapeOffReason('committing', activeShape())) store.putCommits(id, reFrozen);
-      store.bumpEntriesVersion(id);
+      db.putEntries(id, marked);
+      if (commitsChanged) db.putCommits(id, reFrozen);
+      db.bumpEntriesVersion(id);
     });
   } catch (err) {
     if (err instanceof ConflictError)
       return res.status(409).json({ error: err.message, conflict: true, version: err.version });
     return res.status(400).json({ error: 'save failed: ' + /** @type {Error} */ (err).message });
   }
-  /** @type {string | null} */
-  let mirror = null;
-  /** @type {string | null} */
-  let mirrorError = null;
-  try {
-    mirror = store.mirror(target); // the correction lands in the TARGET's mirror
-  } catch (err) {
-    mirrorError = /** @type {Error} */ (err).message;
-    console.error('[time-turtle] markdown mirror failed:', mirrorError);
-  }
-  res.json({ ok: true, version: store.getVersions(id), mirror, mirrorError, mirrorBlocked: mirrorBlockFor(target) });
+  res.json({ ok: true, version: db.getVersions(id) });
 });
 
 // SDD-002 ruling 5 (SB-025): the lock verbs. Approve stamps approvedAt (and clears any
 // prior releasedBy) so the employee can no longer un-commit the segment; Release records
 // releasedBy and clears approvedAt, handing it back for edits. Both mutate the TARGET's
-// ledger, bump the target's version and rewrite their mirror. Admin-only.
+// ledger and bump the target's version. Admin-only.
 /**
  * @param {'approve' | 'release'} verb
  * @returns {import('express').RequestHandler}
  */
 function segmentLockHandler(verb) {
   return (req, res) => {
-    // SB-056 / DD-008: approve and release are ledger WRITES, so the same capability gate
-    // covers them. Refused outright rather than compared: unlike the collection-replace PUT
-    // above, these are deliberate one-shot verbs — nothing re-sends them on a debounce, so
-    // there is no ride-along to preserve and a flat refusal cannot wedge anything.
-    const off = TT.shapeOffReason('committing', activeShape());
-    if (off) return res.status(403).json({ error: off });
     const id = +req.params.id;
     const key = req.params.key;
     const target = db.findUserById(id);
     if (!target) return res.status(404).json({ error: 'no such user' });
-    const commits = store.getCommits(id);
+    const commits = db.getCommits(id);
     if (!commits.some((seg) => seg.key === key)) return res.status(404).json({ error: 'no such committed segment' });
     const next = commits.map((seg) => {
       if (seg.key !== key) return seg;
@@ -1805,22 +854,14 @@ function segmentLockHandler(verb) {
       return { ...rest, releasedBy: req.user.id };
     });
     try {
-      store.transaction(() => {
-        store.putCommits(id, next);
-        store.bumpEntriesVersion(id);
+      db.transaction(() => {
+        db.putCommits(id, next);
+        db.bumpEntriesVersion(id);
       });
     } catch (err) {
       return res.status(400).json({ error: 'save failed: ' + /** @type {Error} */ (err).message });
     }
-    /** @type {string | null} */
-    let mirrorError = null;
-    try {
-      store.mirror(target);
-    } catch (err) {
-      mirrorError = /** @type {Error} */ (err).message;
-      console.error('[time-turtle] markdown mirror failed:', mirrorError);
-    }
-    res.json({ ok: true, version: store.getVersions(id), mirrorError, mirrorBlocked: mirrorBlockFor(target) });
+    res.json({ ok: true, version: db.getVersions(id) });
   };
 }
 app.post('/api/users/:id/segments/:key/approve', requireUser, requireAdmin, segmentLockHandler('approve'));
@@ -1828,69 +869,23 @@ app.post('/api/users/:id/segments/:key/release', requireUser, requireAdmin, segm
 
 // SDD-002 DC-005 (PLAN-006): the server-reconciled project-code rename. A dedicated
 // admin-only endpoint rewrites every user's entries + templates old→new in ONE transaction
-// (store.renameProjectCode), so a code rename no longer orphans another user's logged history.
+// (db.renameProjectCode), so a code rename no longer orphans another user's logged history.
 // A BLIND reconcile: it never returns another user's entry CONTENT — so SB-009's per-user
 // privacy line stays intact. Replaces the old client-only renameProject.
-//
-// SB-086: it used to return a bare { ok } and swallow every mirror failure into a
-// console.error. Before SB-065 that was merely untidy; now each failure records a STICKY
-// mirrorBlocked for that user, so the rename answered a clean success while one or more
-// users' mirrors had silently entered the blocked state — and a blocked mirror still LOOKS
-// current on disk, which is the exact failure the guard exists to make visible. The other
-// three store.mirror call sites all surface mirrorBlocked on their response; this one was the
-// odd path out. It reports now, in a LIST rather than the singular the others carry, because
-// this is the one route that writes SEVERAL users' mirrors in a single request. (The client
-// rename below writes exactly one — a pure catalog change — so it keeps the singular shape.)
-// A path is not entry content: the acting caller is an admin, who can already list users and
-// knows the mirror folder, and the name in the filename is one they can read from /api/users.
 app.post('/api/projects/:code/rename', requireUser, requireAdmin, (req, res) => {
   const from = String(req.params.code);
   const to = req.body && typeof req.body.to === 'string' ? req.body.to.trim() : '';
   if (!to) return res.status(400).json({ error: 'a non-empty target code is required' });
-  const projects = store.getProjects();
+  const projects = db.getProjects();
   if (!projects.some((p) => p.code === from)) return res.status(404).json({ error: 'no such project' });
   if (from !== to && projects.some((p) => p.code === to))
     return res.status(409).json({ error: 'a project with that code already exists' });
-  /** @type {number[]} */
-  let affected;
   try {
-    affected = store.renameProjectCode(from, to);
+    db.renameProjectCode(from, to);
   } catch (err) {
     return res.status(400).json({ error: 'rename failed: ' + /** @type {Error} */ (err).message });
   }
-  // Rewrite each affected user's mirror (their entries/templates moved) plus the acting
-  // admin's, so the markdown reflects the new code. Other stale mirrors refresh on their
-  // next write, matching the codebase's existing eventual-consistency stance.
-  //
-  // SB-086: every failure is COLLECTED, not swallowed. One rename can block several users at
-  // once, so the loop keeps going — a refusal on user A's mirror must not cost user B theirs —
-  // and the report comes back as two parallel lists. `mirrorErrors` carries every failure
-  // including ones that are not guard refusals (permissions, a full disk); `mirrorBlocks`
-  // carries only the sticky blocks, which are the ones somebody has to acknowledge. Like the
-  // other three call sites, a mirror refusal never fails the request: the rename transaction
-  // has already committed, and turning a refused mirror into a 500 would leave the caller
-  // believing a rename that DID happen did not.
-  /** @type {import('../../shared/types.ts').MirrorBlock[]} */
-  const mirrorBlocks = [];
-  /** @type {string[]} */
-  const mirrorErrors = [];
-  for (const id of new Set([...affected, req.user.id])) {
-    const user = db.findUserById(id);
-    if (!user) continue;
-    try {
-      store.mirror(user);
-    } catch (err) {
-      const message = /** @type {Error} */ (err).message;
-      mirrorErrors.push(message);
-      console.error('[time-turtle] markdown mirror failed:', message);
-      // Read the STANDING block rather than err.block: it is the same state /api/state
-      // reports and the same state POST /api/mirror/acknowledge clears, so the caller is
-      // never told about a block that a later acknowledgement has already cleared.
-      const block = mirrorBlockFor(user);
-      if (block) mirrorBlocks.push(block);
-    }
-  }
-  res.json({ ok: true, mirrorBlocks, mirrorErrors });
+  res.json({ ok: true });
 });
 
 /**
@@ -1902,10 +897,9 @@ app.post('/api/projects/:code/rename', requireUser, requireAdmin, (req, res) => 
  * function before it calls, so nothing the app can produce is rejected; this is the
  * reject-before-anything-writes backstop for everything else (SB-070 / SB-074 precedent).
  *
- * It matters because a client id is a `|`-delimited CELL in the mirror's `## clients`
- * section AND the join key in every `## projects` row — the id is the readable identifier
- * Terje reads in the markdown, so a `|`, a newline or a stray space in it is a corrupt
- * catalog rather than an ugly one.
+ * It matters because a client id is a `|`-delimited CELL in the markdown codec's `## clients`
+ * section AND the join key in every `## projects` row, so a `|`, a newline or a stray space in
+ * it is a corrupt catalog rather than an ugly one.
  *
  * Only the TARGET is validated. Ids already stored (`client7`, a hand-seeded one) are
  * grandfathered — a rename is how you get OUT of a legacy id, so validating the source
@@ -1920,17 +914,12 @@ const CLIENT_ID_MAX = 24;
 // before the write, so a single collection-replace that swaps the id AND re-points the
 // projects still 409s `cannot delete client <id>: it has projects` — the old id is absent
 // from the incoming clients while the stored projects still reference it. The drop and the
-// re-point can only meet inside one transaction, which is what `store.renameClientId` is.
+// re-point can only meet inside one transaction, which is what `db.renameClientId` is.
 // (Pinned by the SB-067 test in tests/api.test.js, which asserts that exact 409.)
 //
 // MUCH SMALLER THAN THE PROJECT RENAME. `Project.clientId` is the only persisted reference
 // to a client id anywhere, so this is one `UPDATE projects SET client_id` and NO user's
-// entries or templates move. Which is also why only the ACTING admin's mirror is rewritten
-// here, unlike the project rename above: a client rename is a pure CATALOG change, and the
-// codebase already refreshes catalog changes into the actor's mirror only (`PUT /api/state`),
-// every other user's on their next write. Nothing per-user moved, so nobody else's mirror is
-// newly wrong in a way it was not already. That single mirror is why this response carries
-// the singular `mirrorBlocked` the other one-mirror routes carry, rather than SB-086's list.
+// entries or templates move.
 app.post('/api/clients/:id/rename', requireUser, requireAdmin, (req, res) => {
   const from = String(req.params.id);
   const to = req.body && typeof req.body.to === 'string' ? req.body.to.trim() : '';
@@ -1944,7 +933,7 @@ app.post('/api/clients/:id/rename', requireUser, requireAdmin, (req, res) => {
         CLIENT_ID_MAX +
         ' characters',
     });
-  const clients = store.getClients();
+  const clients = db.getClients();
   if (!clients.some((client) => client.id === from)) return res.status(404).json({ error: 'no such client' });
   // A READABLE uniqueness error. Without this the PK backstop surfaces as
   // `400 save failed: … UNIQUE constraint failed: clients.id` — accurate and useless.
@@ -1953,33 +942,18 @@ app.post('/api/clients/:id/rename', requireUser, requireAdmin, (req, res) => {
   /** @type {number} */
   let projects;
   try {
-    projects = store.renameClientId(from, to);
+    projects = db.renameClientId(from, to);
   } catch (err) {
     return res.status(400).json({ error: 'rename failed: ' + /** @type {Error} */ (err).message });
   }
-  /** @type {string | null} */
-  let mirror = null;
-  /** @type {string | null} */
-  let mirrorError = null;
-  try {
-    mirror = store.mirror(req.user);
-  } catch (err) {
-    mirrorError = /** @type {Error} */ (err).message;
-    console.error('[time-turtle] markdown mirror failed:', mirrorError);
-  }
   // The re-pointed count is catalog data the caller can already GET; it is the one number
   // that says whether this was a bare id swap or a reconcile, so it is worth returning.
-  res.json({ ok: true, projects, mirror, mirrorError, mirrorBlocked: mirrorBlockFor(req.user) });
+  res.json({ ok: true, projects });
 });
 
 // ---- user management (admin) ----
 app.get('/api/users', requireUser, requireAdmin, (req, res) => res.json({ users: db.listUsers() }));
 app.post('/api/users', requireUser, requireAdmin, (req, res) => {
-  // SB-056 / DD-006 consequence 1, direction 1: refuse a second user while `personal` is on.
-  // Before `db.createUser` is reached, so a refusal really does leave the user table alone.
-  // There is no sane answer to whose Calendar/Daily/2026-07-26.md two employees' entries land
-  // in, which is why this is ruled out by construction rather than deferred to a merge story.
-  if (singleUserShape()) return res.status(403).json({ error: SECOND_USER_REFUSAL });
   const { email, name, role, password } = req.body || {};
   if (!email || !name || !password) return res.status(400).json({ error: 'email, name and password are required' });
   if (db.findUserByEmail(email)) return res.status(409).json({ error: 'a user with that email already exists' });
@@ -1999,78 +973,12 @@ if (existsSync(clientDist)) {
   app.get(/^\/(?!api\/).*/, (req, res) => res.sendFile(join(clientDist, 'index.html')));
 }
 
-// The banner must name the directory mirrors actually land in — mirrorTarget(), not the
-// env path — and say which source won, so a wrong-looking mirror is diagnosable from the
-// first line of the log instead of from four stale files (SB-073).
-const MIRROR_SOURCE = {
-  'env-locked': 'TT_MD_DIR, frozen by TT_MD_DIR_LOCK',
-  setting: 'mdDir setting',
-  env: 'TT_MD_DIR',
-  default: 'default',
-};
-// SB-056: same lesson, same shape, for the instance shape. Which source won is the whole point
-// — "TT_SHAPE=personal but the stored setting says team" is otherwise invisible until someone
-// runs a census. The BACKEND is printed too, but as a DERIVATION (DD-015) and never as a
-// second source: it has no env var and no setting of its own to disagree with.
-const SHAPE_SOURCE = {
-  'env-locked': 'TT_SHAPE, frozen by TT_SHAPE_LOCK',
-  setting: 'shape setting',
-  env: 'TT_SHAPE',
-  default: 'default',
-};
-
-// SB-098: `{ port, host }` rather than `listen(PORT)`. `host: undefined` is the historical
-// every-interface bind, which is what `team` keeps; under `personal` BIND_HOST is loopback and
-// the boot block above has already refused every TT_HOST that would make it anything else.
-app.listen({ port: PORT, host: BIND_HOST }, () => {
-  const shape = shapeTarget();
-  const target = mirrorTarget();
+// `host: undefined` is the every-interface bind. `TT_HOST` narrows it.
+app.listen({ port: PORT, host: HOST || undefined }, () => {
+  console.log(`[time-turtle] api on http://localhost:${PORT}`);
   console.log(
-    `[time-turtle] api on http://localhost:${PORT}  ·  shape: ${shape.shape}  (${SHAPE_SOURCE[shape.source]})  ·  storage: ${shape.backend}`,
-  );
-  // Which interfaces answer is not a detail when there is no login. Said out loud on the first
-  // line of the log, in the same breath as the shape that decided it (SB-073's lesson).
-  console.log(
-    BIND_HOST
-      ? `[time-turtle] bound to ${BIND_HOST} only — this instance is not reachable from other machines`
+    HOST
+      ? `[time-turtle] bound to ${HOST} only — this instance is not reachable from other machines`
       : '[time-turtle] bound to every interface — reachable from other machines on this network',
   );
-  if (shape.shadowed)
-    console.log(
-      `[time-turtle] the stored shape setting overrides TT_SHAPE=${shape.shadowed} — that shape is not in use`,
-    );
-  // SB-056 design decision 3: `personal` is selectable BEFORE SB-057 fills the vault store in,
-  // because SB-056's own required evidence needs it selectable and DD-011's retirement is
-  // present tense. The cost is real and is said out loud here rather than discovered.
-  if (shape.shape === 'personal')
-    console.log(
-      '[time-turtle] personal shape: the markdown mirror is off (DD-011), committing is off until phase 3 (DD-008), and markdown paste-back is off',
-    );
-  // SB-057: the sync engine starts AFTER the server is answering, deliberately. A cold boot scan
-  // over evicted days is a serial run of ~1 s blocking downloads (SB-052), and `tt serve` spawns
-  // detached — so a scan that ran before `listen` would look exactly like a hang, on a process
-  // nobody can see. The watcher and the interval are started first so a note landing during the
-  // scan is not missed; the scan itself is fire-and-forget.
-  const started = startVaultSync();
-  if (started) {
-    const config = vaultSyncConfig();
-    console.log(`[time-turtle] vault sync → ${config ? config.dailyDir : '?'}  (watch + interval)`);
-    void scanVault()
-      .then((counts) => {
-        const summary = Object.entries(counts)
-          .map(([verdict, n]) => `${n} ${verdict}`)
-          .join(', ');
-        console.log(`[time-turtle] vault boot scan: ${summary || 'no daily notes yet'}`);
-      })
-      .catch((err) => console.error('[time-turtle] vault boot scan failed:', /** @type {Error} */ (err).message));
-  } else if (shape.shape === 'personal') {
-    console.log('[time-turtle] vault sync is idle: no vault folder is configured (Settings → Vault)');
-  }
-  console.log(
-    `[time-turtle] markdown mirror → ${target.dir}  (${MIRROR_SOURCE[target.source]})${shape.shape === 'personal' ? '  — not written in the personal shape' : ''}`,
-  );
-  if (target.shadowed)
-    console.log(
-      `[time-turtle] the stored mdDir setting overrides TT_MD_DIR ${target.shadowed} — nothing is written there`,
-    );
 });

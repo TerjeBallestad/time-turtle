@@ -61,67 +61,7 @@ CREATE TABLE IF NOT EXISTS commits (
   user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
   data TEXT NOT NULL DEFAULT '[]'
 );
--- SB-057: what TT last read from, and last wrote to, each daily note. One row per PATH.
---
--- WHAT THIS TABLE IS FOR, and — just as important — what it is NOT for.
---
--- It is NOT the corruption detector. DD-009 deliberately took that job away from an index and
--- put it ON THE NOTE (the payload digest in the "revision: N · a3f1" anchor), and the deciding
--- argument was exactly that an on-note digest needs no surviving state: any TT, on any machine,
--- after any crash or index rebuild, verifies a block against itself. "The index must be durable"
--- is an argument that was RETIRED. Do not reinstate it here. This table may be deleted, rebuilt
--- or lost without any block becoming undetectably corrupt.
---
--- It IS required for two things that stand on their own merits:
---   1. the "file rev < index rev" split (design decision 5). Telling "a peer that is simply
---      behind" from "somebody restored this note from git" needs TT's record of what the note
---      looked like at the PREVIOUS revision, and no note carries its own history.
---   2. the own-write echo guard — file_sha is how the watcher recognises TT's own write and
---      declines to re-import it.
---
--- CREATE TABLE IF NOT EXISTS, no migration, and an existing DB starts EMPTY. That is not a gap:
--- an empty index reads as "nothing known yet", which is the correct cold-start state, and under
--- the write scope rule (design decision 2) it licenses no writes at all until a scan has read
--- something.
---
--- state is known | unknown | quarantined, and only known licenses a write. That is what
--- makes invariant 1 ("unreadable or absent → unknown, never empty") mean something on the WRITE
--- side rather than being a comment on the read side.
---
--- TWO HASHES, TWO JOBS (design decision 3), and they must never be collapsed into one:
---   file_sha       — sha256 over the WHOLE FILE (node:crypto, server-side). Answers "did this
---                      file change at all", which is the cheap skip that makes the interval scan
---                      free on a quiet day. It moves when Terje edits "## Captures", so it is
---                      useless as an arbitration input.
---   payload_digest — TT.vaultPayloadDigest, the SAME 16-bit FNV the bottom anchor carries.
---                      Answers "is this the payload TT recorded at that rev". It has to be the
---                      anchor's hash or the rev-regression split compares against a number no
---                      note ever contained.
-CREATE TABLE IF NOT EXISTS vault_index (
-  path TEXT PRIMARY KEY,
-  date TEXT NOT NULL,
-  state TEXT NOT NULL,
-  rev INTEGER,
-  payload_digest TEXT,
-  prev_rev INTEGER,
-  prev_payload_digest TEXT,
-  file_sha TEXT,
-  verified INTEGER,
-  quarantine_reason TEXT,
-  quarantined_at TEXT,
-  seen_at TEXT,
-  written_at TEXT
-);
 `);
-
-// The post-commit queue's state, declared HERE — above every caller, not beside `transaction` at
-// the bottom of the file. `let`/`const` are hoisted but left uninitialised, so a reference from a
-// function CALLED before the declaration is evaluated throws a TDZ `ReferenceError`; and
-// `migrateToSdd002()` a few lines down runs `transaction()` during module init, which is exactly
-// that case. See `afterCommit` beside `transaction` for what the queue is for.
-let inTransaction = false;
-/** @type {(() => void)[]} */
-const afterCommitQueue = [];
 
 // ---- migrations ----
 // CREATE TABLE IF NOT EXISTS never touches a table that already exists, so every
@@ -149,45 +89,9 @@ addColumnIfMissing('projects', 'billable', 'INTEGER NOT NULL DEFAULT 1');
 addColumnIfMissing('entries', 'edited_by_admin', 'INTEGER NOT NULL DEFAULT 0');
 // SDD-002 ruling 7 (PLAN-006): archive-not-delete. An archived client/project is hidden
 // from creation pickers but keeps resolving for history. Defaults 0 (active) so existing
-// on-disk rows stay active and the markdown mirror stays byte-identical.
+// on-disk rows stay active and the markdown codec's output stays byte-identical.
 addColumnIfMissing('clients', 'archived', 'INTEGER NOT NULL DEFAULT 0');
 addColumnIfMissing('projects', 'archived', 'INTEGER NOT NULL DEFAULT 0');
-/**
- * The mirror slug a user gets ONCE, at creation (and, for rows that predate the column, at the
- * backfill below). Identical to the expression `mirrorPath` used to evaluate on every write —
- * keeping it identical is what makes this change move zero files. Never call it on an existing
- * row: re-deriving is the defect.
- * @param {{ name?: string | null, email: string }} user @returns {string}
- */
-function deriveMirrorSlug(user) {
-  return TT.slug(user.name || user.email.split('@')[0]);
-}
-// SB-112: the mirror filename, PINNED. `mirrorPath` (server/src/markdown.js) used to slug
-// `users.name` on every write, which made the filename a function of a mutable field — the one
-// derived identifier in this codebase that was re-derived on read. Every other one is settled at
-// creation and never recomputed (client ids, `TT.projectCode`, task ids — see DC-005), and this
-// column brings the mirror in line with them.
-//
-// BACKFILLED FROM THE CURRENT NAME, WHICH IS WHY IT MOVES NOTHING. The seed expression below is
-// character-for-character what `mirrorPath` computed a moment ago, so every existing user is
-// pinned to the file that is already on disk: no rename, no move, no delete, no new orphan, and
-// every guard-ledger key stays valid. Verified against the live `users` table before shipping —
-// all five rows (Admin, Kari Ansatt, Terje, Terje 2, Review Demo) are pure ASCII, so SB-088's
-// transliteration fold changes none of them and the backfill is a no-op on disk.
-addColumnIfMissing('users', 'mirror_slug', "TEXT NOT NULL DEFAULT ''");
-{
-  const unpinned = /** @type {{ id: number, name: string, email: string }[]} */ (
-    db.prepare("SELECT id, name, email FROM users WHERE mirror_slug = ''").all()
-  );
-  const pin = db.prepare('UPDATE users SET mirror_slug = ? WHERE id = ?');
-  for (const row of unpinned) pin.run(deriveMirrorSlug(row), row.id);
-}
-// SB-057 task 8: when a path FIRST quarantined, as opposed to when it was last looked at. The
-// surface says "detected <when>" and that has to be sticky — `seen_at` moves on every scan pass,
-// including the cheap skip, so it answers a different question. Guarded, because a DB created
-// between this plan's task 2 and task 8 already has the table without the column.
-addColumnIfMissing('vault_index', 'quarantined_at', 'TEXT');
-
 // One-shot v1→v2 data migration (idempotent — guarded by a schema version marker).
 // For every entry: resolve its old task_id against the (old, shared) tasks table and
 // COPY the task's name→label + project onto the entry; a dangling id becomes the
@@ -247,159 +151,50 @@ function migrateToSdd002() {
 migrateToSdd002();
 
 // ---- settings ----
-// SB-063: `vaultTimeSeparator` is stored like any other key, and defaults to `unicode` on
-// read so an untouched install emits exactly what TT emitted before the setting existed. It
-// reaches no mirror byte — TT.serializeMd writes only `currency:`/`language:`/`format:`, the
-// same reason `mdDir` has always been invisible there.
-//
-// SB-056 / SB-100: `shape` is stored the same way and defaults to `team` on read, so an
-// untouched install behaves exactly as it did before the setting existed. INSTANCE-LOCAL: it,
-// `mdDir` and `vaultPaths` stay in these SQLite rows under BOTH shapes and must never be
-// serialized into the catalog note (SB-058) — they are how TT finds the catalog, so putting
-// them there would be a bootstrap loop. Like `mdDir` it reaches no mirror byte.
-//
-// SB-100 / DD-016: `vaultCutover` rides beside it and is SERVER-OWNED — see putSettings.
-//
-// SB-056: `vaultPaths` is the one settings key that is not a scalar. It rides the same
-// key/value table as ONE JSON value rather than five keys, because it is one decision — where
-// the vault is — and reading it back as a partial (root set, daily missing) would be a shape
-// no caller wants to handle. Defaulted on read, validated on write; SB-057/SB-058 may extend
-// the shape additively, and an older row missing a newer key simply takes that key's default.
-// The defaults live in shared/core.js, next to TT.SHAPES and TT.TIME_SEPARATOR_VALUES — this
-// is model vocabulary, and SB-057/SB-058 will extend the shape, so a second copy here would
-// quietly start producing a VaultPaths missing their new key.
-const VAULT_PATHS_DEFAULT = TT.VAULT_PATHS_DEFAULT;
-/** @param {string} raw @returns {import('../../shared/types.ts').VaultPaths} */
-function parseVaultPaths(raw) {
-  try {
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return { ...VAULT_PATHS_DEFAULT };
-    const out = { ...VAULT_PATHS_DEFAULT };
-    for (const key of /** @type {(keyof typeof VAULT_PATHS_DEFAULT)[]} */ (Object.keys(VAULT_PATHS_DEFAULT)))
-      if (typeof parsed[key] === 'string') out[key] = parsed[key];
-    return out;
-  } catch {
-    return { ...VAULT_PATHS_DEFAULT };
-  }
-}
-
-/** @returns {Settings & { mdDir: string }} */
+// Two keys: `currency` and `language`. A database from an older Time Turtle can also hold `shape`,
+// `mdDir`, `vaultPaths`, `vaultTimeSeparator` and `vaultCutover` rows. They are left in the table,
+// never read here and never written (SB-181) — `firstRunAnswered` below reads `shape` for its
+// presence and nothing else. `firstRunAt` is server-owned and never comes through `putSettings`.
+/** @returns {Settings} */
 export function getSettings() {
-  const rows = /** @type {{ key: string, value: string }[]} */ (db.prepare('SELECT key, value FROM settings').all());
-  const settings = {
-    currency: 'kr',
-    language: 'en',
-    mdDir: '',
-    vaultTimeSeparator: 'unicode',
-    shape: 'team',
-    // DD-016: `''` is "no cutover has happened", a value nobody can mean — the same trick
-    // `mdDir` uses, and the reason this one does NOT need a getStored* twin.
-    vaultCutover: '',
-    vaultPaths: { ...VAULT_PATHS_DEFAULT },
-  };
-  for (const row of rows) {
-    if (row.key === 'vaultPaths') settings.vaultPaths = parseVaultPaths(row.value);
-    else
-      settings[/** @type {'currency'|'language'|'mdDir'|'vaultTimeSeparator'|'shape'|'vaultCutover'} */ (row.key)] =
-        row.value;
-  }
-  return /** @type {Settings & { mdDir: string }} */ (/** @type {unknown} */ (settings));
-}
-/**
- * SB-100: the shape AS STORED — the raw row, or null when nothing has been stored.
- *
- * `getSettings().shape` cannot answer this. It defaults to `team`, which is also a real
- * choice, so "the setting says team" and "there is no setting" are indistinguishable there —
- * and telling them apart is the whole of `shapeTarget()`'s job, since TT_SHAPE is supposed
- * to win exactly when nothing is stored. It is also what makes the OPEN state (DD-015: one
- * user, unlocked, nothing stored) visible to the boot-time inference rule and to SB-098's
- * first-run question. (`mdDir` has no such problem: its default is `''`, a value nobody can
- * mean, which is why `mirrorTarget()` gets away with reading the defaulted object.) An
- * unrecognised row reads as null, so a hand-edited value falls through to the env rather than
- * being trusted.
- * @returns {import('../../shared/types.ts').Shape | null}
- */
-export function getStoredShape() {
-  const row = /** @type {{ value: string } | undefined} */ (
-    db.prepare('SELECT value FROM settings WHERE key = ?').get('shape')
+  const rows = /** @type {{ key: string, value: string }[]} */ (
+    db.prepare("SELECT key, value FROM settings WHERE key IN ('currency', 'language')").all()
   );
-  if (!row || !TT.SHAPES.includes(/** @type {any} */ (row.value))) return null;
-  return /** @type {any} */ (row.value);
+  const settings = { currency: 'kr', language: 'en' };
+  for (const row of rows) settings[/** @type {'currency' | 'language'} */ (row.key)] = row.value;
+  return settings;
 }
 /**
- * SB-100 / DD-016: stamp the moment this install became `personal`, if it has not been
- * stamped. Idempotent, and the FIRST stamp always wins — a round trip through `team` and back
- * must not re-stamp, because a later date silently re-opens history that was already excluded.
- *
- * An ISO INSTANT, not a bare day: DD-016 words the cutover as an instant, and SB-057 (which
- * owns the write filter) can take `slice(0, 10)` for a day-grained comparison against
- * `Entry.date`. Storing the coarser value would throw away information SB-057 cannot recover.
- *
- * Called from two places, because there are two ways into the personal shape: `putSettings`
- * when the shape is stored, and the boot (server/src/index.js) when `TT_SHAPE=personal`
- * supplies it without ever storing anything. An unstamped vault store is one with NO
- * pre-cutover history at all — every entry eligible — which is the hazard inverted.
- * @returns {string} the cutover in force
- */
-export function stampVaultCutover() {
-  const row = /** @type {{ value: string } | undefined} */ (
-    db.prepare('SELECT value FROM settings WHERE key = ?').get('vaultCutover')
-  );
-  if (row && row.value) return row.value;
-  const at = new Date().toISOString();
-  db.prepare(
-    'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
-  ).run('vaultCutover', at);
-  return at;
-}
-/**
- * Writes ONLY the keys that are present, which is what makes a partial legal and always has
- * been — the route hands it whatever the client PUT, and SB-100's boot-time inference hands it
- * `{ shape: 'team' }` and nothing else. The type says so now; the body already did.
- *
- * `vaultPaths` IS PARTIAL TOO, and the type has to say that separately (SB-140). `Settings` types
- * it as a complete `VaultPaths` because every READ hands back a complete one — the validation
- * below RECONSTRUCTS it key by key from `TT.VAULT_PATHS_DEFAULT`, so a caller supplying only
- * `{ root }` is the normal case rather than an edge one, and the first run is exactly that caller.
- * `Partial<Settings>` alone would force it to restate four sub-paths it has no opinion about,
- * which is the drift `TT.VAULT_PATHS_DEFAULT`'s own comment exists to prevent.
- * @param {Partial<Omit<Settings, 'vaultPaths'>> & { vaultPaths?: Partial<import('../../shared/types.ts').VaultPaths> }} settings
+ * Writes ONLY the keys that are present, and only `currency` and `language`. Anything else a
+ * client sends — a stale tab still PUTting `shape` or `mdDir` — is ignored, and the stored row of
+ * that name is left exactly as it was.
+ * @param {Partial<Settings>} settings
  */
 export function putSettings(settings) {
   const upsert = db.prepare(
     'INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
   );
-  for (const key of /** @type {const} */ (['currency', 'language', 'mdDir']))
+  for (const key of /** @type {const} */ (['currency', 'language']))
     if (settings[key] != null) upsert.run(key, String(settings[key]));
-  // An enum, not free text like currency: an unrecognised value would read back as junk even
-  // though TT.timeSeparator would safely emit `→` for it. The vocabulary lives in core.js.
-  if (settings.vaultTimeSeparator != null && TT.TIME_SEPARATOR_VALUES.includes(settings.vaultTimeSeparator))
-    upsert.run('vaultTimeSeparator', settings.vaultTimeSeparator);
-  // SB-100: same enum discipline. An unrecognised shape name must never reach the table —
-  // TT.shapeCapabilities would resolve it to the safe `team` row and the operator would be
-  // looking at a stored `persona` believing the vault was live. The vocabulary lives in core.js.
-  if (settings.shape != null && TT.SHAPES.includes(settings.shape)) {
-    upsert.run('shape', settings.shape);
-    // DD-016: the same save that stores `personal` stamps the cutover. HERE and not in the
-    // route, so nothing that can store the shape can skip it.
-    if (settings.shape === 'personal') stampVaultCutover();
-  }
-  // `vaultCutover` is deliberately NOT read off `settings`. It is SERVER-OWNED (DD-016): the
-  // client PUTs the whole settings object back on every save, so a stamp a client can move is
-  // a stamp a client can erase — and the date it would erase is the one deciding which of the
-  // user's days may reach the vault at all. See stampVaultCutover.
-  // SB-056: `vaultPaths` is validated by RECONSTRUCTION rather than by inspection — the stored
-  // value is built key by key from the default, taking only known keys whose value is a string.
-  // An unknown key is dropped and a non-string is ignored, so nothing a caller invents can end
-  // up in the row and nothing SB-057 later reads can be a non-string. Absent keys keep their
-  // defaults, which is what makes SB-057/SB-058's additive extension free.
-  if (settings.vaultPaths != null && typeof settings.vaultPaths === 'object' && !Array.isArray(settings.vaultPaths)) {
-    const incoming = /** @type {Record<string, unknown>} */ (/** @type {unknown} */ (settings.vaultPaths));
-    const next = { ...VAULT_PATHS_DEFAULT };
-    for (const key of /** @type {(keyof typeof VAULT_PATHS_DEFAULT)[]} */ (Object.keys(VAULT_PATHS_DEFAULT)))
-      if (typeof incoming[key] === 'string') next[key] = /** @type {string} */ (incoming[key]);
-    upsert.run('vaultPaths', JSON.stringify(next));
-  }
+}
+/**
+ * DD-024 clause 1: record that the first run was answered. An ISO instant, and the FIRST stamp
+ * wins — a second call leaves the row alone.
+ */
+export function stampFirstRun() {
+  db.prepare("INSERT INTO settings (key, value) VALUES ('firstRunAt', ?) ON CONFLICT(key) DO NOTHING").run(
+    new Date().toISOString(),
+  );
+}
+/**
+ * Has this install answered its first run? A `firstRunAt` row says so, and so does a legacy `shape`
+ * row: an install that answered the old shape question, either answer, is never asked again. The
+ * `shape` row is read here for its presence and nowhere else.
+ * @returns {boolean}
+ */
+export function firstRunAnswered() {
+  const row = db.prepare("SELECT 1 AS answered FROM settings WHERE key IN ('firstRunAt', 'shape') LIMIT 1").get();
+  return row != null;
 }
 
 // ---- catalog ----
@@ -440,11 +235,11 @@ function replaceAll(table, rows, insert) {
   for (const row of rows) insert(row);
 }
 /**
- * SB-072: `name` is trimmed here, not at the API boundary. The mirror parser splits a row on
+ * SB-072: `name` is trimmed here, not at the API boundary. The markdown parser splits a row on
  * `|` and trims every cell (`splitCells` → `splitUnescaped(s, '|', true)`, shared/core.js), so
  * it cannot tell format padding from typed content and a stored `'  Acme  '` comes back
  * `'Acme'`. Terje's re-ruling: make the data fit the format rather than escape the edges —
- * normalize on the way in so the DB never holds a value the mirror cannot round-trip. It lives
+ * normalize on the way in so the DB never holds a value the markdown codec cannot round-trip. It lives
  * at this layer, on the `String(name).trim()` precedent in createUser below, because a
  * client-side trim is bypassable by any direct PUT and so cannot support a data-integrity
  * claim. Same `.trim()` the parser uses, so the two agree exactly; interior whitespace, which
@@ -453,11 +248,11 @@ function replaceAll(table, rows, insert) {
  * SB-075 MADE THE RULE UNIVERSAL — READ THIS BEFORE ADDING A FREE-TEXT COLUMN. SB-072 trimmed
  * only the two fields shown to be UI-reachable, which left the guarantee narrower than it read:
  * `project.name`, `task.label` and `entry.label` still trimmed in the CLIENT alone, so a direct
- * PUT stored padding the mirror ate. All five are now trimmed at this layer, and that is the
+ * PUT stored padding the markdown codec ate. All five are now trimmed at this layer, and that is the
  * complete list of trimmed columns today:
  *   `clients.name` (here) · `projects.name` (putProjects) · `tasks.label` (putTasks) ·
  *   `entries.label` + `entries.note` (putEntries)
- * Every OTHER string a mirror section emits is an identifier the caller chose — `clients.id`,
+ * Every OTHER string a markdown section emits is an identifier the caller chose — `clients.id`,
  * `projects.code`, `tasks.id`, `entries.id`, `entries.project` — and those are validated or
  * left verbatim, not normalized. The discipline the ruling bought: any new column whose value
  * reaches a `|`-delimited cell trims here too, or the guarantee quietly narrows again.
@@ -518,10 +313,9 @@ export function clientReferenced(id) {
 // entries + templates under the old code. This rewrites the projects row AND every user's
 // entries.project AND every user's tasks.project_code from old→new in ONE transaction, so
 // nothing dangles. A BLIND reconcile — it touches only the code, never reads entry content —
-// so SB-009's per-user privacy line stays intact. Returns the affected user ids (those whose
-// entries or templates moved) so the caller can rewrite their mirrors. Bumps the catalog
-// version and every affected user's entries version.
-/** @param {string} oldCode @param {string} newCode @returns {number[]} */
+// so SB-009's per-user privacy line stays intact. Bumps the catalog version and the entries
+// version of every user whose entries or templates moved.
+/** @param {string} oldCode @param {string} newCode */
 export function renameProjectCode(oldCode, newCode) {
   return transaction(() => {
     const affected = new Set(
@@ -535,7 +329,6 @@ export function renameProjectCode(oldCode, newCode) {
     db.prepare('UPDATE tasks SET project_code = ? WHERE project_code = ?').run(String(newCode), String(oldCode));
     bumpVersion('catalog');
     for (const id of affected) bumpVersion(entriesScope(id));
-    return [...affected];
   });
 }
 
@@ -576,15 +369,10 @@ export function putTasks(userId, tasks) {
 }
 
 // ---- entries (per user) ----
-// SB-059: `tags` joins `billable`/`editedByAdmin` in the Omit. Not a workaround — the SELECT
-// below really does not return it: there is no tags column, because the vault block is that
-// field's only serialization today. Naming it here is what keeps the cast a true statement
-// about this query, and is why the compiler will flag the day a tags column lands and this
-// Omit is left behind.
 /** @param {number} userId @returns {Entry[]} */
 export function getEntries(userId) {
   const rows =
-    /** @type {(Omit<Entry, 'billable' | 'editedByAdmin' | 'tags'> & { billable: number, editedByAdmin: number })[]} */ (
+    /** @type {(Omit<Entry, 'billable' | 'editedByAdmin'> & { billable: number, editedByAdmin: number })[]} */ (
       db
         .prepare(
           'SELECT id, date, start, end, dur_min AS durMin, project, label, note, billable, edited_by_admin AS editedByAdmin FROM entries WHERE user_id = ? ORDER BY date, id',
@@ -621,17 +409,17 @@ export function getAllEntries(from, to) {
     (where.length ? ' WHERE ' + where.join(' AND ') : '') +
     ' ORDER BY user_id, date, id';
   const rows =
-    /** @type {(Omit<Entry & { userId: number }, 'billable' | 'editedByAdmin' | 'tags'> & { billable: number })[]} */ (
+    /** @type {(Omit<Entry & { userId: number }, 'billable' | 'editedByAdmin'> & { billable: number })[]} */ (
       db.prepare(sql).all(...params)
     );
   return rows.map((entry) => ({ ...entry, billable: !!entry.billable }));
 }
 // SB-070: entry ids are charset-validated at the API boundary (`entryIdError`, server/src/
-// index.js) because they reach the mirror's unescaped `## commits` section. This layer stays
+// index.js) because they reach the markdown codec's unescaped `## commits` section. This layer stays
 // a dumb writer — String(entry.id) — so any NEW write path must run that guard itself.
 //
 // SB-072/SB-075: the free-text pair `label` and `note` are the exception — they are NORMALIZED
-// here rather than rejected, because the mirror parser trims every cell it splits out and so
+// here rather than rejected, because the markdown parser trims every cell it splits out and so
 // silently eats their leading/trailing whitespace on a restore. (SB-072 did `note`; SB-075 added
 // `label`, which until then trimmed in the client only and so lost the guarantee to any direct
 // PUT.) Trimming on the way in keeps the DB inside what the format can represent; see the
@@ -686,147 +474,6 @@ export function putCommits(userId, commits) {
   db.prepare(
     'INSERT INTO commits (user_id, data) VALUES (?, ?) ON CONFLICT(user_id) DO UPDATE SET data = excluded.data',
   ).run(userId, JSON.stringify(Array.isArray(commits) ? commits : []));
-}
-
-// ---- vault index (SB-057) ----
-// See the DDL above for what this table is and is not. These are the only accessors; nothing
-// else may touch `vault_index`, because `putVaultIndex` owns a rule no caller can be trusted to
-// reproduce (the previous-pair roll-forward below).
-/** @typedef {import('../../shared/types.ts').VaultIndexRow} VaultIndexRow */
-
-/** The three legal `state` values. Only `known` licenses a write (design decision 2). */
-const VAULT_INDEX_STATES = ['known', 'unknown', 'quarantined'];
-
-/**
- * The raw SQLite row as the model shape. `verified` is stored as 0/1/NULL and comes back as a
- * boolean or null — null means "TT has not parsed this file", which is a third thing and not
- * `false` ("parsed, digest-less, therefore unverified").
- * @param {any} row @returns {VaultIndexRow | null}
- */
-function vaultIndexRow(row) {
-  if (!row) return null;
-  return {
-    path: row.path,
-    date: row.date,
-    state: row.state,
-    rev: row.rev,
-    payloadDigest: row.payload_digest,
-    prevRev: row.prev_rev,
-    prevPayloadDigest: row.prev_payload_digest,
-    fileSha: row.file_sha,
-    verified: row.verified == null ? null : !!row.verified,
-    quarantineReason: row.quarantine_reason,
-    quarantinedAt: row.quarantined_at,
-    seenAt: row.seen_at,
-    writtenAt: row.written_at,
-  };
-}
-const VAULT_INDEX_SELECT =
-  'SELECT path, date, state, rev, payload_digest, prev_rev, prev_payload_digest, file_sha, verified, quarantine_reason, quarantined_at, seen_at, written_at FROM vault_index';
-
-/** @param {string} path @returns {VaultIndexRow | null} */
-export function getVaultIndex(path) {
-  return vaultIndexRow(db.prepare(VAULT_INDEX_SELECT + ' WHERE path = ?').get(String(path)));
-}
-/**
- * Every row TT holds for one calendar date. A LIST and not a single row: the daily folder is a
- * setting, so re-pointing it leaves rows for two paths that mean the same day, and a caller that
- * assumed one row would silently pick whichever SQLite handed back first.
- * @param {string} date @returns {VaultIndexRow[]}
- */
-export function getVaultIndexByDate(date) {
-  return /** @type {VaultIndexRow[]} */ (
-    db
-      .prepare(VAULT_INDEX_SELECT + ' WHERE date = ? ORDER BY path')
-      .all(String(date))
-      .map(vaultIndexRow)
-  );
-}
-/** @returns {VaultIndexRow[]} */
-export function listVaultIndex() {
-  return /** @type {VaultIndexRow[]} */ (
-    db
-      .prepare(VAULT_INDEX_SELECT + ' ORDER BY path')
-      .all()
-      .map(vaultIndexRow)
-  );
-}
-/**
- * Record what TT now knows about a path. THE ONE PLACE `prevRev`/`prevPayloadDigest` are set —
- * they are rolled forward from the row's CURRENT pair and are deliberately not readable off the
- * argument. A caller that could set them would eventually set them to something that never was
- * on disk, and the rev-regression split (design decision 5) would then vouch for a payload TT
- * never wrote, which is the silent-undo SB-061 filed.
- *
- * The roll happens only when the incoming `(rev, payloadDigest)` DIFFERS from the stored pair.
- * An idempotent re-put — the interval scan touching `seenAt` on a file that has not moved — must
- * not shift `(rev, digest)` into `prev_*`, because that would overwrite the genuine previous
- * revision with the current one and turn a legitimate stale peer into a quarantine. "Exactly one
- * previous pair" means one previous DISTINCT pair.
- *
- * An unrecognised `state` degrades to `unknown` rather than throwing or being stored verbatim.
- * `unknown` is the safe row: it licenses no write, so a junk value costs a re-read and never a
- * byte. Same discipline `putSettings` applies to `shape`.
- * @param {VaultIndexRow} row
- */
-export function putVaultIndex(row) {
-  const path = String(row.path);
-  const current = getVaultIndex(path);
-  const rev = row.rev == null ? null : +row.rev;
-  const payloadDigest = row.payloadDigest == null ? null : String(row.payloadDigest);
-  const changed = !current || current.rev !== rev || current.payloadDigest !== payloadDigest;
-  const prevRev = current ? (changed ? current.rev : current.prevRev) : null;
-  const prevDigest = current ? (changed ? current.payloadDigest : current.prevPayloadDigest) : null;
-  const state = VAULT_INDEX_STATES.includes(String(row.state)) ? String(row.state) : 'unknown';
-  // `quarantinedAt` is OWNED here for the same reason the previous pair is: it is the moment the
-  // refusal STARTED, and a caller that could set it could make a standing quarantine look new on
-  // every scan pass. Stamped on the transition INTO `quarantined`, preserved while it stays there,
-  // and cleared when the note recovers.
-  const quarantinedAt =
-    state !== 'quarantined' ? null : current && current.state === 'quarantined' && current.quarantinedAt ? current.quarantinedAt : new Date().toISOString(); // prettier-ignore
-  // …and the REASON is tied to the state for the same reason, in the same place. A scan pass that
-  // takes the cheap `file_sha` exit re-puts the row without re-deriving why it was refused — and a
-  // quarantine with no reason renders as the generic "did not say why" line, which is a surface
-  // that has stopped telling the truth about a note that has stopped syncing. Caught by looking at
-  // the screen, not by a test. Absent + still quarantined ⇒ keep what was there; not quarantined ⇒
-  // always null, so a recovered note cannot carry a stale reason.
-  const quarantineReason =
-    state !== 'quarantined'
-      ? null
-      : row.quarantineReason != null
-        ? String(row.quarantineReason)
-        : current && current.quarantineReason
-          ? current.quarantineReason
-          : null;
-  db.prepare(
-    `INSERT INTO vault_index (path, date, state, rev, payload_digest, prev_rev, prev_payload_digest, file_sha, verified, quarantine_reason, quarantined_at, seen_at, written_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT(path) DO UPDATE SET
-       date = excluded.date, state = excluded.state, rev = excluded.rev,
-       payload_digest = excluded.payload_digest, prev_rev = excluded.prev_rev,
-       prev_payload_digest = excluded.prev_payload_digest, file_sha = excluded.file_sha,
-       verified = excluded.verified, quarantine_reason = excluded.quarantine_reason,
-       quarantined_at = excluded.quarantined_at, seen_at = excluded.seen_at,
-       written_at = excluded.written_at`,
-  ).run(
-    path,
-    String(row.date ?? ''),
-    state,
-    rev,
-    payloadDigest,
-    prevRev,
-    prevDigest,
-    row.fileSha == null ? null : String(row.fileSha),
-    row.verified == null ? null : row.verified ? 1 : 0,
-    quarantineReason,
-    quarantinedAt,
-    row.seenAt == null ? null : String(row.seenAt),
-    row.writtenAt == null ? null : String(row.writtenAt),
-  );
-}
-/** @param {string} path */
-export function deleteVaultIndex(path) {
-  db.prepare('DELETE FROM vault_index WHERE path = ?').run(String(path));
 }
 
 // ---- versions (DC-001: optimistic concurrency) ----
@@ -893,35 +540,11 @@ export function createUser({ email, name, role, password }) {
   const cleanEmail = String(email).trim().toLowerCase();
   const cleanName = String(name).trim();
   const result = db
-    .prepare('INSERT INTO users (email, name, role, password_hash, mirror_slug) VALUES (?, ?, ?, ?, ?)')
-    .run(
-      cleanEmail,
-      cleanName,
-      role === 'admin' ? 'admin' : 'employee',
-      hashPassword(password),
-      // SB-112: settled here and never again, so a later rename cannot fork the mirror file.
-      deriveMirrorSlug({ name: cleanName, email: cleanEmail }),
-    );
+    .prepare('INSERT INTO users (email, name, role, password_hash) VALUES (?, ?, ?, ?)')
+    .run(cleanEmail, cleanName, role === 'admin' ? 'admin' : 'employee', hashPassword(password));
   return findUserById(result.lastInsertRowid);
 }
 
-/**
- * SB-112: the pinned filename component for this user's markdown mirror, or null if the row is
- * somehow unpinned (a hand-edited database — the migration covers every row it can see). Read by
- * `mirrorPath`, which falls back to the old live derivation on null so an unpinned row keeps
- * writing exactly where it writes today rather than jumping to a new file.
- *
- * NOT ON THE WIRE, and not on the `User` type, deliberately: this is a storage detail of one
- * machine's mirror folder, and DD-015's lesson is that a derived storage fact does not belong in
- * the envelope just because it was convenient to put it there. `mirrorPath` looks it up.
- * @param {number} id @returns {string | null}
- */
-export function getMirrorSlug(id) {
-  const row = /** @type {{ mirror_slug: string } | undefined} */ (
-    db.prepare('SELECT mirror_slug FROM users WHERE id = ?').get(id)
-  );
-  return row && row.mirror_slug ? row.mirror_slug : null;
-}
 /** @param {number} id @param {string} password */
 export function setUserPassword(id, password) {
   // SB-013: bump token_version in the same write so every session token minted before
@@ -950,62 +573,13 @@ export function deleteUser(id) {
  */
 export function transaction(fn) {
   db.exec('BEGIN');
-  inTransaction = true;
   try {
     const r = fn();
     db.exec('COMMIT');
-    inTransaction = false;
-    // AFTER the COMMIT, never inside it. See `afterCommit` below.
-    flushAfterCommit();
     return r;
   } catch (err) {
     db.exec('ROLLBACK');
-    inTransaction = false;
-    // A rolled-back write never happened, so neither may its side effects. Dropping the queue is
-    // the whole reason it exists: the alternative is daily notes on disk describing entries the
-    // database no longer holds.
-    afterCommitQueue.length = 0;
     throw err;
-  }
-}
-
-// ---- side effects that must not run inside a transaction (SB-057) ----
-//
-// The vault fan-out writes FILES — an fsync of the note, an fsync of its directory, and (once
-// SB-068 lands) a `git add -A` over the whole vault. None of that may happen while a SQLite write
-// transaction is open, for two reasons and the first is the serious one:
-//
-//   • ROLLBACK. `store.putEntries` is called from inside `store.transaction(...)` in the API layer,
-//     and the transaction continues after it (`putCommits`, the version bumps). A throw anywhere
-//     after the fan-out would roll SQLite back while the daily notes — and TT's own git checkpoint
-//     — are already on disk and fsynced. The vault would then describe entries the index does not
-//     hold, which is the one direction DD-006's "SQLite is the derived index" cannot survive.
-//   • HOLD TIME. Two fsyncs per touched date, with a write transaction held open throughout.
-//
-// So the fan-out is QUEUED here and flushed after the COMMIT — the same position in the sequence
-// the markdown mirror already occupies (the routes call `store.mirror` after the transaction), and
-// the reason is identical. Called outside a transaction it simply runs, so a caller that is not in
-// one is not silently deferred forever.
-//
-// A queued effect that throws is logged and the rest still run: by then the save HAS committed, and
-// "you cannot save at all" is a strictly worse failure than a note that has stopped syncing
-// (SB-065's posture).
-/** @param {() => void} fn */
-export function afterCommit(fn) {
-  if (!inTransaction) {
-    fn();
-    return;
-  }
-  afterCommitQueue.push(fn);
-}
-function flushAfterCommit() {
-  const queued = afterCommitQueue.splice(0, afterCommitQueue.length);
-  for (const fn of queued) {
-    try {
-      fn();
-    } catch (err) {
-      console.error('[time-turtle] post-commit side effect failed:', /** @type {Error} */ (err).message);
-    }
   }
 }
 
@@ -1025,31 +599,20 @@ export function seedIfEmpty() {
 }
 
 /**
- * DD-024 clause 3: the demo catalog and hours, as a SEPARATELY CALLABLE step.
+ * DD-024 clause 3: the demo catalog and hours, as a SEPARATELY CALLABLE step, so the first-run
+ * answer can ask for it after boot.
  *
- * WHY IT LEFT `seedIfEmpty`'s user-count branch, and this is the whole of SB-146's fix. The trap
- * is a SEQUENCING window, not a bug in any one function: this ran at boot while the shape was
- * still `default`, `TT.seedMd()` dates its entries at `T`, `T-1`, `T-2`, `T-7`, `T-8`, `T-9`, and
- * `putSettings` stamped the DD-016 cutover seconds later when `personal` was stored. Eight rows
- * landed pre-cutover and DD-017 §1 correctly froze them forever — demo data the person could never
- * delete. Run it AFTER the answer instead and the window does not exist: under `personal` it is
- * refused outright, and under `team` there is no cutover for anything to be before.
+ * ADMIN CREATION DID NOT MOVE and must not: every join is keyed `user_id` and the first run
+ * assumes the row exists.
  *
- * SB-146's OTHER CANDIDATE — stamp the cutover before the seed — is deliberately NOT built. It
- * makes the demo rows POST-cutover and therefore eligible to be written into real daily notes,
- * which is DD-016's first named hazard verbatim.
- *
- * ADMIN CREATION DID NOT MOVE and must not: every join is keyed `user_id` and three separate
- * guards assume the row exists.
- *
- * IDEMPOTENT ON PROJECT COUNT, which it already was — that is what makes it safe to call again
- * after a boot that did not seed.
+ * IDEMPOTENT ON PROJECT COUNT — that is what makes it safe to call again after a boot that did not
+ * seed.
  * @returns {boolean} whether anything was seeded
  */
 export function seedDemoContent() {
   const projectCount = /** @type {{ n: number }} */ (db.prepare('SELECT COUNT(*) AS n FROM projects').get());
   if (projectCount.n !== 0) return false;
-  // The seeded admin — `seedIfEmpty` guarantees a row, and in the open state there is exactly one.
+  // The seeded admin — `seedIfEmpty` guarantees a row, and while the first run is open there is exactly one.
   const owner = listUsers()[0];
   if (!owner) return false;
   const seedState = TT.seed();

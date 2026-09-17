@@ -4,26 +4,6 @@
 // ## Verified red-green: 2026-07-23
 // PLAN-007 (SB-025): monthSegments/monthGood/segmentApproved review rollup.
 // ## Verified red-green: 2026-07-24
-//
-// ## Verified red-green: 2026-07-27
-// PLAN-015 (SB-102 / DD-017 §1): the read-only rule. Output TRANSCRIBED from the runs.
-//   (a) `TT.frozenSegment` forced to `return false` — the ledger clause gone. 3 table rows fail:
-//         × personal / cutover 2026-07-15T09:12:33.000Z / ledger / employee / 2026-07-20
-//           AssertionError: expected [ false, false, false ] to deeply equal [ false, true, true ]
-//       (the complement assertion does NOT fail here, and that is correct: `readOnlyDay` and
-//       `vaultBound` both compose the same broken helper, so they stay complements. The thing
-//       that catches it is the table, and — end to end — the vault case in vault-write.test.js.)
-//   (b) `readOnlyDay`'s personal branch re-derived as `return TT.frozenSegment(date, ctx)`,
-//       i.e. it stops deriving and disagrees with `vaultBound`. 4 fail, and the invariant is
-//       the one that names it:
-//         × under `personal`, readOnlyDay is the EXACT complement of vaultBound on every row
-//           AssertionError: personal / cutover 2026-07-15T09:12:33.000Z / no ledger / employee /
-//           2026-07-14: expected false to be true
-//   (c) `preCutover`'s date comparison replaced by `return false`. 3 table rows fail, plus
-//       vault-write's pre-existing case (2):
-//         × (2) an entry dated BEFORE the cutover produces no file and no adoption
-//           AssertionError: a pre-cutover day was given a daily note: expected true to be false
-//   Restored: 129 passed across the two files.
 import { describe, it, expect } from 'vitest';
 import TT from '../shared/core.js';
 
@@ -701,187 +681,33 @@ describe('TT.uniqueId — one de-collision rule, and the suffix fits inside the 
   });
 });
 
-// ## Verified red-green: 2026-07-26
-// SB-122: the `[[Wikilink]]` rule was composed TWICE, in opposite orders — the daily-note
-// `Project` cell bracketed first and escaped the brackets along with the name, the catalog note's
-// `Note` column escaped first and bracketed after. Both halves round-tripped, but only because
-// `TT.encodeCell` happens not to escape `[`. That is a coincidence of today's cell codec, not a
-// property either site asserted, and a wikilink is a JOIN KEY here: the catalog says which note a
-// project is written as, the daily block writes that note, and the parser resolves it back to a
-// code. A mangled one is `rateOf()` returning 0, not a cosmetic defect.
-//
-// So the suite below runs every claim TWICE: once under the real `encodeCell`, and once under a
-// WIDENED one that also escapes `[` and `]` — the future change this ticket exists to survive.
-// A test that only passed under today's escape set would be green for the wrong reason.
-describe('the wikilink composition is one rule, independent of encodeCell (SB-122)', () => {
-  /** @param {Partial<import('../shared/types.ts').Project>} o */
-  const P = (o) => ({ code: 'LT-01', name: 'Lifelines Tycoon', clientId: null, rate: null, billable: true, archived: false, ...o }); // prettier-ignore
-  /** @param {Partial<import('../shared/types.ts').VaultEntry>} o */
-  const E = (o) => ({ id: 'ephemeral', date: '2026-01-05', start: null, end: null, durMin: 30, project: null, label: '', note: '', billable: false, ...o }); // prettier-ignore
-  /** The nth line's cells, trimmed and STILL escaped — `| a | b |` → ['a', 'b']. */
-  const cells = (region, line) => TT.splitCells(region.split('\n')[line]).slice(1, -1);
-
-  /**
-   * Run `fn` with `TT.encodeCell` widened to escape `[` and `]` as well. `decodeCell` is already
-   * unconditional (`\X` → `X` for any X), so widening the write half alone is a faithful
-   * simulation of the change — nothing else in the codec needs to move.
-   */
-  const withBracketsEscaped = (fn) => {
-    const real = TT.encodeCell;
-    TT.encodeCell = (s) => (s == null ? '' : String(s)).replace(/[\\|[\]]/g, (c) => '\\' + c);
-    try {
-      expect(TT.encodeCell('a[b')).toBe('a\\[b'); // the premise of this whole block
-      return fn();
-    } finally {
-      TT.encodeCell = real;
-    }
-  };
-
-  // Note names that carry the characters the two orders disagree about, plus the ones the escape
-  // set already covers, so a regression in either half shows up here.
-  const NAMES = [
-    'Nettbutikk rebuild', // the ordinary case — the control
-    'Arkiv | 2025', // the delimiter: an unescaped one splits the row
-    'Back\\slash', // the escape character itself
-    'Notes [draft] 2026', // a bracket INSIDE the name — the coincidence, stated
-    '[[Nested]]', // the whole wikilink syntax as a name
-    'Trailing ]', // the name that collides with the closing bracket pair
-  ];
-
-  /**
-   * The property, stated once: for one note name, the daily block and the catalog note emit the
-   * SAME bytes, and both sides read the model back. Byte equality is what a second composition
-   * breaks; the two round-trips are what a broken read side breaks.
-   */
-  const bothSidesAgree = (note) => {
-    const projects = [P({ vaultNote: note })];
-    const catalog = TT.serializeVaultCatalogSection('projects', projects, { revision: 1 });
-    const parsedCatalog = TT.parseVaultCatalogSection(['# Time Turtle', '', catalog, ''].join('\n'), 'projects');
-    expect(parsedCatalog.quarantine).toBe(false);
-    expect(parsedCatalog.rows[0].vaultNote).toBe(note);
-
-    // the daily block is resolved against the catalog TT just READ BACK, not the one it holds in
-    // memory — that is the join this ticket is about
-    const opts = { headers: ['Time', 'Project'], projects: parsedCatalog.rows };
-    const day = TT.serializeVaultBlock([E({ project: 'LT-01' })], opts);
-    const parsedDay = TT.parseVaultBlock(day, { date: '2026-01-05', projects: parsedCatalog.rows });
-    expect(parsedDay.quarantine).toBe(false);
-    expect(parsedDay.entries[0].project).toBe('LT-01');
-
-    // ONE composition ⇒ one set of bytes. `Note` is the last catalog column, `Project` the second
-    // daily one; both rows are line 4 of their region.
-    const noteCell = cells(catalog, 4).pop();
-    const projectCell = cells(day, 4)[1];
-    expect(projectCell).toBe(noteCell);
-    return projectCell;
-  };
-
-  it.each(NAMES)('%s: the catalog Note cell and the daily Project cell are the same bytes', (note) => {
-    bothSidesAgree(note);
-  });
-
-  it.each(NAMES)('%s: still the same bytes once encodeCell escapes `[` and `]`', (note) => {
-    withBracketsEscaped(() => bothSidesAgree(note));
-  });
-
-  it('the widened escape set really does change the bytes — the guard is not a no-op', () => {
-    // Without this, both blocks above could be passing on identical output and the second one
-    // would prove nothing. A bracket in the NAME is escaped under the wider set and not under the
-    // narrow one, while the structural brackets stay literal in both.
-    const narrow = bothSidesAgree('Notes [draft] 2026');
-    const wide = withBracketsEscaped(() => bothSidesAgree('Notes [draft] 2026'));
-    expect(narrow).toBe('[[Notes [draft] 2026]]');
-    expect(wide).toBe('[[Notes \\[draft\\] 2026]]');
-    expect(wide).not.toBe(narrow);
-  });
-
-  it('a wikilink no project claims is still carried verbatim under the wider escape set', () => {
-    // The pre-SB-122 read side ran WIKILINK_RE on the DECODED cell. Under the wider set the
-    // unclaimed-link fallback is where that difference surfaces: TT must hand back the note text,
-    // never the still-escaped bytes.
-    withBracketsEscaped(() => {
-      const projects = [P({ vaultNote: 'Lifelines Tycoon' })];
-      const day = TT.serializeVaultBlock([E({ project: '[[Planning [2026]]]' })], { headers: ['Time', 'Project'] });
-      const parsed = TT.parseVaultBlock(day, { date: '2026-01-05', projects });
-      expect(parsed.quarantine).toBe(false);
-      expect(parsed.entries[0].project).toBe('[[Planning [2026]]]');
-    });
-  });
-});
-
 // ---------------------------------------------------------------------------
-// DD-017 §1 — the read-only rule, and the fact that it is the exact complement of
-// `TT.vaultBound` rather than a second opinion about the same three conditions.
-//
-// PLAN-015 / SB-102. `TT.vaultBound` already existed (PLAN-012 landed it) and is the one home of
-// shape + cutover + ledger. The three predicates below are DERIVED from the same two clauses, so
-// the repo holds exactly one date comparison and exactly one ledger scan. The invariant that
-// makes DD-017 a rule rather than a coincidence — under `personal`, editable ⇔ vault-bound — is
-// EXECUTED here over the table, not asserted in a comment.
-//
-// The `team` rows are not padding: `readOnlyDay`'s other branch is the whole of SDD-002 ruling 6
-// (the admin exemption), and a table with only `personal` rows would let a broken `team` branch
-// through untouched.
-describe('the read-only rule (DD-017 §1)', () => {
-  const CUTOVER = '2026-07-15T09:12:33.000Z'; // an ISO instant; compared day-grained
-  const BEFORE = '2026-07-14'; // strictly before the cutover DAY
-  const ON = '2026-07-15'; // the cutover day itself is NOT before it
+// SDD-002 rulings 5 & 6 — the read-only rule. A day inside a committed segment is read-only for a
+// non-admin, and the admin exemption stands. The admin row is not padding: it is the whole of
+// ruling 6, and a table without it would let a broken exemption through untouched.
+describe('the read-only rule', () => {
+  const BEFORE = '2026-07-14';
   const AFTER = '2026-07-20'; // Monday, week 30
   const AFTER_KEY = TT.segmentKey(AFTER);
   const COMMITS = [{ key: AFTER_KEY, committedAt: '2026-07-27T00:00:00.000Z' }];
 
   // Named rows, so a failure prints WHICH row rather than `[object Object]`.
-  // expected = [preCutover, frozenSegment, readOnlyDay]
-  const row = (shape, vaultCutover, commits, admin, date, expected) => ({
-    name: `${shape} / cutover ${vaultCutover || '(never stamped)'} / ${commits.length ? 'ledger' : 'no ledger'} / ${admin ? 'admin' : 'employee'} / ${date}`,
-    shape,
-    vaultCutover,
+  const row = (commits, admin, date, expected) => ({
+    name: `${commits.length ? 'ledger' : 'no ledger'} / ${admin ? 'admin' : 'employee'} / ${date}`,
     commits,
     admin,
     date,
     expected,
   });
   const ROWS = [
-    // personal, cutover stamped, nothing committed
-    row('personal', CUTOVER, [], false, BEFORE, [true, false, true]),
-    row('personal', CUTOVER, [], false, ON, [false, false, false]),
-    row('personal', CUTOVER, [], false, AFTER, [false, false, false]),
-    // personal, cutover stamped, the AFTER segment committed — the ledger wins over the date,
-    // which is DD-017 §2 and the clause a same-side-of-the-cutover table cannot distinguish
-    row('personal', CUTOVER, COMMITS, false, BEFORE, [true, false, true]),
-    row('personal', CUTOVER, COMMITS, false, ON, [false, false, false]),
-    row('personal', CUTOVER, COMMITS, false, AFTER, [false, true, true]),
-    // personal, admin: the flag is READ BY THE TEAM BRANCH ONLY, so it changes nothing here.
-    // This is the DD-015-depth-2 hazard in one row — the personal user IS the seeded admin.
-    row('personal', CUTOVER, COMMITS, true, BEFORE, [true, false, true]),
-    row('personal', CUTOVER, COMMITS, true, AFTER, [false, true, true]),
-    // personal, cutover never stamped (''): no history is excluded
-    row('personal', '', COMMITS, false, BEFORE, [false, false, false]),
-    row('personal', '', COMMITS, false, AFTER, [false, true, true]),
-    // team: no cutover clause at all, and the admin exemption (SDD-002 ruling 6) stands
-    row('team', CUTOVER, COMMITS, false, BEFORE, [false, false, false]),
-    row('team', CUTOVER, COMMITS, false, AFTER, [false, false, true]),
-    row('team', CUTOVER, COMMITS, true, AFTER, [false, false, false]),
-    row('team', CUTOVER, [], false, AFTER, [false, false, false]),
-    // an unknown/absent shape is not `personal`, so it takes the team branch
-    row(null, CUTOVER, COMMITS, false, AFTER, [false, false, true]),
+    row(COMMITS, false, BEFORE, false),
+    row(COMMITS, false, AFTER, true),
+    row(COMMITS, true, AFTER, false),
+    row([], false, AFTER, false),
   ];
 
-  it.each(ROWS)('$name', ({ shape, vaultCutover, commits, admin, date, expected }) => {
-    const ctx = { shape, vaultCutover, commits, admin };
-    expect([TT.preCutover(date, ctx), TT.frozenSegment(date, ctx), TT.readOnlyDay(date, ctx)]).toEqual(expected);
-  });
-
-  it('under `personal`, readOnlyDay is the EXACT complement of vaultBound on every row', () => {
-    // DD-017's whole rule, executed: "editable ⇔ vault-bound". If these two ever disagree the
-    // app can show an editable day whose hours never reach a daily note, which is the silent
-    // divergence the one-home discipline exists to prevent.
-    const personalRows = ROWS.filter((r) => r.shape === 'personal');
-    expect(personalRows.length).toBeGreaterThan(0);
-    for (const { shape, vaultCutover, commits, admin, date, name } of personalRows) {
-      const ctx = { shape, vaultCutover, commits, admin };
-      expect(TT.readOnlyDay(date, ctx), name).toBe(!TT.vaultBound({ date }, ctx));
-    }
+  it.each(ROWS)('$name', ({ commits, admin, date, expected }) => {
+    expect(TT.readOnlyDay(date, { commits, admin })).toBe(expected);
   });
 
   it('the ledger is scanned in ONE place — committedOn is shape-blind and the others gate it', () => {
@@ -891,15 +717,5 @@ describe('the read-only rule (DD-017 §1)', () => {
     expect(TT.committedOn(AFTER, undefined)).toBe(false);
     // a null hole in the ledger array is survivable — the server strips segments per-role
     expect(TT.committedOn(AFTER, [null, { key: AFTER_KEY }])).toBe(true);
-  });
-
-  it('vaultBound keeps its exact guards: a non-string date and a missing context are false', () => {
-    const ctx = { shape: 'personal', vaultCutover: CUTOVER, commits: COMMITS };
-    expect(TT.vaultBound(null, ctx)).toBe(false);
-    expect(TT.vaultBound({ date: 20260720 }, ctx)).toBe(false);
-    expect(TT.vaultBound({ date: AFTER }, undefined)).toBe(false); // no shape → not personal
-    expect(TT.preCutover(20260714, ctx)).toBe(false);
-    expect(TT.frozenSegment(20260720, ctx)).toBe(false);
-    expect(TT.readOnlyDay(20260720, ctx)).toBe(false);
   });
 });

@@ -49,13 +49,13 @@ describe('nextClientId (fix 1: de-collide)', () => {
 });
 
 describe('makeClientId (fix 2: readable ids derived from the name)', () => {
-  it('slugs a name into a readable, mirror-safe id', () => {
+  it('slugs a name into a readable, markdown-safe id', () => {
     expect(makeClientId('Ballestad Studios')).toBe('ballestad-studios');
     expect(makeClientId('Brygga')).toBe('brygga');
     expect(makeClientId('  Acme   Co.  ')).toBe('acme-co');
   });
 
-  it('never emits a pipe or any other cell separator the markdown mirror would eat', () => {
+  it('never emits a pipe or any other cell separator the markdown codec would eat', () => {
     // The id is a CELL in `- client3 | Ballestad Studios | round 15` and the join key in
     // `- LIFE | Lifelines | client3`, so a `|` in the id would need escaping to survive.
     expect(makeClientId('Acme | Co')).toBe('acme-co');

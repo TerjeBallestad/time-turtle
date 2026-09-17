@@ -6,7 +6,7 @@
 // ## Verified red-green: 2026-07-23
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { spawn } from 'node:child_process';
-import { mkdtempSync, existsSync, readdirSync, readFileSync } from 'node:fs';
+import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -155,6 +155,23 @@ describe('auth + roles', () => {
     expect(r.status).toBe(403);
   });
 
+  // Moved from vault-single-user.test.js (SB-181): a second user is created, and an employee
+  // still gets the role refusal on POST /api/users.
+  it('an employee is still 403 admin-only on POST /api/users', async () => {
+    const EMPLOYEE = { email: 'second@timeturtle.local', name: 'Second', role: 'employee', password: 'secondpw' };
+    const admin = session();
+    await admin('POST', '/api/auth/login', { email: 'admin@timeturtle.local', password: 'testpw' });
+    expect((await admin('POST', '/api/users', EMPLOYEE)).status).toBe(200);
+
+    const employee = session();
+    expect(
+      (await employee('POST', '/api/auth/login', { email: EMPLOYEE.email, password: EMPLOYEE.password })).status,
+    ).toBe(200);
+    const denied = await employee('POST', '/api/users', { ...EMPLOYEE, email: 'x@timeturtle.local' });
+    expect(denied.status).toBe(403);
+    expect(denied.json.error).toBe('admin only');
+  });
+
   it('employee PUT of own entries+templates succeeds, isolates per-user, and does not touch admin data', async () => {
     const admin = session();
     await admin('POST', '/api/auth/login', { email: 'admin@timeturtle.local', password: 'testpw' });
@@ -218,85 +235,6 @@ describe('auth + roles', () => {
     const after = await admin('GET', '/api/state');
     expect(after.json.entries).toEqual(adminEntriesBefore);
     expect(after.json.tasks.every((t) => t.id !== 'mine')).toBe(true);
-  });
-
-  it('writes a markdown mirror file under the data dir after a PUT', async () => {
-    const mdDir = join(DATA_DIR, 'markdown');
-    expect(existsSync(mdDir)).toBe(true);
-    const files = readdirSync(mdDir).filter((f) => f.endsWith('.md'));
-    expect(files.length).toBeGreaterThan(0);
-  });
-
-  // SB-041 (PLAN-008): the pure escaping round-trip is pinned in roundtrip.test.js. This
-  // proves the RESTORE PATH end to end — hostile content goes in over HTTP, and the bytes
-  // the server actually wrote to disk parse back to the values that went in. A 200 from
-  // PUT and the file merely existing prove neither; the assertions below read the file.
-  //
-  // ## Verified red-green: 2026-07-25
-  it('a server-written mirror round-trips a piped client name and a note ending in [nb]', async () => {
-    const admin = session();
-    await admin('POST', '/api/auth/login', { email: 'admin@timeturtle.local', password: 'testpw' });
-    const before = await admin('GET', '/api/state');
-
-    const put = await admin('PUT', '/api/state', {
-      clients: [
-        ...before.json.clients,
-        { id: 'hostile', name: 'Acme | Co', rounding: 'exact', rate: 700, archived: false },
-      ],
-      projects: [
-        ...before.json.projects,
-        { code: 'PIPE|X', name: 'Pipe | Project', clientId: 'hostile', rate: null, billable: true, archived: false },
-      ],
-      entries: [
-        ...before.json.entries,
-        {
-          id: 'hostile1',
-          date: '2026-02-02',
-          start: null,
-          end: null,
-          durMin: 60,
-          project: 'PIPE|X',
-          label: 'Label | With Pipe',
-          note: 'refactored the [nb]', // trailing marker is TEXT — the entry stays billable
-          billable: true,
-        },
-      ],
-    });
-    expect(put.status).toBe(200);
-
-    // read the BYTES on disk (not the in-memory state — that would prove nothing)
-    const mdDir = join(DATA_DIR, 'markdown');
-    const md = readdirSync(mdDir)
-      .filter((f) => f.endsWith('.md'))
-      .map((f) => readFileSync(join(mdDir, f), 'utf8'))
-      .find((m) => m.includes('2026-02-02'));
-    expect(md).toBeTruthy();
-    expect(md).toContain('Acme \\| Co'); // escaped on disk…
-
-    const state = TT.parseMd(md);
-    expect(state.clients.find((c) => c.id === 'hostile').name).toBe('Acme | Co'); // …decoded back
-    expect(state.projects.find((p) => p.code === 'PIPE|X').name).toBe('Pipe | Project');
-    const entry = state.entries.find((e) => e.date === '2026-02-02');
-    expect(entry.note).toBe('refactored the [nb]');
-    expect(entry.billable).toBe(true);
-    expect(entry.label).toBe('Label | With Pipe');
-    expect(entry.project).toBe('PIPE|X');
-
-    // Restore the catalog: this file runs ONE server against ONE data dir, so leaving a
-    // piped project code behind would silently ride along into every later test here.
-    // Teardown has to unwind in reference order — SDD-002 ruling 7's hard-delete guard
-    // (409) checks each drop against the STORED rows, so entry → project → client, one
-    // PUT each. Collapsing them trips the guard, which is it working as designed.
-    for (const body of [
-      { entries: before.json.entries },
-      { projects: before.json.projects },
-      { clients: before.json.clients },
-    ]) {
-      expect((await admin('PUT', '/api/state', body)).status).toBe(200);
-    }
-    const after = await admin('GET', '/api/state');
-    expect(after.json.projects.some((p) => p.code === 'PIPE|X')).toBe(false);
-    expect(after.json.clients.some((c) => c.id === 'hostile')).toBe(false);
   });
 });
 
@@ -928,20 +866,17 @@ describe('commit step: ledger, employee read-only, frozen money (SDD-002)', () =
     expect(state.projects.every((p) => p.rate === null)).toBe(true);
   });
 
-  it('freezes the per-entry money snapshot server-side and writes it into the markdown mirror', async () => {
-    // The employee's own /api/state has the snapshot stripped (proven above). The mirror
-    // is written server-side from the UNstripped ledger, so it must carry the frozen money
-    // rows — which proves the snapshot is real and server-derived, not merely absent.
-    const mdDir = join(DATA_DIR, 'markdown');
-    const files = readdirSync(mdDir).filter((f) => f.endsWith('.md'));
-    const empFile = files.map((f) => readFileSync(join(mdDir, f), 'utf8')).find((t) => t.includes(keyA));
-    expect(empFile).toBeDefined();
-    expect(empFile).toContain('## commits');
-    // the segment header…
-    expect(empFile).toMatch(new RegExp('- ' + keyA + ' \\| '));
-    // …and the indented per-entry snapshot row: r8a is a 120-min entry on R8-PROJ (rate
-    // 1000, exact rounding) → rate 1000 | billMin 120 | amount 2000, frozen at commit.
-    expect(empFile).toMatch(/- r8a \| 1000 \| 120 \| 2000/);
+  it('freezes the per-entry money snapshot server-side', async () => {
+    // The employee's own /api/state has the snapshot stripped (proven above). The admin read of
+    // the same ledger is UNstripped, so it must carry the frozen money rows — which proves the
+    // snapshot is real and server-derived, not merely absent.
+    const sheet = await admin('GET', `/api/users/${empId}/timesheet`);
+    expect(sheet.status).toBe(200);
+    const seg = sheet.json.commits.find((c) => c.key === keyA);
+    expect(seg).toBeDefined();
+    // r8a is a 120-min entry on R8-PROJ (rate 1000, exact rounding) → rate 1000 | billMin 120 |
+    // amount 2000, frozen at commit. The employee sent no snapshot, so the server derived it.
+    expect(seg.snapshot.r8a).toEqual({ rate: 1000, billMin: 120, amount: 2000 });
   });
 
   it('a committed segment is READ-ONLY for the employee: edits, adds and deletes are all reverted', async () => {
@@ -1560,10 +1495,9 @@ describe('DC-005 server-reconciled project-code rename (SDD-002)', () => {
   it('admin rename X→Y reconciles the project row AND B’s entry AND B’s template, returning a bare ok', async () => {
     const r = await admin('POST', `/api/projects/${X}/rename`, { to: Y });
     expect(r.status).toBe(200);
-    // Still a blind reconcile — no cross-user entry content leaked. SB-086 widened the bare
-    // `{ ok }` to carry the mirror report; on a healthy run both lists are empty, and the
-    // exact-shape assertion is what keeps entry content from ever creeping in beside them.
-    expect(r.json).toEqual({ ok: true, mirrorBlocks: [], mirrorErrors: [] });
+    // Still a blind reconcile — no cross-user entry content leaked. The exact-shape assertion is
+    // what keeps entry content from ever creeping in beside the `ok`.
+    expect(r.json).toEqual({ ok: true });
 
     // the project row is renamed
     const st = await admin('GET', '/api/state');
@@ -1685,28 +1619,6 @@ describe('SB-070 entry-id charset guard', () => {
     expect(put.status).toBe(400);
     expect(put.json.error).toContain('adm|hack');
     expect((await admin('GET', `/api/users/${empId}/timesheet`)).json.entries).toEqual(before);
-  });
-
-  it('with only clean ids surviving the guard, the frozen money round-trips off the mirror on disk', async () => {
-    // The point of the guard, end to end: commit the segment, then parse the bytes the server
-    // actually wrote. Every snapshot key must come back as the id that went in, with numeric
-    // money — which is precisely what a piped id destroyed (key truncated, rate NaN).
-    const commit = await emp('PUT', '/api/state', { entries: GOOD_IDS.map(line), commits: [{ key: KEY }] });
-    expect(commit.status).toBe(200);
-
-    const mdDir = join(DATA_DIR, 'markdown');
-    const text = readdirSync(mdDir)
-      .filter((f) => f.endsWith('.md'))
-      .map((f) => readFileSync(join(mdDir, f), 'utf8'))
-      .find((t) => t.includes('sb70'));
-    expect(text).toBeDefined();
-    const seg = TT.parseMd(text).commits.find((c) => c.key === KEY);
-    expect(seg).toBeDefined();
-    // 120 min on a rate-900 exact project → rate 900 | billMin 120 | amount 1800, per id
-    expect(Object.keys(seg.snapshot).sort()).toEqual([...GOOD_IDS].sort());
-    for (const id of GOOD_IDS) {
-      expect(`${id} → ${JSON.stringify(seg.snapshot[id])}`).toBe(`${id} → {"rate":900,"billMin":120,"amount":1800}`);
-    }
   });
 });
 
@@ -1881,46 +1793,6 @@ describe('SB-074 commit segment key / committedAt guard', () => {
     expect(put.json.error).toContain(KEY);
     expect(await fullLedger()).toEqual(before);
   });
-
-  it('the frozen money survives a round-trip through the mirror BYTES on disk', async () => {
-    // The point of the guard, end to end, in the order it happens in the wild: commit for real,
-    // then take the hostile PUT, then read what the server actually wrote to disk. Before the fix
-    // that hostile PUT landed, its `|` split the header into two segments sharing KEY, and
-    // commitSnapshot took the first (empty) one — this read returned null and the money was gone.
-    const at = new Date().toISOString();
-    const commit = await emp('PUT', '/api/state', {
-      entries: [line],
-      commits: GOOD_KEYS.map((key) => ({ key, committedAt: at, snapshot: {} })),
-    });
-    expect(commit.status).toBe(200);
-    const attack = await emp('PUT', '/api/state', {
-      entries: [line],
-      commits: [{ key: KEY + '|x', committedAt: at, snapshot: {} }, ...GOOD_KEYS.map((key) => ({ key }))],
-    });
-    expect(attack.status).toBe(400);
-
-    const text = readdirSync(join(DATA_DIR, 'markdown'))
-      .filter((f) => f.endsWith('.md'))
-      .map((f) => readFileSync(join(DATA_DIR, 'markdown', f), 'utf8'))
-      .find((t) => t.includes('sb74'));
-    expect(text).toBeDefined();
-    // exactly one header per committed segment, and no key appears twice
-    const headers = text
-      .slice(text.indexOf('## commits'))
-      .split('\n')
-      .filter((l) => l.startsWith('- '));
-    expect(headers).toHaveLength(GOOD_KEYS.length);
-    const parsed = TT.parseMd(text);
-    expect(parsed.commits.map((c) => c.key).sort()).toEqual([...GOOD_KEYS].sort());
-    expect(new Set(parsed.commits.map((c) => c.key)).size).toBe(GOOD_KEYS.length);
-    // every committedAt came back whole — the split header truncated one to 'x'
-    for (const c of parsed.commits) expect(new Date(c.committedAt).toISOString()).toBe(c.committedAt);
-    // and the money is still there: 120 min on a rate-900 exact project → 900 | 120 | 1800
-    const state = { ...parsed, commits: parsed.commits };
-    expect(JSON.stringify(TT.commitSnapshot(state, { id: ID, date: DATE }))).toBe(
-      '{"rate":900,"billMin":120,"amount":1800}',
-    );
-  });
 });
 
 // SB-072: the mirror parser splits a row on `|` and trims every cell it produces
@@ -2035,20 +1907,6 @@ describe('SB-072 edge whitespace is trimmed at the write edge', () => {
     const nameById = Object.fromEntries(back.clients.map((c) => [c.id, c.name]));
     expect(nameById[CLIENT_PAD]).toBe('Padded Client');
     expect(nameById[CLIENT_INTERIOR]).toBe('Two  Spaces');
-  });
-
-  it('the mirror the server wrote to disk round-trips these values', async () => {
-    // The end-to-end shape of the bug: the file Settings → Markdown mirror hands the user,
-    // written by the server itself from the DB. Before the trim, ' leading' went in and
-    // 'leading' came back out of here.
-    const text = readFileSync(join(DATA_DIR, 'markdown', 'timesheet-seven-two.md'), 'utf8');
-    const back = TT.parseMd(text);
-    expect([...notesOn(back)].sort()).toEqual([...WANT].sort());
-    const nameById = Object.fromEntries(back.clients.map((c) => [c.id, c.name]));
-    expect(nameById[CLIENT_PAD]).toBe('Padded Client');
-    expect(nameById[CLIENT_INTERIOR]).toBe('Two  Spaces');
-    // and re-serializing what came off disk is a fixed point — no residual drift
-    expect(TT.serializeMd(back)).toBe(text);
   });
 });
 
@@ -2187,17 +2045,6 @@ describe('SB-075 edge whitespace is trimmed at the write edge for project/task/e
     // exact means exact: what came out of the DB comes back unchanged, in order
     expect(labelsOn(back)).toEqual(labelsOn(state));
     assertRoundTripped(back);
-  });
-
-  it('the mirror the server wrote to disk round-trips these values', async () => {
-    // The end-to-end shape of the bug: the file Settings → Markdown mirror hands the user,
-    // written by the server itself from the DB. Before the trim, ' leading' went in and
-    // 'leading' came back out of here.
-    const text = readFileSync(join(DATA_DIR, 'markdown', 'timesheet-seven-five.md'), 'utf8');
-    const back = TT.parseMd(text);
-    assertRoundTripped(back);
-    // and re-serializing what came off disk is a fixed point — no residual drift
-    expect(TT.serializeMd(back)).toBe(text);
   });
 });
 
@@ -2498,22 +2345,6 @@ describe('SB-087 server-reconciled client-id rename (SB-067 fix 3)', () => {
     expect(bState.clients.some((c) => c.id === NEW)).toBe(true);
     expect(bState.projects.find((p) => p.code === P_EMP).clientId).toBe(NEW);
     expect(bState.entries.find((e) => e.id === 'sb87-b').project).toBe(P_EMP);
-  });
-
-  // The id is a READABLE identifier in the markdown Terje reads (his 2026-07-26 ruling), so
-  // the mirror bytes are where the rename is finally true — in both places the id appears.
-  it('the renamed id lands in the mirror, in the clients table AND as the projects’ join key', async () => {
-    const r = await admin('POST', `/api/clients/${NEW}/rename`, { to: NEW }); // idempotent re-write
-    expect(r.status).toBe(200);
-    expect(r.json.mirrorError).toBe(null);
-    expect(r.json.mirrorBlocked).toBe(null);
-    expect(r.json.mirror).toBe(join(DATA_DIR, 'markdown', 'timesheet-admin.md'));
-
-    const text = readFileSync(join(DATA_DIR, 'markdown', 'timesheet-admin.md'), 'utf8');
-    expect(text).toContain('- ' + NEW + ' | SB87 Client | round 15 | rate 1250');
-    expect(text).toContain('- ' + P_ADMIN + ' | SB87 ' + P_ADMIN + ' | ' + NEW);
-    expect(text).toContain('- ' + P_EMP + ' | SB87 ' + P_EMP + ' | ' + NEW);
-    expect(text).not.toContain(OLD);
   });
 
   it('teardown: the projects and the renamed client can be removed in reference order', async () => {
