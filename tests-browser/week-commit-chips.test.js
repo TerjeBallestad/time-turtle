@@ -3,6 +3,19 @@
 //
 // Moved out of personal-week-mark.test.js when the shape concept was removed (SB-181), which is
 // also what removed the pre-vault mark this file used to assert the absence of.
+//
+// `chipRow` is asserted PRESENT here, which is the opposite of what the source file asked of it.
+// There it read `toBe(0)` — the claim was that a week with nothing to say renders no chip row at
+// all, and a shape could make that happen. It cannot now: `TT.weekSegments` walks the week's 7
+// dates and always returns at least one segment, so the row is unconditional (WeekView.tsx).
+// The field is asserted rather than dropped because `data-tt="week-seg-row"` is a production
+// attribute that exists for this test, and a probe nothing reads is a hook with no reader.
+//
+// ## Verified red-green: 2026-07-27, TRANSCRIBED (as `still shows the verbs and the `open` chips,
+// and never the pre-vault mark` in personal-week-mark.test.js) for the verb, chip and add-row
+// assertions, which are unchanged. The `chipRow` assertion is NEW and was measured on its own,
+// 2026-09-17: removing `data-tt="week-seg-row"` from WeekView.tsx fails it with `the chip row is
+// missing: expected +0 to be 1`, and nothing else in the file moves.
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { startApp, stopApp } from './harness.js';
 
@@ -52,6 +65,7 @@ describe('the Week view', () => {
   it('shows the verbs and the `open` chips', async () => {
     await gotoWeek(app.page);
     const now = await weekSurfaces(app.page);
+    expect(now.chipRow, 'the chip row is missing').toBe(1);
     expect(now.openChip, 'no `open` chip').toBeGreaterThan(0);
     expect(now.commitVerb, 'no `commit` verb').toBeGreaterThan(0);
     expect(now.addRow, 'no add-row').toBeGreaterThan(0);

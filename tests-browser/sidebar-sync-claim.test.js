@@ -12,7 +12,13 @@
 // and the pinned sidebar-bottom is the known screenshot-capture quirk — this reads the DOM
 // instead), or that the Norwegian reads naturally to a Norwegian.
 //
-// ## Verified red-green: 2026-07-27 (as `still reads synced → md`), re-pointed 2026-09-17
+// ## Verified red-green: 2026-09-17, MEASURED — the assertion INVERTED when SB-181 landed (it
+// used to REQUIRE `synced → md`; it now refuses any arrow or file name), so the old stamp could
+// not carry over and `re-pointed` would have claimed nothing about the new oracle.
+//   break — `const settled = TT.t('synced')` → `TT.t('synced') + ' → md'` in App.tsx: fails with
+//     `expected 'synced → md' to be 'synced'`. A regression to the old label reddens this test,
+//     which is the whole claim. Earlier red-green on the previous, opposite assertion: 2026-07-27
+//     (as `still reads synced → md`).
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { startApp, stopApp } from './harness.js';
 

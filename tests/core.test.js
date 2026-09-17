@@ -711,7 +711,7 @@ describe('the read-only rule', () => {
     expect(TT.readOnlyDay(date, { commits, admin })).toBe(expected);
   });
 
-  it('the ledger is scanned in ONE place — committedOn is shape-blind and the others gate it', () => {
+  it('the ledger is scanned in ONE place — committedOn is role-blind and the others gate it', () => {
     expect(TT.committedOn(AFTER, COMMITS)).toBe(true);
     expect(TT.committedOn(BEFORE, COMMITS)).toBe(false);
     expect(TT.committedOn(AFTER, [])).toBe(false);

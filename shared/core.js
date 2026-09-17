@@ -95,10 +95,19 @@ TT.committedOn = function (date, commits) {
 };
 
 /**
- * CAN THIS DAY BE TYPED INTO? — SDD-002 ruling 5/6, the rule the grid and the server both read.
+ * CAN THIS DAY BE TYPED INTO? — SDD-002 ruling 5/6, as the GRID asks it.
  *
  * A day inside a committed segment is read-only for a non-admin. An admin edits it anyway
  * (ruling 6, the committed-segment admin exemption).
+ *
+ * ONE production caller: `TimeGrid.tsx`'s lock expression. The server enforces the SAME ruling
+ * by its own mechanism — `pinCommittedEntries` in server/src/index.js forces every stored entry
+ * in a pinned segment back to its stored value, keyed by `pinnedKeys.has(TT.segmentKey(date))`.
+ * It does not call this function. That duplication is deliberate (the server must refuse a raw
+ * PUT, not consult a render-time predicate), so the two are a PAIR: change the ruling here and
+ * you must change `pinCommittedEntries` in the same commit, or the grid and the API disagree
+ * about the same day. Until SB-181 this comment claimed the server read this function; it read
+ * it only on the personal-install path, which SB-181 removed.
  * @param {string} date @param {import('./types.ts').ReadOnlyDayContext} context @returns {boolean}
  */
 TT.readOnlyDay = function (date, context) {
@@ -630,18 +639,18 @@ TT.serializeMd = function (state) {
   // sides agree: nothing is escaped here and nothing is unescaped.
   //
   // THE ESCAPING IS THEREFORE NOT UNIVERSAL ACROSS SECTIONS. `## clients` / `## projects` /
-  // `## tasks` / the date sections escape; `## commits` does not. SB-055 (and anything else
-  // adding a section or a field here) must not assume otherwise: put a `|` in a field this
+  // `## tasks` / the date sections escape; `## commits` does not. Anything that adds a section
+  // or a field here must not assume otherwise: put a `|` in a field this
   // section emits raw and it splits its own row. An entry id `a|b` emits
   // `  - a|b | 1250 | 60 | 100`, which parses back to snapshot key `a` with rate NaN —
-  // committed money silently rewritten on a mirror restore.
+  // committed money silently rewritten by a round-trip through this codec.
   //
   // SB-070 ruling (Terje, option 1): the hole is closed at the SOURCE, not here. The server
   // charset-validates entry ids at the API boundary (`entryIdError` in server/src/index.js,
   // `[A-Za-z0-9._-]`), so no `|` can reach this serializer through a PUT. Routing the section
   // through encodeCell was considered and REJECTED — it escapes fields that never need it and
   // leaves the hostile-input path itself open. Do not "fix" this by adding escaping here
-  // without re-opening that ruling; the golden mirrors depend on these bytes.
+  // without re-opening that ruling; the goldens depend on these bytes.
   //
   // SB-074 closed the other half the same way. The SEGMENT KEY is worse than an entry id — an id
   // is machine-minted by nid(), but the key comes verbatim from the request body, and a `|` in it
@@ -732,7 +741,7 @@ function migrateV1(state) {
 // STORED VALUE — SB-075 trims `'   '` to `''` at the write edge, which is exactly what made this
 // reachable — so an empty cell reads back as `''`. The id fallback survives for the case it was
 // actually for: a row with NO name cell at all (`- fjellheim`), which a hand-edited or pre-v2
-// mirror can carry and where there is no stored value to preserve.
+// document can carry and where there is no stored value to preserve.
 /** @param {string[]} parts trimmed, still-escaped cells @returns {string} */
 const nameCell = (parts) => TT.decodeCell(parts[1] === undefined ? parts[0] : parts[1]);
 TT.parseMd = function (md) {

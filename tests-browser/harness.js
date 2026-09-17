@@ -110,28 +110,15 @@ export async function startApp(opts = {}) {
   return { port, child, dataDir, browser, page, pageErrors };
 }
 
-/**
- * SB-095: a SECOND logged-in browser session against the same server, in its own context so
- * it gets its own cookie jar — the admin page stays logged in as the admin.
- *
- * This exists because "an employee cannot reach X" is a role claim, and a role claim is only
- * proven from a real session in that role. Reading the permission check proves nothing, and
- * neither does the admin's own page.
- *
- * @returns {Promise<{ context: any, page: import('playwright').Page, pageErrors: string[] }>}
- */
-export async function loginAs(app, email, password) {
-  const context = await app.browser.newContext({ viewport: { width: 1400, height: 1000 } });
-  const page = await context.newPage();
-  const pageErrors = [];
-  page.on('pageerror', (e) => pageErrors.push(e.message));
-  await page.goto(`http://localhost:${app.port}`);
-  await page.locator('input[type=text]').fill(email);
-  await page.locator('input[type=password]').fill(password);
-  await page.locator('button:has-text("Sign in")').click();
-  await page.locator('text=Settings').first().waitFor({ timeout: 15000 });
-  return { context, page, pageErrors };
-}
+// SB-095's `loginAs` helper opened a SECOND browser session in its own cookie jar, for role
+// claims at this rung. Its only caller was mirror-block-roles.test.js, which SB-181 deleted with
+// the mirror, so the helper went with it rather than standing here as an argument for a test
+// that is not in the suite. Note what that leaves: NO browser test opens a non-admin session, so
+// nothing at this rung guards the employee's grid rendering money-free and locked. That gap is
+// PRE-EXISTING, not SB-181's — the deleted session only ever asserted the `Mirror paused` notice,
+// never the grid. The role rules themselves are held at the api rung, which is where they are
+// enforced: tests/api.test.js proves a committed segment is read-only for an employee (edits,
+// adds and deletes all reverted) and that rates come back null. See SB-185.
 
 /** Tear down page, browser and server. The server dies by explicit pid, never by pattern. */
 export async function stopApp(app) {

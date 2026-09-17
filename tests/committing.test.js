@@ -2,6 +2,13 @@
 //
 // Moved from shape-committing.test.js when the shape concept was removed (SB-181): this was its
 // `team` contrast case, and it lost only `TT_MD_DIR`.
+//
+// ## Verified red-green: 2026-09-17, MEASURED HERE — not transcribed. Same reason as
+// old-day-edits.test.js: this was a control arm, and SB-181 deleted the arm it contrasted with.
+//   break — invert the segment lookup in `segmentLockHandler` (server/src/index.js), so a segment
+//     that EXISTS answers 404: the test fails with `expected 404 to be 200`. That proves the
+//     approve and release calls are really reaching the ledger, rather than the test asserting a
+//     200 that any handler would return.
 import { describe, it, expect, afterAll } from 'vitest';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';

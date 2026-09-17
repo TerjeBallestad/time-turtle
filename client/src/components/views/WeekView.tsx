@@ -39,7 +39,6 @@ export function WeekView({ state, ui }: ViewProps) {
   // SDD-002 ruling 5 (SB-025): an admin-APPROVED segment is LOCKED — the employee can no
   // longer reopen it, so its reopen verb is gone and the chip reads 'locked'.
   const approved = approvedKeys(state);
-  const chips = segments;
   return (
     <div className={vs.page}>
       <div className={[vs.headerRow, vs.baseline].join(' ')}>
@@ -61,41 +60,40 @@ export function WeekView({ state, ui }: ViewProps) {
           </Button>
         </span>
       </div>
-      {/* Rendered only when it has something to say — no empty row, no reserved space. Under
-          `team` `chips` is every segment, so the row is always here exactly as it was. */}
-      {chips.length > 0 && (
-        <div className={vs.segChipRow} data-tt="week-seg-row">
-          {chips.map((segment) => {
-            const isCommitted = committed.has(segment.key);
-            const isLocked = approved.has(segment.key);
-            return (
-              <div key={segment.key} className={vs.segChip} data-committed={isCommitted} data-locked={isLocked}>
-                <StatusDot
-                  state={isCommitted ? 'solid' : 'outline'}
-                  color={isLocked ? 'var(--accent)' : isCommitted ? 'var(--green)' : 'var(--text-4)'}
-                  size={7}
-                />
-                <span className={vs.segRange}>{segRange(segment.dates)}</span>
-                <Chip tone={isLocked ? 'accent' : isCommitted ? 'green' : 'neutral'} mono={true}>
-                  {isLocked ? TT.t('locked') : isCommitted ? TT.t('committed') : TT.t('open')}
-                </Chip>
-                {isLocked ? (
-                  // Approved by an admin: no reopen verb — the segment is theirs to release now.
-                  <span className={vs.segLockedNote}>{TT.t('approved by admin')}</span>
-                ) : (
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => (isCommitted ? ui.uncommitSegment(segment.key) : ui.commitSegment(segment.key))}
-                  >
-                    {isCommitted ? TT.t('reopen') : TT.t('commit')}
-                  </Button>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      )}
+      {/* Unconditional: TT.weekSegments walks the week's 7 dates and always returns at least one
+          segment, so there is no empty-row case to guard. It was guarded while a shape could turn
+          committing off entirely (SB-181 removed that). */}
+      <div className={vs.segChipRow} data-tt="week-seg-row">
+        {segments.map((segment) => {
+          const isCommitted = committed.has(segment.key);
+          const isLocked = approved.has(segment.key);
+          return (
+            <div key={segment.key} className={vs.segChip} data-committed={isCommitted} data-locked={isLocked}>
+              <StatusDot
+                state={isCommitted ? 'solid' : 'outline'}
+                color={isLocked ? 'var(--accent)' : isCommitted ? 'var(--green)' : 'var(--text-4)'}
+                size={7}
+              />
+              <span className={vs.segRange}>{segRange(segment.dates)}</span>
+              <Chip tone={isLocked ? 'accent' : isCommitted ? 'green' : 'neutral'} mono={true}>
+                {isLocked ? TT.t('locked') : isCommitted ? TT.t('committed') : TT.t('open')}
+              </Chip>
+              {isLocked ? (
+                // Approved by an admin: no reopen verb — the segment is theirs to release now.
+                <span className={vs.segLockedNote}>{TT.t('approved by admin')}</span>
+              ) : (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => (isCommitted ? ui.uncommitSegment(segment.key) : ui.commitSegment(segment.key))}
+                >
+                  {isCommitted ? TT.t('reopen') : TT.t('commit')}
+                </Button>
+              )}
+            </div>
+          );
+        })}
+      </div>
       {days.map((day) => {
         const entries = entriesOn(state, day);
         if (!entries.length && day !== today && TT.parseDate(day) > new Date()) return null;

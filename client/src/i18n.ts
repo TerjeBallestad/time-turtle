@@ -12,8 +12,10 @@ const NO: Record<string, string> = {
   Tasks: 'Oppgaver',
   Clients: 'Kunder',
   General: 'Generelt',
-  // The English side is server/src/index.js's FIRST_RUN_CLOSED VERBATIM — same discipline as the
-  // capability refusals at the top of this file. If you edit one, edit the other in the same commit.
+  // The English side is server/src/index.js's FIRST_RUN_CLOSED VERBATIM, because the key IS the
+  // English string: if you edit one, edit the other in the same commit or the Norwegian falls
+  // through untranslated. (This used to cite the capability refusals above it as the same
+  // discipline; SB-181 removed every one of them, so the rule is stated here instead.)
   'the first run is over: this install has already answered it':
     'førstegangsoppsettet er over: denne installasjonen har allerede svart på det',
   // DD-024 clause 3 / SB-159: the demo step. Opt-in, off by default, and the button says which of
@@ -30,7 +32,6 @@ const NO: Record<string, string> = {
     'Denne installasjonen har fortsatt startpassordet sitt. Logg inn som',
   'and change it under Settings → Password. This note disappears when you do.':
     'og bytt det under Innstillinger → Passord. Denne meldingen forsvinner når du gjør det.',
-  Team: 'Lag',
   time: 'tid',
   task: 'oppgave',
   note: 'notat',
@@ -120,8 +121,6 @@ const NO: Record<string, string> = {
   'client rate': 'kundens pris',
   Currency: 'Valuta',
   Language: 'Språk',
-  copy: 'kopier',
-  discard: 'forkast',
   'rounding — billed time per entry is rounded up to this increment.':
     'avrunding — fakturert tid per rad rundes opp til dette intervallet.',
   'rate — overrides the client default. Empty falls back to the client rate.':

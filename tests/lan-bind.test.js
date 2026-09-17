@@ -8,6 +8,17 @@
 // Moved here from personal-peer-guard.test.js and personal-no-login.test.js when the shape concept
 // was removed (SB-181). Each test lost only its shape part: the install answers the first run with
 // `{ demo: false }` instead of storing a shape, and nothing sets `TT_SHAPE`.
+//
+// ## Verified red-green: 2026-09-17, MEASURED HERE — not transcribed. The source stanza's mutation
+// was `singleUserShape() &&` dropped from the peer-guard middleware, and SB-181 deleted that
+// middleware, so there was nothing left to transcribe. Two new mutations, both run on this branch:
+//   break 1 — `app.listen({ port: PORT, host: HOST || undefined })` → `HOST || '127.0.0.1'`
+//     (server/src/index.js): 2 of 3 fail, the two that connect over this machine's LAN address.
+//     `TT_HOST=0.0.0.0 binds every interface` stays green, as it must — it sets HOST explicitly,
+//     so the default is not what it is testing. That contrast is the point of keeping all three.
+//   break 2 — move `client/dist` aside and run with no built client: only `a team install serves
+//     the client to the network too` fails, because the server registers express.static and the
+//     SPA fallback only when the build exists. This is why CI builds before it tests.
 import { describe, it, expect, afterAll } from 'vitest';
 import { connect } from 'node:net';
 import { mkdtempSync } from 'node:fs';

@@ -6,6 +6,15 @@
 //
 // Moved from shape-freeze.test.js when the shape concept was removed (SB-181): these were its
 // `team` contrast cases, and they lost only the shape assertion in the seed.
+//
+// ## Verified red-green: 2026-09-17, MEASURED HERE — not transcribed. These were the CONTROL arm
+// of a contrast pair whose experimental arm (the frozen-days inversion) SB-181 deleted, so the
+// file arrived with nothing proving it can go red. It can:
+//   break — drop the admin exemption in server/src/index.js, `if (!admin) pinCommittedEntries(...)`
+//     → `pinCommittedEntries(...)`: exactly 1 of 7 fails, `(f) the admin still edits a COMMITTED
+//     segment — SDD-002 ruling 6 is untouched`. The other six are outside a committed segment or
+//     are the employee case, and stay green — which is what makes (f) a real test of ruling 6 and
+//     not a restatement of the pinning rule.
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
