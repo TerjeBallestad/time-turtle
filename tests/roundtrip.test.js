@@ -1,4 +1,4 @@
-// Golden markdown tests (DD-002: the mirror must be round-trippable).
+// Golden markdown tests (DD-002: the markdown must be round-trippable).
 //
 // SDD-002 versions the frozen contract instead of breaking it:
 //   • serializeMd now emits FORMAT V2 — entries carry their own project + label,
@@ -221,7 +221,7 @@ describe('markdown V2 archived round-trip (ruling 7)', () => {
     expect(state.projects.find((p) => p.code === 'FJH-NETT').archived).toBe(false);
   });
 
-  it('the active V2 golden emits NO archived token anywhere (emit-when-true keeps mirrors byte-identical)', () => {
+  it('the active V2 golden emits NO archived token anywhere (emit-when-true keeps documents byte-identical)', () => {
     expect(TT.serializeMd(TT.parseMd(V2_FIXTURE))).not.toContain('archived');
     expect(TT.serializeMd(TT.parseMd(V1_FIXTURE))).not.toContain('archived');
   });
@@ -245,7 +245,7 @@ describe('markdown V2 golden round-trip', () => {
   });
 
   it('the no-commit V1 and V2 goldens carry no `## commits` header and parse to empty commits', () => {
-    // The additive section must never touch existing mirrors: no header emitted…
+    // The additive section must never touch existing documents: no header emitted…
     expect(TT.serializeMd(TT.parseMd(V1_FIXTURE))).not.toContain('## commits');
     expect(TT.serializeMd(TT.parseMd(V2_FIXTURE))).not.toContain('## commits');
     // …and both parse to an empty ledger (never undefined).
@@ -449,7 +449,7 @@ describe('markdown V2 delimiter safety (SB-041)', () => {
   });
 
   // The hazards above, driven from STATE rather than from markdown: this is the direction
-  // the app actually writes (user types → serialize → mirror), so it catches an escape
+  // the app actually writes (user types → serialize → document), so it catches an escape
   // that parses fine but is never emitted.
   it('hostile values entered as state survive serialize→parse→serialize→parse', () => {
     /** @type {any} */
@@ -523,13 +523,14 @@ describe('markdown V2 delimiter safety (SB-041)', () => {
 
 // ---- SB-071 / PLAN-009 task 1: the READ half of the codec is public ----
 // `TT.splitUnescaped` / `TT.splitCells` split a row on UNESCAPED delimiters and hand back
-// the pieces STILL escaped. They were module-private; SB-055's vault parser needs them, and
-// the alternative was a second hand-maintained copy of the exact invariant PLAN-008 unified.
+// the pieces STILL escaped. They were module-private until SB-055's vault parser needed them,
+// and the alternative was a second hand-maintained copy of the exact invariant PLAN-008 unified.
+// SB-181 removed that vault parser; the primitives stay public, and so does the property.
 //
-// So the property under test is not "the export exists" — it is that ONE implementation of
-// the unescaped-split rule serves BOTH formats. The second test drives the same corpus
-// through the production v2 mirror parser and asserts it lands on the same boundaries, so
-// the rule cannot drift between the mirror and the vault.
+// The property under test is not "the export exists" — it is that ONE implementation of the
+// unescaped-split rule serves every delimiter and every reader. The last test drives one corpus
+// through BOTH readers of the same rows — the public primitive by hand, and the production v2
+// parser — and asserts they land on the same boundaries, so the rule cannot drift between them.
 // ## Verified red-green: 2026-07-25
 describe('unescaped-split primitives are public and shared (SB-071)', () => {
   // Each entry is the ENCODED cell (what appears in a row) and the value it decodes to.
@@ -556,12 +557,12 @@ describe('unescaped-split primitives are public and shared (SB-071)', () => {
     expect(TT.splitCells('a\\\\|b')).toEqual(['a\\\\', 'b']); // even → live → two cells
   });
 
-  it('TT.splitUnescaped works for the vault `<br>` delimiter too (one rule, both delimiters)', () => {
+  it('TT.splitUnescaped takes any delimiter, not just `|` (one rule, every delimiter)', () => {
     expect(TT.splitUnescaped('label<br>- note', '<br>')).toEqual(['label', '- note']);
     expect(TT.splitUnescaped('a \\<br> b', '<br>')).toEqual(['a \\<br> b']); // escaped → not a delimiter
   });
 
-  it('the vault row splitter and the v2 mirror parser resolve the corpus to the SAME boundaries', () => {
+  it('splitting emitted rows by hand and parsing them resolve the corpus to the SAME boundaries', () => {
     const values = ESCAPE_CORPUS.map((c) => c.value);
     /** @type {any} */
     const state = {
@@ -585,14 +586,14 @@ describe('unescaped-split primitives are public and shared (SB-071)', () => {
     const md = TT.serializeMd(state);
     const rows = md.split('\n').filter((l) => l.startsWith('- 30m |'));
     expect(rows).toHaveLength(values.length);
-    // the vault-side reader: split the SAME emitted rows with the newly public primitive
+    // reader one: split the SAME emitted rows with the public primitive, by hand
     rows.forEach((row, i) => {
       const cells = TT.splitCells(row.slice(2));
       expect(cells).toHaveLength(4); // time | project | label | note — never more, never fewer
       expect(TT.decodeCell(cells[2])).toBe(values[i]);
       expect(TT.decodeCell(cells[3])).toBe(values[i]);
     });
-    // …and the production mirror parser lands on exactly the same values
+    // …and reader two, the production parser, lands on exactly the same values
     const back = TT.parseMd(md);
     expect(back.entries.map((e) => e.label)).toEqual(values);
     expect(back.entries.map((e) => e.note)).toEqual(values);
@@ -612,7 +613,7 @@ describe('unescaped-split primitives are public and shared (SB-071)', () => {
 //
 // RULING (2026-07-26): an empty name is a LEGAL STORED VALUE. The reader returns `''` for a present
 // -but-empty cell and falls back to the id only when the cell is absent — a row with no name cell
-// at all, which a hand-edited or pre-v2 mirror can carry and where there is nothing to preserve.
+// at all, which a hand-edited or pre-v2 document can carry and where there is nothing to preserve.
 describe('an empty name round-trips as an empty name, not as its own id (SB-107)', () => {
   /** A minimal v2 state — the fields serializeMd reads, and nothing else. */
   const state = (over) => ({
@@ -640,7 +641,7 @@ describe('an empty name round-trips as an empty name, not as its own id (SB-107)
   });
 
   it('the whitespace-only name SB-075 turns into an empty one round-trips the same way', () => {
-    // What SB-075's write edge actually stores: `PUT '   '` → `''`. The mirror is the only place
+    // What SB-075's write edge actually stores: `PUT '   '` → `''`. The markdown is the only place
     // the value can be lost after that, and this is the assertion its executor left out.
     const trimmed = (s) => s.trim();
     expect(trimmed('   ')).toBe('');
@@ -651,7 +652,7 @@ describe('an empty name round-trips as an empty name, not as its own id (SB-107)
     expect(TT.serializeMd(state({ projects: back.projects, tasks: back.tasks }))).toBe(md); // idempotent
   });
 
-  it('serialize(parse(md)) is byte-identical for a mirror carrying empty names', () => {
+  it('serialize(parse(md)) is byte-identical for a document carrying empty names', () => {
     const md = TT.serializeMd(state({ clients: [CLIENT], projects: [PROJECT], tasks: [TASK] }));
     expect(md).toContain('- blank-client |  | round exact');
     expect(md).toContain('- BLANK-P |  | —');

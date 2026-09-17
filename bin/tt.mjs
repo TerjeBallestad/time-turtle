@@ -10,7 +10,7 @@
 //   tt build                                     rebuild the client bundle
 //   tt logs [--data DIR]                         print the log file path + last lines
 //
-// The DB, mirror, PID and log all live under server/data — or under --data DIR, or
+// The DB, PID and log all live under server/data — or under --data DIR, or
 // TT_DATA_DIR when the flag is absent. That directory *is* the instance: two data dirs
 // on two ports are two independent installs sharing one checkout. Within one data dir
 // this runner shares state with `npm run dev` — use one or the other, not both at once.
@@ -199,15 +199,15 @@ const HELP = `Time Turtle — local app runner
   tt build                                    rebuild the client bundle
   tt logs [--data DIR]                        the log file path + last lines
 
-Serves the built client + API on one origin (default :3001). State (DB, mirror,
-pid, log) lives under the data dir — server/data by default, \`--data DIR\` to pick
+Serves the built client + API on one origin (default :3001). State (DB, pid,
+log) lives under the data dir — server/data by default, \`--data DIR\` to pick
 another, \`TT_DATA_DIR\` as the fallback when the flag is absent. Within one data dir
 it shares state with \`npm run dev\`; run one at a time.
 
 A data dir + a port is an instance. Two of them are two independent installs that
-happen to share this checkout — see "Two shapes, two instances" in the README:
+happen to share this checkout — see "Two instances, side by side" in the README:
 
-  tt serve --data ~/.time-turtle/personal --port 3002`;
+  tt serve --data ~/.time-turtle/live --port 3002`;
 
 switch (cmd) {
   case 'serve':

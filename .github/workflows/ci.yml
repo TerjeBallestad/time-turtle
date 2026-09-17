@@ -25,7 +25,9 @@ jobs:
       - run: npm ci
       - run: npm run format:check
       - run: npm run typecheck
+      # Build FIRST: the LAN test in tests/lan-bind.test.js requests `/`, and the server
+      # only serves the client when `client/dist` exists.
+      - run: npm run build
       # Tests spawn real servers on OS-assigned ports (see tests/util.js), so they
       # run unmodified on the runner.
       - run: npm test
-      - run: npm run build

@@ -549,7 +549,7 @@ describe('TT.slug transliterates rather than dropping (SB-088)', () => {
 // ## Verified red-green: 2026-07-26
 // SB-088: the same defect one function over. Project codes never went through TT.slug at all
 // — `makeCode` in App.tsx uppercased and stripped anything outside [A-Z0-9 ], so "Bærum Bygg"
-// became BRUM-BYGG: a silently dropped letter in a code Terje reads in the mirror and types
+// became BRUM-BYGG: a silently dropped letter in a code Terje reads on screen and types
 // into the project editor. Extracting it here is what makes it provable below the browser rung.
 describe('TT.projectCode transliterates rather than dropping (SB-088)', () => {
   it.each([
@@ -618,7 +618,8 @@ describe('TT.projectCode transliterates rather than dropping (SB-088)', () => {
 //
 // RULING (2026-07-26): one convention everywhere — a `-2` / `-3` suffix that fits INSIDE the cap,
 // with the base truncated to make room rather than the id appended past it. An id is a visible
-// join key in the markdown mirror, so its width is a promise to the reader.
+// join key — on screen, and in the markdown the codec writes — so its width is a promise to
+// the reader.
 describe('TT.uniqueId — one de-collision rule, and the suffix fits inside the cap (SB-111)', () => {
   /** @param {string[]} ids */
   const taken = (ids) => (id) => ids.includes(id);

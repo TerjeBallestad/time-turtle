@@ -150,7 +150,7 @@ export interface WeekSegment {
   dates: string[];
 }
 
-/** The full timesheet without a session user — what parseMd/serializeMd and the mirror carry. */
+/** The full timesheet without a session user — what parseMd/serializeMd carry. */
 export interface Catalog {
   settings: Settings;
   clients: Client[];
@@ -161,7 +161,7 @@ export interface Catalog {
    * SDD-002 ruling 4: the caller's per-user commit ledger. Optional in the type
    * (server/client values built up incrementally) but ALWAYS present after parseMd,
    * which defaults it to `[]`; serializeMd emits a `## commits` section only when it
-   * is non-empty, so v1 and no-commit v2 mirrors stay byte-identical.
+   * is non-empty, so v1 and no-commit v2 documents stay byte-identical.
    */
   commits?: CommitSegment[];
 }
