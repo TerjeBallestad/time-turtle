@@ -1,10 +1,9 @@
 // SB-067: client ids — minted, de-collided, and derived from the name.
 //
 // RULED by Terje 2026-07-26: **client ids are readable identifiers, derived from the
-// name — not opaque keys.** The id is a visible join key in the markdown Terje reads
-// (`- LIFE | Lifelines | client3`, `- client3 | Ballestad Studios | round 15`), and
-// in the personal shape that markdown is authoritative rather than derived, so an
-// opaque nanoid is a claim the format cannot make.
+// name — not opaque keys.** The id is a visible join key in the markdown the codec writes
+// (`- LIFE | Lifelines | client3`, `- client3 | Ballestad Studios | round 15`), so an
+// opaque nanoid would be unreadable exactly where a person reads it.
 //
 // This module is deliberately pure and free of React/i18n so it can be unit-tested
 // without a DOM — the collision bug it fixes lived in `App.tsx` where no test rung

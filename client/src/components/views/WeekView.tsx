@@ -39,41 +39,7 @@ export function WeekView({ state, ui }: ViewProps) {
   // SDD-002 ruling 5 (SB-025): an admin-APPROVED segment is LOCKED — the employee can no
   // longer reopen it, so its reopen verb is gone and the chip reads 'locked'.
   const approved = approvedKeys(state);
-  // SB-056 / DD-008: in the personal shape there is nowhere to persist a commit — the ledger
-  // belongs in weekly notes, which are phase 3 — so the server refuses one. This is the half
-  // the user actually meets. SB-056's ruling is explicit that it must not be a hidden disabled
-  // button: "switching shapes silently losing a shipped feature is the kind of thing that
-  // reads as a bug months later… it should say WHY it is off and that phase 3 restores it."
-  //
-  // It is also not optional. `useServerSync` re-queues any non-409 failure and re-arms a 4 s
-  // timer forever, so leaving the verb on screen under `vault` would turn one click into a
-  // permanent toast loop. The gate the server enforces and the gate the UI shows have to be
-  // the same gate, which is why both read `TT.shapeCapabilities` rather than either one
-  // deciding for itself.
-  //
-  // `state.shape` is absent on an older server; shapeCapabilities resolves that to the
-  // sqlite row, so this reads `committing: true` and nothing changes.
-  const committingOff = TT.shapeOffReason('committing', state.shape);
-  // SB-102 / DD-017 §3. Two rules, and both of them are about not claiming something untrue.
-  const ctx = { shape: state.shape, vaultCutover: state.settings.vaultCutover, commits: state.commits };
-  // CASE A, which DD-017's mock does not cover: the cutover is stamped at an instant, so exactly
-  // one week in an install's life holds days on both sides of it. The line renders when ANY day
-  // of the week is from before the vault, because its stated job is to explain the locked grid
-  // beneath it — and that grid genuinely is locked for those days. It claims nothing about the
-  // editable ones that their own unlocked, add-row-bearing grid does not already contradict, and
-  // the per-day truth is the grid's own banner (TimeGrid), which has always been per-day.
-  const preVaultWeek = days.some((day) => TT.preCutover(day, ctx));
-  // An `open` chip means "you may commit this", which is false when committing is off — so under
-  // `personal` a segment only gets a chip when it has something true to say, which is that it is
-  // frozen. CASE B, also not covered by the mock: a `personal → team → personal` round trip keeps
-  // its original stamp (DD-016), so a frozen segment can sit in a week that is entirely after the
-  // cutover. It still shows its chip. The alternative is enforcing the lock invisibly, and
-  // SB-056's ruling ("a shipped feature must not vanish silently") points the same way. This is
-  // the conservative direction — more marking, never less — and it is one condition, so it is
-  // cheap for Terje to rule the other way. Filed as a ticket rather than treated as settled.
-  //
-  // Under `team`, `committingOff` is null and this is every segment, unchanged.
-  const chips = segments.filter((segment) => !committingOff || committed.has(segment.key) || approved.has(segment.key));
+  const chips = segments;
   return (
     <div className={vs.page}>
       <div className={[vs.headerRow, vs.baseline].join(' ')}>
@@ -115,11 +81,8 @@ export function WeekView({ state, ui }: ViewProps) {
                 </Chip>
                 {isLocked ? (
                   // Approved by an admin: no reopen verb — the segment is theirs to release now.
-                  // This note survives under `vault` even though the VERB does not: the capability
-                  // gate removes what you cannot do, never the explanation of the state you are
-                  // in, and "locked, and here is who locked it" is the second kind.
                   <span className={vs.segLockedNote}>{TT.t('approved by admin')}</span>
-                ) : committingOff ? null : (
+                ) : (
                   <Button
                     variant="ghost"
                     size="sm"
@@ -131,21 +94,6 @@ export function WeekView({ state, ui }: ViewProps) {
               </div>
             );
           })}
-        </div>
-      )}
-      {/* DD-017 §3: the standing `capabilityOff` line that used to sit here — on EVERY week,
-          forever — is gone. "Committing is off and why" now lives in exactly the two homes DD-017
-          names: the vault section of Settings (VaultSection.tsx) and the startup banner
-          (server/src/index.js). Both were verified present before this third copy was deleted;
-          deleting it is only safe while they exist. ReviewView keeps its own, which is SB-098's
-          surface and out of scope here.
-
-          What replaces it is narrower and only appears when it is true: a week that predates the
-          vault says so once, and that line explains the locked grid below rather than a missing
-          button. */}
-      {preVaultWeek && (
-        <div className={vs.vaultMark} data-tt="week-pre-vault">
-          {TT.t('before your vault · read-only')}
         </div>
       )}
       {days.map((day) => {

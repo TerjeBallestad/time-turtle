@@ -4,10 +4,9 @@ import styles from './onboarding.module.css';
 /**
  * The card every onboarding beat is drawn on — the brand, the question, and whatever answers it.
  *
- * ONE CHROME, TWO COMPONENTS. `ShapeChoice` and `FirstRun` are the same screen at different beats,
- * and until PLAN-016's end-gate review each wrote its own copy of the scrim/card/brand/question
- * markup against one stylesheet. It lives in its own file rather than in either of them because
- * `FirstRun` imports `ShapeChoice`, so a shared piece inside `FirstRun` would be a cycle.
+ * ONE CHROME. The scrim, card, brand and question markup lives here rather than inside the screen
+ * that uses it, so a second onboarding beat cannot grow its own copy (PLAN-016's end-gate review
+ * found exactly that).
  */
 export function OnboardingCard({
   question,

@@ -8,15 +8,10 @@ import type {
   UserResponse,
   OkResponse,
   ClientRenameResponse,
-  MirrorAcknowledgeResponse,
-  MirrorBlocksResponse,
-  ProjectRenameResponse,
-  ShapeChoiceResponse,
   FirstRunResponse,
   FirstRunRequest,
   FirstRunAnswerResponse,
   TeamReportResponse,
-  Shape,
   User,
   Settings,
   Client,
@@ -78,42 +73,16 @@ export const api = {
   getState: () => request<StateResponse>('GET', '/api/state'),
   putState: (patch: StatePatch) => request<PutStateResponse>('PUT', '/api/state', patch),
   /**
-   * SB-098 / SB-139 — choose what this install IS. The dedicated channel, not a settings edit:
-   * it carries one field instead of round-tripping the whole settings object (the class of bug
-   * SB-133 closed), and it can store an answer EQUAL to the shape already in force, which the
-   * Settings selector's early return deliberately cannot.
-   *
-   * Nothing debounced or retried goes through here, so its refusals are real refusals — a 403
-   * from the lock or from DD-006's single-user guard surfaces as a toast and cannot wedge
-   * `useServerSync` the way one on `PUT /api/state` would.
-   */
-  setShape: (shape: Shape) => request<ShapeChoiceResponse>('POST', '/api/shape', { shape }),
-  /**
    * DD-024 — the first-run probe, and the only call this client makes that EXPECTS to fail. It is
    * loopback-gated server-side, so a caller that is not on this machine gets a 404 and the app
    * falls through to `<Login>` exactly as it did before this flow existed.
    *
-   * NOT `setShape`. That route is behind `requireUser` and requires an admin, which is the wall
-   * this whole plan removes — in the open state there is no session to be an admin in.
+   * It takes no credential, unlike every other route here — in the open state there is no session
+   * to hold one.
    */
   firstRun: () => request<FirstRunResponse>('GET', '/api/first-run'),
-  /** DD-024 — answer the first run: the shape, plus whichever second step that shape led to. */
+  /** DD-024 — answer the first run: whether to start with example hours. */
   answerFirstRun: (answer: FirstRunRequest) => request<FirstRunAnswerResponse>('POST', '/api/first-run', answer),
-  /**
-   * SB-065: clear a standing mirror refusal. This is NOT a dismiss — it ADOPTS the bytes
-   * currently on disk as TT's stamp, which is consent for the next save to overwrite them.
-   * Nothing is written here, so an acknowledgement made by mistake costs nothing until the
-   * next save. Omit `userId` for your own mirror; admins may pass another user's id.
-   */
-  acknowledgeMirror: (userId?: number) =>
-    request<MirrorAcknowledgeResponse>('POST', '/api/mirror/acknowledge', userId === undefined ? {} : { userId }),
-  /**
-   * SB-095 — admin only: every standing mirror refusal on the instance, the caller's own
-   * included. `/api/state` reports only the session user's, so this is the only way an admin
-   * learns an employee's mirror has stopped. The list shape is SB-086's (`mirrorBlocks`),
-   * plus the `userId` each block needs for `acknowledgeMirror`.
-   */
-  mirrorBlocks: () => request<MirrorBlocksResponse>('GET', '/api/mirror/blocks'),
   listUsers: () => request<UsersResponse>('GET', '/api/users'),
   createUser: (u: UserCreateRequest) => request<UserResponse>('POST', '/api/users', u),
   deleteUser: (id: number) => request<OkResponse>('DELETE', '/api/users/' + id),
@@ -146,13 +115,9 @@ export const api = {
    * transaction (every user's entries + templates reconciled old→new). Admin-only; a blind
    * reconcile — no entry content crosses. The caller reloads afterwards — its projects/
    * entries/tasks are otherwise stale.
-   *
-   * SB-086: the response reports every mirror this rename could not write. It writes
-   * SEVERAL users' mirrors in one request, so the report is a LIST — the routes that write
-   * one mirror carry a single `mirrorBlocked` instead.
    */
   renameProject: (code: string, to: string) =>
-    request<ProjectRenameResponse>('POST', '/api/projects/' + encodeURIComponent(code) + '/rename', { to }),
+    request<OkResponse>('POST', '/api/projects/' + encodeURIComponent(code) + '/rename', { to }),
   /**
    * SB-087 (SB-067 fix 3) — rename a client's ID, re-pointing every project that references
    * it in the SAME transaction. Admin-only. It needs the server because the two halves are

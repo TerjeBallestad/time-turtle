@@ -25,7 +25,7 @@ interface SettingsProps {
 // REUSE, DO NOT RE-DERIVE: what is typed is normalized through `makeClientId`, the very
 // function the name-blur derive uses (SB-067 fix 2), so the two paths can never disagree
 // about what a readable id looks like. It also guarantees no `|` — which matters because
-// this string is a cell in the mirror's `## clients` table AND the join key in every
+// this string is a cell in the markdown codec's `## clients` table AND the join key in every
 // `## projects` row.
 function ClientIdInput({ id, onCommit }: { id: string; onCommit: (next: string) => void }) {
   const [value, setValue] = React.useState(id);

@@ -14,7 +14,6 @@ import { ReviewView } from './views/ReviewView';
 import { ProjectPage } from './views/ProjectPage';
 import { SettingsView } from './settings/SettingsView';
 import { Login } from './Login';
-import { ShapeChoice } from './ShapeChoice';
 import { FirstRun } from './FirstRun';
 import { TaskModal } from './TaskModal';
 import { Sidebar } from './Sidebar';
@@ -22,31 +21,13 @@ import { TopBar } from './TopBar';
 import { useSession } from '../hooks/useSession';
 import { useToasts } from '../hooks/useToasts';
 import { useServerSync } from '../hooks/useServerSync';
-import type { AppState, MirrorBlock, Shape, VaultPaths } from '../../../shared/types';
+import type { AppState } from '../../../shared/types';
 import type { UiActions, Route, TaskModalInit } from '../types';
-
-/** Same refusal? Path + first-detection instant identify a block; nothing else changes. */
-function sameBlock(a: MirrorBlock | null | undefined, b: MirrorBlock | null | undefined): boolean {
-  if (!a || !b) return !a && !b;
-  return a.path === b.path && a.detectedAt === b.detectedAt;
-}
 
 export function App() {
   const { state, setState, firstRun, load } = useSession();
   const { toasts, toast } = useToasts();
-  // SB-085: the save response is where a mirror refusal first shows up. Fold it into the
-  // session state (`mirrorBlocked` is NOT one of useServerSync's SYNC_KEYS, so this cannot
-  // bounce back at the server as a patch) and bail out when nothing changed, so an
-  // unblocked install re-renders exactly never.
-  const setMirrorBlocked = React.useCallback(
-    (block: MirrorBlock | null) =>
-      setState((current) => {
-        if (!current) return current;
-        return sameBlock(current.mirrorBlocked, block) ? current : { ...current, mirrorBlocked: block };
-      }),
-    [setState],
-  );
-  const sync = useServerSync(state, toast, load, setMirrorBlocked);
+  const sync = useServerSync(state, toast, load);
   const [route, setRoute] = React.useState<Route>({ view: 'today' });
   const [taskModal, setTaskModal] = React.useState<TaskModalInit | null>(null);
   const [lang, setLang] = React.useState<string | null>(localStorage.getItem('tt_lang') || null);
@@ -62,11 +43,7 @@ export function App() {
   // only and best-effort (a user we cannot read is skipped); refreshed after an approve/
   // release/correction via reviewNonce. isAdminSession is a stable boolean so this does not
   // re-run on every keystroke the way depending on the whole `state` object would.
-  // SB-098: AND the install has an identity surface at all. Under `personal` this whole effect
-  // is dead weight — it lists users to count somebody else's pending segments, and there is
-  // nobody else — but more to the point it would fetch for a badge that is no longer rendered.
-  const isAdminSession =
-    !!state && (state as AppState).user?.role === 'admin' && TT.shapeCapabilities((state as AppState).shape).identity;
+  const isAdminSession = !!state && (state as AppState).user?.role === 'admin';
   const [reviewPending, setReviewPending] = React.useState<number | null>(null);
   const [reviewNonce, setReviewNonce] = React.useState(0);
   React.useEffect(() => {
@@ -108,52 +85,24 @@ export function App() {
   // beats a browser default, as it should.
   TT.lang = preSessionLang(lang);
   if (state === null) return null;
-  // DD-024 / SB-158: a 401 is no longer one thing. On a fresh install it means "nobody has said
-  // what this install IS yet", and the answer to that question is what removes the login — so the
-  // question goes FIRST. `firstRun.open` is the SERVER's verdict on the open state, never a client
-  // re-derivation of it, and a caller the server will not serve the first run to (not on this
-  // machine) gets `null` and the login it always got.
+  // DD-024 / SB-158: a 401 is no longer one thing. On a fresh install it means "nobody has answered
+  // the first run yet", so the question goes FIRST. `firstRun.open` is the SERVER's verdict on the
+  // open state, never a client re-derivation of it, and a caller the server will not serve the
+  // first run to (not on this machine) gets `null` and the login it always got.
   const reload = () => {
     setState(null);
     load();
   };
   if (state === false)
     return firstRun?.open ? (
-      <FirstRun info={firstRun} onDone={reload} />
+      <FirstRun onDone={reload} />
     ) : (
       <Login onLogin={reload} defaultLogin={firstRun?.defaultLogin ?? null} />
     );
 
   TT.lang = lang || state.settings.language || 'en';
-  // SB-098 item 3: whether this install has more than one human in it, read off the SAME
-  // capability table the commit and mirror gates read (DD-011's rule: a capability is a property
-  // of the shape, not of a path captured at switch time). Under `personal` the identity surfaces
-  // are ABSENT, not disabled — a greyed-out Users section still asserts that other users are a
-  // thing here, which is exactly what depth 2 of DD-015 removes.
-  const identity = TT.shapeCapabilities(state.shape).identity;
-  // Role gating is unchanged and still real (the server strips and 403s regardless); it is just
-  // meaningless under `personal`, where the one user is the admin by construction. Everything
-  // below reads `admin && identity` rather than either alone, so a shape with no identity never
-  // renders an admin-only surface and a team employee never gains one.
   const admin = isAdmin(state);
   const updateState = (fn: (current: AppState) => AppState) => setState((current) => fn(current as AppState));
-  // SB-098 / SB-139: storing a shape, once, for both surfaces that can choose one. NOT the
-  // optimistic debounced diff the other settings use — the server can REFUSE this (the lock,
-  // DD-006's single-user guard), so an optimistic flip would show a state that was rejected,
-  // and half the UI below is derived from the EFFECTIVE shape the server reports, which the env
-  // and the lock can both decide. Reload after, never guess.
-  const chooseShape = (shape: Shape) => {
-    void api
-      .setShape(shape)
-      .then((res) => {
-        toast(TT.t('instance shape: ') + res.shape);
-        load();
-      })
-      .catch((err: Error) => {
-        toast(err.message);
-        load(); // re-sync the control back to the server truth on a refusal
-      });
-  };
   const ui: UiActions = {
     toast,
     update: (id, patch) =>
@@ -373,105 +322,6 @@ export function App() {
       if (admin) updateState((current) => ({ ...current, settings: { ...current.settings, language } }));
     },
     setCurrency: (currency) => updateState((current) => ({ ...current, settings: { ...current.settings, currency } })),
-    setMdDir: (dir) => updateState((current) => ({ ...current, settings: { ...current.settings, mdDir: dir } })),
-    // SB-100: the shape switch does NOT go through the optimistic debounced diff the other
-    // settings use. It goes straight to the server and then reloads — the renameProject /
-    // renameClient shape — for two reasons the others do not have. The server can REFUSE it
-    // (TT_SHAPE_LOCK, or the single-user guard with more than one user), so an optimistic
-    // toggle would sit there showing a state that was rejected; and half the UI below is
-    // derived from the EFFECTIVE shape the server reports, which the env and the lock can
-    // both decide, so guessing it locally is guessing.
-    setShape: (shape) => {
-      // Compare against the EFFECTIVE shape — the one the toggle is showing — not the stored
-      // one. They differ exactly when `TT_SHAPE` supplied the shape and nothing is stored,
-      // which is the configuration this plan names most often ("an install switched by
-      // TT_SHAPE alone never fires a settings write"): `state.shape` reads `personal` while
-      // `settings.shape` reads its `team` default, so guarding on the stored value made
-      // clicking Team a no-op — no request, no toast, no way out of `personal` from the UI.
-      //
-      // SB-133 LOOKED AT THIS LINE AND LEFT IT ALONE, which is worth saying because the ticket
-      // named it. It is not what swallowed the repair: an install wrongly stamped `team` has an
-      // EFFECTIVE `team`, so clicking Personal differs from it, fires, and moves the install —
-      // pinned by 'an install wrongly stamped team can be moved back' in tests/shape-echo.test.js,
-      // which passed before the fix as well as after. The one gesture this does swallow is
-      // clicking the shape you are ALREADY effectively on, to pin it against the env — and that
-      // is the first-run question SB-098 owns (DD-015 keeps the OPEN state deliberately open, so
-      // writing a row here would answer it on the user's behalf). `state.settings.shape` now
-      // carries the STORED shape and is absent when nothing was chosen, so SB-098 has the
-      // distinction it needs the day it wants to offer that.
-      //
-      // SB-098 LEFT THE EARLY RETURN AND MOVED THE TRANSPORT. The guard is still right for a
-      // toggle — clicking the segment that is already lit should not fire a write — and the
-      // ticket that owns the one gesture it swallows is this one, which answers it with a
-      // separate action (`chooseShape` below) rather than by loosening the toggle. What did
-      // change is where the write goes: `POST /api/shape` instead of a whole-settings PUT, so
-      // there is exactly ONE channel that can store a shape from the client (SB-139).
-      if (shape === (state.shape ?? 'team')) return;
-      chooseShape(shape);
-    },
-    // SB-098 item 4: the first-run answer. The SAME channel as the toggle and deliberately
-    // WITHOUT its early return, because the open state resolves to an effective `team`
-    // (DD-015: `team` is the safe row) — so a user answering "my company's" is choosing the
-    // shape they are already effectively on, and a compare-first gesture would silently store
-    // nothing, leave `shapeOpen` true and ask them again. The `personal` half would have
-    // worked, which is exactly what makes that failure easy to ship.
-    chooseShape: (shape) => chooseShape(shape),
-    setVaultPaths: (patch) =>
-      updateState((current) => ({
-        ...current,
-        settings: {
-          ...current.settings,
-          vaultPaths: { ...(current.settings.vaultPaths as VaultPaths), ...patch },
-        },
-      })),
-    setVaultTimeSeparator: (separator) =>
-      updateState((current) => ({ ...current, settings: { ...current.settings, vaultTimeSeparator: separator } })),
-    // SB-065/SB-085: consent to overwrite. The server adopts the bytes on disk as its stamp
-    // and clears the block; nothing is written until the next save. Deliberately NOT a
-    // reload — `load()` hands useServerSync a fresh object for every synced key, which would
-    // PUT the whole state straight back and turn "acknowledge" into "overwrite now".
-    //
-    // SB-095: with a `userId` this is an ADMIN clearing someone else's block. Only the
-    // session's own block is mirrored into local state — clearing `mirrorBlocked` for an
-    // employee's adoption would erase the admin's own standing refusal from the screen while
-    // the server still holds it.
-    acknowledgeMirror: (userId) =>
-      api
-        .acknowledgeMirror(userId)
-        .then(() => {
-          if (userId === undefined || userId === state.user.id) setMirrorBlocked(null);
-          toast(TT.t('mirror unblocked — the next save overwrites the file'));
-          return true;
-        })
-        .catch((err: Error) => {
-          toast(err.message);
-          return false;
-        }),
-    // SB-095: admin-only. A 403/500 resolves [] rather than throwing — the section is an
-    // extra affordance, and a failed read should leave it drawing nothing, not break Settings.
-    mirrorBlocks: () =>
-      api
-        .mirrorBlocks()
-        .then((r) => r.mirrorBlocks)
-        .catch(() => []),
-    importMd: (md) => {
-      try {
-        const parsed = TT.parseMd(md);
-        setState((current) => ({
-          ...(current as AppState),
-          settings: parsed.settings,
-          clients: parsed.clients,
-          projects: parsed.projects,
-          tasks: parsed.tasks,
-          entries: parsed.entries,
-        }));
-        toast(TT.t('Markdown applied'));
-        return true;
-      } catch (err) {
-        toast(TT.t('Could not parse markdown'));
-        return false;
-      }
-    },
     openProject: (code) => setRoute({ view: 'project', code }),
     // SDD-002 ruling 4: commit/un-commit a (week∩month) segment. The client only tracks
     // WHICH keys are committed — committedAt is provisional and the money snapshot is
@@ -548,10 +398,7 @@ export function App() {
   else if (route.view === 'week') view = <WeekView state={state} ui={ui} />;
   else if (route.view === 'reports') view = <ReportsView state={state} ui={ui} />;
   else if (route.view === 'invoice' && admin) view = <InvoiceView state={state} ui={ui} />;
-  // SB-098 item 3: the review surface presupposes somebody to review, so `personal` has no
-  // route to it — not a hidden nav item with a live route behind it. The fallback below turns
-  // a stale `review` route into Today, which is exactly the right landing.
-  else if (route.view === 'review' && admin && identity)
+  else if (route.view === 'review' && admin)
     view = <ReviewView state={state} ui={ui} onReviewChanged={() => setReviewNonce((n) => n + 1)} />;
   else if (route.view === 'settings') view = <SettingsView state={state} ui={ui} />;
   else if (route.view === 'project') view = <ProjectPage state={state} ui={ui} code={route.code} />;
@@ -560,31 +407,11 @@ export function App() {
   if (view === null) view = <TodayView state={state} ui={ui} />;
 
   // SB-134: the sidebar's sync line is a STATUS INDICATOR, so it may only claim a write that is
-  // actually happening. Under `personal` the v2 markdown mirror is off by construction — DD-011
-  // retires it, and DD-015/SB-100 derive the `vault` backend instead — so `synced → md` was a
-  // positive claim about a write that does not occur. Same species as SB-113 (a surface still
-  // speaking the previous architecture), but worse than stale vocabulary: someone watching this
-  // line to know their hours are safe was reading a reassurance that meant nothing.
-  //
-  // THE GATE IS THE CAPABILITY TABLE, never `shape === 'personal'`. DD-011's rule is that a
-  // capability is a property of the SHAPE, and `mirror` is the exact bit that decides whether a
-  // mirror byte is written — so a third shape gets an honest label by adding a row to the table
-  // in shared/core.js, not by finding this line.
-  //
-  // The vault-side state is `state.vaultQuarantined` — the array SB-057 task 8 already puts on
-  // /api/state and renders in Settings → Vault. READ, never re-derived: this line and that panel
-  // are two views of one fact, and a second derivation is how two views come to disagree. The
-  // wording is that panel's own ('Notes paused'), so the sidebar and the place that explains it
-  // use one phrase.
-  const mirrors = TT.shapeCapabilities(state.shape).mirror;
-  const paused = mirrors ? 0 : (state.vaultQuarantined ?? []).length;
-  const settled = paused
-    ? TT.t('Notes paused') + ' (' + paused + ')'
-    : mirrors
-      ? TT.t('synced') + ' → md'
-      : TT.t('synced → vault');
+  // actually happening. It reads `synced` and names no file: the hours live in the database this
+  // server owns, and nothing else is written anywhere (SB-181).
+  const settled = TT.t('synced');
   const syncLabel = sync === 'saving' ? TT.t('saving…') : sync === 'error' ? TT.t('offline — retrying') : settled;
-  const syncColor = sync === 'error' || paused ? 'var(--orange)' : 'var(--green)';
+  const syncColor = sync === 'error' ? 'var(--orange)' : 'var(--green)';
 
   return (
     <div className={styles.app}>
@@ -596,7 +423,6 @@ export function App() {
         running={running}
         todayEntries={todayEntries}
         admin={admin}
-        identity={identity}
         reviewPending={reviewPending}
         syncLabel={syncLabel}
         syncColor={syncColor}
@@ -611,17 +437,6 @@ export function App() {
         ))}
       </ToastStack>
       {taskModal && <TaskModal state={state} ui={ui} init={taskModal} onClose={() => setTaskModal(null)} />}
-      {/* SB-098 item 4: LAST, so its scrim covers everything including an open task modal, and
-          rendered off `state.shapeOpen` — the server's verdict on whether the question is owed,
-          never a client re-derivation of it (see AppState.shapeOpen).
-
-          DD-024 MOVED THE ORDINARY PATH OUT FROM UNDER THIS. A fresh install now meets the question
-          as `<FirstRun>` before any session exists, so this branch is the AUTHENTICATED FALLBACK: it
-          is what an admin sees if a session somehow exists while the open state still stands. It is
-          kept rather than deleted because nothing here proves that is unreachable — `shapeOpen` is
-          the server's own condition and this is the surface that answers it. If it is ever proven
-          dead, delete it then. */}
-      {state.shapeOpen && <ShapeChoice onAnswer={ui.chooseShape} />}
     </div>
   );
 }

@@ -25,8 +25,6 @@ interface BillCellProps {
 // that control sets a PROJECT's default billability, not an entry's state, and a two-option
 // labelled toggle in a settings form is a place where words beat a symbol.
 //
-// DD-007 does not bind here. It governs the headers in a daily note on disk, not the UI, so
-// nothing about the vault format constrains this cell.
 export function BillCell({ entry, ui, reg, nav }: BillCellProps) {
   const chip = (
     <Chip

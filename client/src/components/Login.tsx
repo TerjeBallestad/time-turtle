@@ -17,16 +17,16 @@ interface LoginProps {
 }
 
 /**
- * THE WALL, AND WHY THIS HINT IS HERE (DD-024 clause 2). Moving the shape question in FRONT of the
- * login is what created it: a person who answers `Team` now lands here holding a credential nobody
- * ever showed them — `seedIfEmpty` announces it once on stdout, which `tt serve` redirects into a
- * detached log file. Before DD-024 they at least met this wall after signing in.
+ * THE WALL, AND WHY THIS HINT IS HERE (DD-024 clause 2). The first run sits in FRONT of the login,
+ * so a person who finishes it lands here holding a credential nobody ever showed them —
+ * `seedIfEmpty` announces it once on stdout, which `tt serve` redirects into a detached log file.
  *
  * WHAT IS ACTUALLY DISCLOSED, and the reason this is not a hole: the literal in `server/src/config.js`
  * of a public MIT repo (DD-004), stated back only to a caller the server has already established is
  * on a loopback SOCKET with a loopback Host header — the same predicate the first-run surface and
- * task 2's peer guard use, never the Host header alone. Under `team` the bind is every interface, so
- * a header-only gate would read this out to any machine on the wifi: SB-162 with a password in it.
+ * the first-run caller gate uses, never the Host header alone. The bind is every interface unless
+ * `TT_HOST` narrows it, so a header-only gate would read this out to any machine on the wifi:
+ * SB-162 with a password in it.
  * It retires itself the moment the password changes, because the server recomputes the answer from
  * the stored hash on every probe.
  */

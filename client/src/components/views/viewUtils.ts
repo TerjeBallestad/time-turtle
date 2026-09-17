@@ -21,7 +21,7 @@ export function committedKeys(state: Catalog): Set<string> {
 // second answer to "is this day frozen" — the one question that must not exist twice — its only
 // caller was TimeGrid's lock expression, and that expression is now `TT.readOnlyDay`, which gates
 // `TT.committedOn` (shared/core.js). A wrapper with no callers is just the second copy waiting
-// for someone to reach for it, which is the failure `TT.vaultBound`'s own header warns about.
+// for someone to reach for it.
 //
 // `committedKeys` above and `isApproved` below both stay, and both still touch the ledger: one
 // builds a key SET for the Week chips, the other asks whether a segment was APPROVED. Different
