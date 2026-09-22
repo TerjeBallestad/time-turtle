@@ -39,6 +39,18 @@ function requireAdmin(req, res, next) {
   next();
 }
 
+// ---- health ----
+// Reads one real table, so a 200 proves the database and not only Node.
+app.get('/api/health', (req, res) => {
+  try {
+    db.db.prepare('SELECT count(*) FROM users').get();
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('health check failed:', err);
+    res.status(503).json({ ok: false });
+  }
+});
+
 // ---- auth routes ----
 app.post('/api/auth/login', (req, res) => {
   const { email, password } = req.body || {};
