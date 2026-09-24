@@ -19,3 +19,10 @@ pm.config.json
 
 # stripped from public tree per DD-005 (kept locally, untracked)
 design-import/
+
+# .NET build output
+bin/
+obj/
+
+# Local Neovim settings (DB connection for dadbod)
+.lazy.lua
