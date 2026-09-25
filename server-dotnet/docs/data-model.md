@@ -23,7 +23,7 @@ erDiagram
   users ||--o{ segment_approvals : "is approved in"
 
   company {
-    int id PK
+    uuid id PK
     text name
     text currency "one per company"
     text time_zone "for today and the timer only, DD-036"
@@ -34,8 +34,8 @@ erDiagram
     int bank_lower_min "optional warning, DD-041"
   }
   users {
-    int id PK
-    int company_id FK
+    uuid id PK
+    uuid company_id FK
     text email UK
     text name
     text role "admin or employee"
@@ -44,41 +44,41 @@ erDiagram
     timestamptz deactivated_at "never deleted, DD-037"
   }
   clients {
-    int id PK
-    int company_id FK
+    uuid id PK
+    uuid company_id FK
     text name
     bool archived
   }
   projects {
-    int id PK
-    int company_id FK
-    int client_id FK "null for internal work"
+    uuid id PK
+    uuid company_id FK
+    uuid client_id FK "null for internal work"
     text code UK "renamable, DD-033"
     text name
     bool archived
   }
   assignments {
-    int id PK
-    int user_id FK
-    int project_id FK
+    uuid id PK
+    uuid user_id FK
+    uuid project_id FK
     timestamptz ended_at "no dates on the work, DD-032"
   }
   assignment_rates {
-    int id PK
-    int assignment_id FK
+    uuid id PK
+    uuid assignment_id FK
     date valid_from
     numeric rate "the only rate, DD-031"
   }
   running_timers {
-    int user_id PK "one per person, DD-051"
-    int assignment_id FK
+    uuid user_id PK "one per person, DD-051"
+    uuid assignment_id FK
     text label
     timestamptz started_at
   }
   entries {
-    int id PK
-    int assignment_id FK "never null, DD-033"
-    int user_id FK "must match the assignment"
+    uuid id PK
+    uuid assignment_id FK "never null, DD-033"
+    uuid user_id FK "must match the assignment"
     date entry_date "local, no time zone, DD-036"
     int minutes "not null, DD-051"
     time start_time "optional"
@@ -91,20 +91,20 @@ erDiagram
     numeric frozen_amount "set by the approval, DD-029"
   }
   task_templates {
-    int id PK
-    int user_id FK
-    int assignment_id FK
+    uuid id PK
+    uuid user_id FK
+    uuid assignment_id FK
     text label
   }
   segment_submits {
-    int user_id PK
+    uuid user_id PK
     date segment_start PK
     timestamptz submitted_at "a withdraw deletes the row"
   }
   segment_approvals {
-    int user_id PK
+    uuid user_id PK
     date segment_start PK
-    int approved_by FK
+    uuid approved_by FK
     timestamptz approved_at "a release deletes the row, DD-030"
     int norm_min "frozen"
     int bank_change_min "frozen"
@@ -128,8 +128,8 @@ erDiagram
   assignments |o--o{ adjustments : "bills money to"
 
   work_schedules {
-    int id PK
-    int user_id FK
+    uuid id PK
+    uuid user_id FK
     date valid_from
     int mon_min
     int tue_min
@@ -140,8 +140,8 @@ erDiagram
     int sun_min
   }
   calendar_rules {
-    int id PK
-    int company_id FK
+    uuid id PK
+    uuid company_id FK
     text name "for example Christmas Eve"
     text kind "fixed, easter_offset or once"
     int month "fixed"
@@ -152,51 +152,51 @@ erDiagram
     date valid_from "DD-028"
   }
   absence_types {
-    int id PK
-    int company_id FK
+    uuid id PK
+    uuid company_id FK
     text name
     text effect "covers_norm, draws_bank or removes_norm"
     bool needs_request "vacation yes, sick leave no"
     bool archived
   }
   quota_limits {
-    int id PK
-    int absence_type_id FK
-    int user_id FK "null is the company limit, DD-050"
+    uuid id PK
+    uuid absence_type_id FK
+    uuid user_id FK "null is the company limit, DD-050"
     int amount
     text unit "working_days, virkedager, calendar_days, occurrences or hours"
     text period "occurrence, calendar_year or twelve_months"
     date valid_from
   }
   absences {
-    int id PK
-    int user_id FK
+    uuid id PK
+    uuid user_id FK
     date absence_date
-    int absence_type_id FK
+    uuid absence_type_id FK
     int minutes "null is the whole norm"
-    int request_id FK "null for sick leave"
+    uuid request_id FK "null for sick leave"
   }
   absence_requests {
-    int id PK
-    int user_id FK
-    int absence_type_id FK
+    uuid id PK
+    uuid user_id FK
+    uuid absence_type_id FK
     date from_date
     date to_date
     text state "asked, granted or refused"
-    int decided_by FK
+    uuid decided_by FK
     timestamptz decided_at
     text note
   }
   adjustments {
-    int id PK
-    int user_id FK
+    uuid id PK
+    uuid user_id FK
     date adjustment_date
     text kind "opening, payout, overtime, correction or money"
     int minutes "time bank, or null"
     numeric amount "money, or null"
-    int assignment_id FK "set when amount is set"
+    uuid assignment_id FK "set when amount is set"
     text note
-    int created_by FK
+    uuid created_by FK
     timestamptz created_at
   }
 ```
@@ -232,6 +232,7 @@ Decided in B0 part 2 on 24 and 25 Sep 2026.
 | DD-047   | Tests run on a Postgres that Testcontainers starts for each run                                    |
 | DD-048   | EF Core with the Npgsql provider, and SQL by hand only where LINQ cannot express the query         |
 | DD-052   | ASP.NET Core cookie authentication, without Identity. Data Protection keys in Postgres             |
+| DD-053   | Every primary key is a UUID v7 that EF Core makes in .NET. Foreign keys are `uuid` too             |
 
 ## Deferred
 

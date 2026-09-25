@@ -1,11 +1,9 @@
 using System.Net;
 using System.Net.Http.Json;
-using Microsoft.AspNetCore.Mvc.Testing;
 
 namespace TimeTurtle.Api.Tests;
 
-public class HealthTests(WebApplicationFactory<Program> factory)
-    : IClassFixture<WebApplicationFactory<Program>>
+public class HealthTests(TurtleFactory factory) : IClassFixture<TurtleFactory>
 {
     [Fact]
     public async Task Health_answers_ok_when_postgres_answers()
