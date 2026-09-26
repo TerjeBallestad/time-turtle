@@ -40,5 +40,5 @@ public class ClientTests(TurtleFactory factory) : IClassFixture<TurtleFactory>
         Assert.Equal(HttpStatusCode.BadRequest, res.StatusCode);
     }
 
-    private record ClientBody(int Id, string Name);
+    private record ClientBody(Guid Id, string Name);
 }

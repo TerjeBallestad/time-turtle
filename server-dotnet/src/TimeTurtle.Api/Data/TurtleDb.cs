@@ -15,6 +15,6 @@ public class TurtleDb(DbContextOptions<TurtleDb> options) : DbContext(options)
 
     protected override void OnModelCreating(ModelBuilder model)
     {
-        model.Entity<Client>().HasIndex(c => c.Name).IsUnique().HasFilter("Archived NOT TRUE"); // (2)
+        model.Entity<Client>().HasIndex(c => c.Name).IsUnique().HasFilter("NOT archived");
     }
 }
