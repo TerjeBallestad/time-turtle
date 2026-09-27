@@ -8,26 +8,27 @@ The decisions are on the board: DD-028 to DD-041. The words are in `pm glossary`
 
 ```mermaid
 erDiagram
-  company ||--o{ users : employs
+  company ||--o{ memberships : employs
+  users ||--o{ memberships : "works through"
   company ||--o{ clients : has
   clients ||--o{ projects : "orders (optional)"
-  users ||--o{ assignments : "is on"
+  memberships ||--o{ assignments : "is on"
   projects ||--o{ assignments : staffs
   assignments ||--o{ assignment_rates : "prices from a date"
   assignments ||--o{ entries : "receives"
   users ||--o| running_timers : "may run"
   assignments ||--o{ running_timers : "is timed by"
-  users ||--o{ task_templates : keeps
+  memberships ||--o{ task_templates : keeps
   assignments |o--o{ task_templates : "suggests"
-  users ||--o{ segment_submits : submits
-  users ||--o{ segment_approvals : "is approved in"
+  memberships ||--o{ segment_submits : submits
+  memberships ||--o{ segment_approvals : "is approved in"
 
   company {
     uuid id PK
     text name
     text currency "one per company"
     text time_zone "for today and the timer only, DD-036"
-    text language "default for users"
+    text language "default for its members"
     text preset_code "for example no"
     int preset_version "stamped at setup, DD-028"
     int bank_upper_min "optional warning, DD-041"
@@ -35,12 +36,16 @@ erDiagram
   }
   users {
     uuid id PK
-    uuid company_id FK
-    text email UK
+    text email UK "one login for all companies, DD-055"
     text name
-    text role "admin or employee"
     text password_hash
     text language "null is the company default"
+  }
+  memberships {
+    uuid id PK
+    uuid user_id FK
+    uuid company_id FK "unique with user_id"
+    text role "admin or employee"
     timestamptz deactivated_at "never deleted, DD-037"
   }
   clients {
@@ -59,7 +64,7 @@ erDiagram
   }
   assignments {
     uuid id PK
-    uuid user_id FK
+    uuid membership_id FK
     uuid project_id FK
     timestamptz ended_at "no dates on the work, DD-032"
   }
@@ -70,7 +75,7 @@ erDiagram
     numeric rate "the only rate, DD-031"
   }
   running_timers {
-    uuid user_id PK "one per person, DD-051"
+    uuid user_id PK "one per person, across companies, DD-055"
     uuid assignment_id FK
     text label
     timestamptz started_at
@@ -78,7 +83,7 @@ erDiagram
   entries {
     uuid id PK
     uuid assignment_id FK "never null, DD-033"
-    uuid user_id FK "must match the assignment"
+    uuid membership_id FK "must match the assignment"
     date entry_date "local, no time zone, DD-036"
     int minutes "not null, DD-051"
     time start_time "optional"
@@ -92,17 +97,17 @@ erDiagram
   }
   task_templates {
     uuid id PK
-    uuid user_id FK
+    uuid membership_id FK
     uuid assignment_id FK
     text label
   }
   segment_submits {
-    uuid user_id PK
+    uuid membership_id PK
     date segment_start PK
     timestamptz submitted_at "a withdraw deletes the row"
   }
   segment_approvals {
-    uuid user_id PK
+    uuid membership_id PK
     date segment_start PK
     uuid approved_by FK
     timestamptz approved_at "a release deletes the row, DD-030"
@@ -118,18 +123,18 @@ erDiagram
   company ||--o{ calendar_rules : "changes the norm with"
   company ||--o{ absence_types : defines
   absence_types ||--o{ quota_limits : "is limited by"
-  users ||--o{ work_schedules : "works by"
-  users ||--o{ absences : "is away in"
-  users ||--o{ absence_requests : asks
-  users ||--o{ quota_limits : "may have its own"
+  memberships ||--o{ work_schedules : "works by"
+  memberships ||--o{ absences : "is away in"
+  memberships ||--o{ absence_requests : asks
+  memberships ||--o{ quota_limits : "may have its own"
   absence_types ||--o{ absences : "classifies"
   absence_requests |o--o{ absences : "creates when granted"
-  users ||--o{ adjustments : "has"
+  memberships ||--o{ adjustments : "has"
   assignments |o--o{ adjustments : "bills money to"
 
   work_schedules {
     uuid id PK
-    uuid user_id FK
+    uuid membership_id FK
     date valid_from
     int mon_min
     int tue_min
@@ -162,7 +167,7 @@ erDiagram
   quota_limits {
     uuid id PK
     uuid absence_type_id FK
-    uuid user_id FK "null is the company limit, DD-050"
+    uuid membership_id FK "null is the company limit, DD-050"
     int amount
     text unit "working_days, virkedager, calendar_days, occurrences or hours"
     text period "occurrence, calendar_year or twelve_months"
@@ -170,7 +175,7 @@ erDiagram
   }
   absences {
     uuid id PK
-    uuid user_id FK
+    uuid membership_id FK
     date absence_date
     uuid absence_type_id FK
     int minutes "null is the whole norm"
@@ -178,7 +183,7 @@ erDiagram
   }
   absence_requests {
     uuid id PK
-    uuid user_id FK
+    uuid membership_id FK
     uuid absence_type_id FK
     date from_date
     date to_date
@@ -189,7 +194,7 @@ erDiagram
   }
   adjustments {
     uuid id PK
-    uuid user_id FK
+    uuid membership_id FK
     date adjustment_date
     text kind "opening, payout, overtime, correction or money"
     int minutes "time bank, or null"
@@ -204,10 +209,11 @@ erDiagram
 ## Rules the diagram cannot show
 
 - **Money is `numeric`, never a floating-point type.** An amount is rounded to whole øre once, at the approval.
-- **No `ON DELETE CASCADE` anywhere.** Every foreign key to `users` uses `ON DELETE RESTRICT` (DD-037).
-- **An entry's `user_id` must match its assignment.** A composite foreign key `(assignment_id, user_id)` to `assignments (id, user_id)` lets Postgres check it. The column exists for the index on `(user_id, entry_date)`.
-- **A segment is named by its first date.** Segments never overlap, so `segment_start` is unique for each person. It replaces today's text key `2026-W09-2026-03`.
-- **One active assignment for each person and project.** A partial unique index on `(user_id, project_id) WHERE ended_at IS NULL`.
+- **No `ON DELETE CASCADE` anywhere.** Every foreign key to `users`, `memberships` and `company` uses `ON DELETE RESTRICT` (DD-037).
+- **A row that belongs to one company points at a membership, not at a user (DD-055).** A user is the login. A membership is that person's job in one company, with its role. `approved_by`, `decided_by` and `created_by` are memberships too. Only `running_timers` points at the user, so one person runs one timer across all companies.
+- **An entry's `membership_id` must match its assignment.** A composite foreign key `(assignment_id, membership_id)` to `assignments (id, membership_id)` lets Postgres check it. The column exists for the index on `(membership_id, entry_date)`.
+- **A segment is named by its first date.** Segments never overlap, so `segment_start` is unique for each membership. It replaces today's text key `2026-W09-2026-03`.
+- **One active assignment for each person and project.** A partial unique index on `(membership_id, project_id) WHERE ended_at IS NULL`.
 - **Nothing derived is stored for a period that is not approved.** The norm, the balance and the amounts are computed. The approval freezes them (DD-029).
 - **An adjustment holds minutes or money, never both.** A check constraint enforces it.
 

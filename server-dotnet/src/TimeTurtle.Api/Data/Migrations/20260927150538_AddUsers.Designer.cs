@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 using TimeTurtle.Api.Data;
@@ -11,9 +12,11 @@ using TimeTurtle.Api.Data;
 namespace TimeTurtle.Api.Data.Migrations
 {
     [DbContext(typeof(TurtleDb))]
-    partial class TurtleDbModelSnapshot : ModelSnapshot
+    [Migration("20260927150538_AddUsers")]
+    partial class AddUsers
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
