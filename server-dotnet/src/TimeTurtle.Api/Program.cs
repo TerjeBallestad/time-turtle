@@ -18,11 +18,19 @@ builder.Services.AddDbContext<TurtleDb>(o =>
     o.UseNpgsql(connectionString).UseSnakeCaseNamingConvention()
 );
 
-builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme).AddCookie();
+builder
+    .Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
+    .AddCookie(o =>
+        o.Events.OnRedirectToLogin = ctx =>
+        {
+            ctx.Response.StatusCode = StatusCodes.Status401Unauthorized;
+            return Task.CompletedTask;
+        }
+    );
 builder.Services.AddAuthorization();
 builder.Services.AddHttpContextAccessor();
 builder.Services.AddSingleton<PasswordHasher<User>>();
-builder.Services.AddTransient<CurrentUser>();
+builder.Services.AddScoped<CurrentUser>();
 
 var app = builder.Build();
 
@@ -58,25 +66,35 @@ app.MapPost(
         {
             return Results.Unauthorized();
         }
-        var companies = await db
-            .Companies.Where(c =>
-                db.Memberships.Any(m => m.UserId == user.Id && m.CompanyId == c.Id)
-            )
+        var companyIds = await db
+            .Memberships.Where(m => m.UserId == user.Id)
+            .Select(m => m.CompanyId)
             .ToListAsync();
-        if (companies.Count == 1)
+
+        var claims = new List<Claim> { new(ClaimTypes.NameIdentifier, user.Id.ToString()) };
+
+        if (companyIds.Count == 1)
         {
-            var claims = new List<Claim>
-            {
-                new(ClaimTypes.Email, user.Email),
-                new("CurrentUserId", user.Id.ToString()),
-                new("CurrentCompanyId", companies[0].Id.ToString()),
-            };
-            SignIn(claims);
-            return Results.Ok();
+            claims.Add(new("company", companyIds[0].ToString()));
         }
-        return Results.Ok(companies);
+        return SignIn(claims);
     }
 );
+
+app.MapGet(
+        "/api/me",
+        async (TurtleDb db, CurrentUser me) =>
+        {
+            var meUser = await db.Users.SingleOrDefaultAsync(u => u.Id == me.UserId);
+            if (meUser == null)
+            {
+                return Results.Unauthorized();
+            }
+
+            return Results.Ok(new MeDto(meUser.Id, meUser.Email, meUser.Name, me.CompanyId));
+        }
+    )
+    .RequireAuthorization();
 
 app.MapGet(
     "/api/clients",
