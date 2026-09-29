@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using TimeTurtle.Api.Auth;
 
 namespace TimeTurtle.Api.Data;
 
@@ -31,12 +32,14 @@ public class Client
     public bool Archived { get; set; }
 }
 
-public class TurtleDb(DbContextOptions<TurtleDb> options) : DbContext(options)
+public class TurtleDb(DbContextOptions<TurtleDb> options, CurrentUser me) : DbContext(options)
 {
     public DbSet<Company> Companies => Set<Company>();
     public DbSet<User> Users => Set<User>();
     public DbSet<Membership> Memberships => Set<Membership>();
     public DbSet<Client> Clients => Set<Client>();
+
+    private readonly Guid? _companyId = me.CompanyId;
 
     protected override void OnModelCreating(ModelBuilder model)
     {
@@ -56,6 +59,7 @@ public class TurtleDb(DbContextOptions<TurtleDb> options) : DbContext(options)
             .OnDelete(DeleteBehavior.Restrict);
         model.Entity<Membership>().HasIndex(m => new { m.CompanyId, m.UserId }).IsUnique();
 
+        model.Entity<Client>().HasQueryFilter(c => c.CompanyId == _companyId);
         model
             .Entity<Client>()
             .HasOne<Company>()

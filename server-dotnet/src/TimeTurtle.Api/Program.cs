@@ -96,47 +96,72 @@ app.MapGet(
     )
     .RequireAuthorization();
 
+app.MapPost(
+        "/api/session/company",
+        async (ChooseCompany request, TurtleDb db, CurrentUser me) =>
+        {
+            bool isMember = await db.Memberships.AnyAsync(m =>
+                m.CompanyId == request.CompanyId && m.UserId == me.UserId
+            );
+
+            if (!isMember)
+            {
+                return Results.Forbid();
+            }
+
+            var claims = new List<Claim>
+            {
+                new(ClaimTypes.NameIdentifier, me.UserId.ToString()!),
+                new("company", request.CompanyId.ToString()),
+            };
+            return SignIn(claims);
+        }
+    )
+    .RequireAuthorization();
+
 app.MapGet(
-    "/api/clients",
-    async (TurtleDb db) =>
-    {
-        return await db
-            .Clients.Where(c => !c.Archived)
-            .OrderBy(c => c.Name)
-            .Select(c => new ClientDto(c.Id, c.Name))
-            .ToListAsync();
-    }
-);
+        "/api/clients",
+        async (TurtleDb db) =>
+        {
+            return await db
+                .Clients.Where(c => !c.Archived)
+                .OrderBy(c => c.Name)
+                .Select(c => new ClientDto(c.Id, c.Name))
+                .ToListAsync();
+        }
+    )
+    .RequireAuthorization(p => p.RequireClaim("company"));
 
 app.MapPost(
-    "/api/clients",
-    async (NewClient req, TurtleDb db) =>
-    {
-        if (string.IsNullOrWhiteSpace(req.Name))
+        "/api/clients",
+        async (NewClient req, TurtleDb db, CurrentUser me) =>
         {
-            return Results.ValidationProblem(
-                new Dictionary<string, string[]> { ["name"] = ["The name cannot be empty"] }
-            );
+            if (string.IsNullOrWhiteSpace(req.Name))
+            {
+                return Results.ValidationProblem(
+                    new Dictionary<string, string[]> { ["name"] = ["The name cannot be empty"] }
+                );
+            }
+            try
+            {
+                var client = new Client { Name = req.Name.Trim(), CompanyId = me.CompanyId!.Value };
+                db.Add(client);
+                await db.SaveChangesAsync();
+                return Results.Created(
+                    $"/api/clients/{client.Id}",
+                    new ClientDto(client.Id, client.Name)
+                );
+            }
+            catch (DbUpdateException ex)
+                when (ex.InnerException
+                        is PostgresException { SqlState: PostgresErrorCodes.UniqueViolation }
+                )
+            {
+                return Results.Conflict();
+            }
         }
-        try
-        {
-            var client = new Client { Name = req.Name.Trim() };
-            db.Add(client);
-            await db.SaveChangesAsync();
-            return Results.Created(
-                $"/api/clients/{client.Id}",
-                new ClientDto(client.Id, client.Name)
-            );
-        }
-        catch (DbUpdateException ex)
-            when (ex.InnerException
-                    is PostgresException { SqlState: PostgresErrorCodes.UniqueViolation }
-            )
-        {
-            return Results.Conflict();
-        }
-    }
-);
+    )
+    .RequireAuthorization(p => p.RequireClaim("company"));
 
 app.Run();
 
