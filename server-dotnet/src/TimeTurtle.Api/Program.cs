@@ -1,5 +1,9 @@
+using System.Security.Claims;
+using Microsoft.AspNetCore.Authentication.Cookies;
+using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
 using Npgsql;
+using TimeTurtle.Api.Auth;
 using TimeTurtle.Api.Clients;
 using TimeTurtle.Api.Data;
 
@@ -13,6 +17,12 @@ builder.Services.AddNpgsqlDataSource(connectionString);
 builder.Services.AddDbContext<TurtleDb>(o =>
     o.UseNpgsql(connectionString).UseSnakeCaseNamingConvention()
 );
+
+builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme).AddCookie();
+builder.Services.AddAuthorization();
+builder.Services.AddHttpContextAccessor();
+builder.Services.AddSingleton<PasswordHasher<User>>();
+builder.Services.AddTransient<CurrentUser>();
 
 var app = builder.Build();
 
@@ -30,6 +40,41 @@ app.MapGet(
         {
             return Results.Json(new { ok = false }, statusCode: 503);
         }
+    }
+);
+
+app.MapPost(
+    "/api/login",
+    async (LoginRequest request, TurtleDb db, PasswordHasher<User> hasher) =>
+    {
+        var user = await db.Users.SingleOrDefaultAsync(u => u.Email == request.Email);
+        if (user == null)
+        {
+            return Results.Unauthorized();
+        }
+
+        var check = hasher.VerifyHashedPassword(user, user.PasswordHash, request.Password);
+        if (check == PasswordVerificationResult.Failed)
+        {
+            return Results.Unauthorized();
+        }
+        var companies = await db
+            .Companies.Where(c =>
+                db.Memberships.Any(m => m.UserId == user.Id && m.CompanyId == c.Id)
+            )
+            .ToListAsync();
+        if (companies.Count == 1)
+        {
+            var claims = new List<Claim>
+            {
+                new(ClaimTypes.Email, user.Email),
+                new("CurrentUserId", user.Id.ToString()),
+                new("CurrentCompanyId", companies[0].Id.ToString()),
+            };
+            SignIn(claims);
+            return Results.Ok();
+        }
+        return Results.Ok(companies);
     }
 );
 
@@ -76,3 +121,10 @@ app.MapPost(
 );
 
 app.Run();
+
+static IResult SignIn(List<Claim> claims) =>
+    Results.SignIn(
+        new ClaimsPrincipal(
+            new ClaimsIdentity(claims, CookieAuthenticationDefaults.AuthenticationScheme)
+        )
+    );
