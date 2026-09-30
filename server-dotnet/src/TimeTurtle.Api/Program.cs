@@ -1,5 +1,6 @@
 using System.Security.Claims;
 using Microsoft.AspNetCore.Authentication.Cookies;
+using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
 using Npgsql;
@@ -27,6 +28,8 @@ builder
             return Task.CompletedTask;
         }
     );
+
+builder.Services.AddDataProtection().PersistKeysToDbContext<TurtleDb>();
 builder.Services.AddAuthorization();
 builder.Services.AddHttpContextAccessor();
 builder.Services.AddSingleton<PasswordHasher<User>>();

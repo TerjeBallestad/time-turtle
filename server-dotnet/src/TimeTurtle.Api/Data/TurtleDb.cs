@@ -1,3 +1,4 @@
+using Microsoft.AspNetCore.DataProtection.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore;
 using TimeTurtle.Api.Auth;
 
@@ -32,12 +33,15 @@ public class Client
     public bool Archived { get; set; }
 }
 
-public class TurtleDb(DbContextOptions<TurtleDb> options, CurrentUser me) : DbContext(options)
+public class TurtleDb(DbContextOptions<TurtleDb> options, CurrentUser me)
+    : DbContext(options),
+        IDataProtectionKeyContext
 {
     public DbSet<Company> Companies => Set<Company>();
     public DbSet<User> Users => Set<User>();
     public DbSet<Membership> Memberships => Set<Membership>();
     public DbSet<Client> Clients => Set<Client>();
+    public DbSet<DataProtectionKey> DataProtectionKeys => Set<DataProtectionKey>();
 
     private readonly Guid? _companyId = me.CompanyId;
 
