@@ -1,5 +1,7 @@
 using System.Net;
 using System.Net.Http.Json;
+using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc.Testing;
@@ -19,10 +21,29 @@ public class TurtleFactory : WebApplicationFactory<Program>, IAsyncLifetime
     public Company Other { get; } = new() { Name = "Other AS" };
 
     private readonly PostgreSqlContainer _pg = new PostgreSqlBuilder("postgres:18").Build();
+    private readonly string _certPath = Path.Combine(
+        Path.GetTempPath(),
+        $"turtle-keys-{Guid.NewGuid()}.pfx"
+    );
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
         builder.UseSetting("ConnectionStrings:turtle", _pg.GetConnectionString());
+
+        using var rsa = RSA.Create(2048);
+        var request = new CertificateRequest(
+            "CN=time-turtle-test-keys",
+            rsa,
+            HashAlgorithmName.SHA256,
+            RSASignaturePadding.Pkcs1
+        );
+        using var cert = request.CreateSelfSigned(
+            DateTimeOffset.UtcNow,
+            DateTimeOffset.UtcNow.AddDays(1)
+        );
+        File.WriteAllBytes(_certPath, cert.Export(X509ContentType.Pfx, "test"));
+        builder.UseSetting("KeyCertificate:Path", _certPath);
+        builder.UseSetting("KeyCertificate:Password", "test");
     }
 
     public async Task InitializeAsync()
@@ -67,5 +88,9 @@ public class TurtleFactory : WebApplicationFactory<Program>, IAsyncLifetime
         return http;
     }
 
-    public new async Task DisposeAsync() => await _pg.DisposeAsync();
+    public new async Task DisposeAsync()
+    {
+        File.Delete(_certPath);
+        await _pg.DisposeAsync();
+    }
 }

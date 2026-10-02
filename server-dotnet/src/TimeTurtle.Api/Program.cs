@@ -1,4 +1,5 @@
 using System.Security.Claims;
+using System.Security.Cryptography.X509Certificates;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.Identity;
@@ -29,7 +30,18 @@ builder
         }
     );
 
-builder.Services.AddDataProtection().PersistKeysToDbContext<TurtleDb>();
+var certPath =
+    builder.Configuration["KeyCertificate:Path"]
+    ?? throw new InvalidOperationException("KeyCertificate:Path is not set");
+var keyCertificate = X509CertificateLoader.LoadPkcs12FromFile(
+    certPath,
+    builder.Configuration["KeyCertificate:Password"]
+);
+builder
+    .Services.AddDataProtection()
+    .PersistKeysToDbContext<TurtleDb>()
+    .ProtectKeysWithCertificate(keyCertificate);
+
 builder.Services.AddAuthorization();
 builder.Services.AddHttpContextAccessor();
 builder.Services.AddSingleton<PasswordHasher<User>>();
