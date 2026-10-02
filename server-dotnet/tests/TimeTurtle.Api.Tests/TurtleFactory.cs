@@ -21,10 +21,7 @@ public class TurtleFactory : WebApplicationFactory<Program>, IAsyncLifetime
     public Company Other { get; } = new() { Name = "Other AS" };
 
     private readonly PostgreSqlContainer _pg = new PostgreSqlBuilder("postgres:18").Build();
-    private readonly string _certPath = Path.Combine(
-        Path.GetTempPath(),
-        $"turtle-keys-{Guid.NewGuid()}.pfx"
-    );
+    private readonly string _certPath = WritePfx("CN=time-turtle-test-keys");
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
@@ -65,6 +62,24 @@ public class TurtleFactory : WebApplicationFactory<Program>, IAsyncLifetime
             new Membership { UserId = carol.Id, CompanyId = Other.Id }
         );
         await db.SaveChangesAsync();
+    }
+
+    public static string WritePfx(string subject)
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"turtle-keys-{Guid.NewGuid()}.pfx");
+        using var rsa = RSA.Create(2048);
+        var request = new CertificateRequest(
+            subject,
+            rsa,
+            HashAlgorithmName.SHA256,
+            RSASignaturePadding.Pkcs1
+        );
+        using var cert = request.CreateSelfSigned(
+            DateTimeOffset.UtcNow,
+            DateTimeOffset.UtcNow.AddDays(1)
+        );
+        File.WriteAllBytes(path, cert.Export(X509ContentType.Pfx, "test"));
+        return path;
     }
 
     private static User NewUser(string email, string name)

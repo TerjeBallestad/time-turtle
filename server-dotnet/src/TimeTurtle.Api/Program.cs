@@ -1,7 +1,9 @@
 using System.Security.Claims;
+using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.DataProtection;
+using Microsoft.AspNetCore.DataProtection.KeyManagement;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
 using Npgsql;
@@ -48,6 +50,26 @@ builder.Services.AddSingleton<PasswordHasher<User>>();
 builder.Services.AddScoped<CurrentUser>();
 
 var app = builder.Build();
+
+using (var scope = app.Services.CreateScope())
+{
+    await scope.ServiceProvider.GetRequiredService<TurtleDb>().Database.MigrateAsync();
+}
+
+foreach (var key in app.Services.GetRequiredService<IKeyManager>().GetAllKeys())
+{
+    try
+    {
+        _ = key.Descriptor;
+    }
+    catch (CryptographicException ex)
+    {
+        throw new InvalidOperationException(
+            $"Key {key.KeyId} cannot be decrypted with the certificate in KeyCertificate:Path",
+            ex
+        );
+    }
+}
 
 app.MapGet(
     "/api/health",

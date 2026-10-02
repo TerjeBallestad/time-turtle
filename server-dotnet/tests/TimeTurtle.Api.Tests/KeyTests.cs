@@ -27,4 +27,22 @@ public class KeyTests(TurtleFactory factory) : IClassFixture<TurtleFactory>
         Assert.All(keys, key => Assert.DoesNotContain("<masterKey", key));
         Assert.All(keys, key => Assert.Contains("<encryptedSecret", key));
     }
+
+    [Fact]
+    public async Task Wrong_certificate_stops_the_start()
+    {
+        await factory.LoginAs("ada@turtle.test");
+        var otherPath = TurtleFactory.WritePfx("CN=wrong-keys");
+        try
+        {
+            using var other = factory.WithWebHostBuilder(b =>
+                b.UseSetting("KeyCertificate:Path", otherPath)
+            );
+            Assert.ThrowsAny<Exception>(other.CreateClient);
+        }
+        finally
+        {
+            File.Delete(otherPath);
+        }
+    }
 }
