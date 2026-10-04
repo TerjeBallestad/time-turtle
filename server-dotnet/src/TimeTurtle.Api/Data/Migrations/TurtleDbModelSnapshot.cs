@@ -144,6 +144,10 @@ namespace TimeTurtle.Api.Data.Migrations
                         .HasColumnType("text")
                         .HasColumnName("password_hash");
 
+                    b.Property<Guid>("SecurityStamp")
+                        .HasColumnType("uuid")
+                        .HasColumnName("security_stamp");
+
                     b.HasKey("Id")
                         .HasName("pk_users");
 

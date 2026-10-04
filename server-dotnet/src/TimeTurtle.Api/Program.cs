@@ -1,6 +1,7 @@
 using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
+using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.DataProtection.KeyManagement;
@@ -25,12 +26,37 @@ builder.Services.AddDbContext<TurtleDb>(o =>
 builder
     .Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
     .AddCookie(o =>
+    {
         o.Events.OnRedirectToLogin = ctx =>
         {
             ctx.Response.StatusCode = StatusCodes.Status401Unauthorized;
             return Task.CompletedTask;
-        }
-    );
+        };
+        o.Events.OnValidatePrincipal = async ctx =>
+        {
+            using var scope = ctx.HttpContext.RequestServices.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<TurtleDb>();
+            var claims = ctx.Principal!;
+            var userId = Guid.Parse(claims.FindFirstValue(ClaimTypes.NameIdentifier)!);
+            var stamp = claims.FindFirstValue("stamp");
+            var company = claims.FindFirstValue("company");
+
+            var user = await db.Users.SingleOrDefaultAsync(u => u.Id == userId);
+            bool ok = user != null && user.SecurityStamp.ToString() == stamp;
+
+            if (ok && company != null)
+            {
+                ok = await db.Memberships.AnyAsync(m =>
+                    m.UserId == userId && m.CompanyId == Guid.Parse(company)
+                );
+            }
+            if (!ok)
+            {
+                ctx.RejectPrincipal();
+                await ctx.HttpContext.SignOutAsync();
+            }
+        };
+    });
 
 var certPath =
     builder.Configuration["KeyCertificate:Path"]
@@ -108,7 +134,11 @@ app.MapPost(
             .Select(m => m.CompanyId)
             .ToListAsync();
 
-        var claims = new List<Claim> { new(ClaimTypes.NameIdentifier, user.Id.ToString()) };
+        var claims = new List<Claim>
+        {
+            new(ClaimTypes.NameIdentifier, user.Id.ToString()),
+            new("stamp", user.SecurityStamp.ToString()),
+        };
 
         if (companyIds.Count == 1)
         {
@@ -150,7 +180,41 @@ app.MapPost(
             {
                 new(ClaimTypes.NameIdentifier, me.UserId.ToString()!),
                 new("company", request.CompanyId.ToString()),
+                new("stamp", me.Stamp.ToString()!),
             };
+            return SignIn(claims);
+        }
+    )
+    .RequireAuthorization();
+
+app.MapPost(
+        "/api/me/password",
+        async (ChangePassword request, TurtleDb db, CurrentUser me, PasswordHasher<User> hasher) =>
+        {
+            var user = await db.Users.SingleAsync(u => u.Id == me.UserId);
+            var check = hasher.VerifyHashedPassword(
+                user,
+                user.PasswordHash,
+                request.CurrentPassword
+            );
+            if (check == PasswordVerificationResult.Failed)
+            {
+                return Results.Forbid();
+            }
+            user.SecurityStamp = Guid.NewGuid();
+            user.PasswordHash = hasher.HashPassword(user, request.NewPassword);
+            await db.SaveChangesAsync();
+
+            var claims = new List<Claim>
+            {
+                new(ClaimTypes.NameIdentifier, user.Id.ToString()),
+                new("stamp", user.SecurityStamp.ToString()),
+            };
+
+            if (me.CompanyId != null)
+            {
+                claims.Add(new("company", me.CompanyId.ToString()!));
+            }
             return SignIn(claims);
         }
     )

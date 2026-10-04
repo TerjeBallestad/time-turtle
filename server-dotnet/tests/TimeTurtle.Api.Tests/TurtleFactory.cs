@@ -5,7 +5,6 @@ using System.Security.Cryptography.X509Certificates;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc.Testing;
-using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Testcontainers.PostgreSql;
 using TimeTurtle.Api.Data;
@@ -26,19 +25,6 @@ public class TurtleFactory : WebApplicationFactory<Program>, IAsyncLifetime
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
         builder.UseSetting("ConnectionStrings:turtle", _pg.GetConnectionString());
-
-        using var rsa = RSA.Create(2048);
-        var request = new CertificateRequest(
-            "CN=time-turtle-test-keys",
-            rsa,
-            HashAlgorithmName.SHA256,
-            RSASignaturePadding.Pkcs1
-        );
-        using var cert = request.CreateSelfSigned(
-            DateTimeOffset.UtcNow,
-            DateTimeOffset.UtcNow.AddDays(1)
-        );
-        File.WriteAllBytes(_certPath, cert.Export(X509ContentType.Pfx, "test"));
         builder.UseSetting("KeyCertificate:Path", _certPath);
         builder.UseSetting("KeyCertificate:Password", "test");
     }
@@ -48,7 +34,6 @@ public class TurtleFactory : WebApplicationFactory<Program>, IAsyncLifetime
         await _pg.StartAsync();
         using var scope = Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<TurtleDb>();
-        await db.Database.MigrateAsync();
 
         var ada = NewUser("ada@turtle.test", "Ada");
         var bob = NewUser("bob@other.test", "Bob");
