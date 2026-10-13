@@ -68,7 +68,10 @@ public class ProjectTests(TurtleFactory factory) : IClassFixture<TurtleFactory>
         var json = await http.GetFromJsonAsync<JsonElement>("/api/projects");
         var project = json.EnumerateArray()
             .Single(p => p.GetProperty("code").GetString() == "NORATE");
-        Assert.DoesNotContain(project.EnumerateObject(), f => f.Name.Contains("rate"));
+        Assert.DoesNotContain(
+            project.EnumerateObject(),
+            f => f.Name.Contains("rate", StringComparison.OrdinalIgnoreCase)
+        );
     }
 
     [Fact]
@@ -116,6 +119,7 @@ public class ProjectTests(TurtleFactory factory) : IClassFixture<TurtleFactory>
         var assignment = new Assignment
         {
             Id = Guid.CreateVersion7(),
+            CompanyId = project.CompanyId,
             MembershipId = await factory.MembershipOf(email, company ?? factory.Turtle),
             ProjectId = project.Id,
             EndedAt = ended ? DateTimeOffset.UtcNow : null,

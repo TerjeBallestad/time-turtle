@@ -1,8 +1,10 @@
 using System.Net;
 using System.Net.Http.Json;
+using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.EntityFrameworkCore;
@@ -95,6 +97,27 @@ public class TurtleFactory : WebApplicationFactory<Program>, IAsyncLifetime
     {
         using var scope = Services.CreateScope();
         return await work(scope.ServiceProvider.GetRequiredService<TurtleDb>());
+    }
+
+    // A TurtleDb as if a request had chosen this company, so the query filters apply.
+    public async Task<T> WithDbAs<T>(Company company, Func<TurtleDb, Task<T>> work)
+    {
+        using var scope = Services.CreateScope();
+        var http = scope.ServiceProvider.GetRequiredService<IHttpContextAccessor>();
+        http.HttpContext = new DefaultHttpContext
+        {
+            User = new ClaimsPrincipal(
+                new ClaimsIdentity([new Claim("company", company.Id.ToString())])
+            ),
+        };
+        try
+        {
+            return await work(scope.ServiceProvider.GetRequiredService<TurtleDb>());
+        }
+        finally
+        {
+            http.HttpContext = null;
+        }
     }
 
     public Task<Guid> MembershipOf(string email, Company company) =>
