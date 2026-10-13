@@ -85,7 +85,7 @@ namespace TimeTurtle.Api.Data.Migrations
                     id = table.Column<Guid>(type: "uuid", nullable: false),
                     assignment_id = table.Column<Guid>(type: "uuid", nullable: false),
                     valid_from = table.Column<DateOnly>(type: "date", nullable: false),
-                    rate = table.Column<decimal>(type: "numeric", nullable: false)
+                    rate = table.Column<decimal>(type: "numeric(12,2)", precision: 12, scale: 2, nullable: false)
                 },
                 constraints: table =>
                 {

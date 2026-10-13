@@ -174,5 +174,8 @@ public class TurtleDb(DbContextOptions<TurtleDb> options, CurrentUser me)
             .Entity<AssignmentRate>()
             .HasIndex(r => new { r.AssignmentId, r.ValidFrom })
             .IsUnique();
+        // Whole øre. Postgres rounds a third decimal instead of refusing it, so the route that
+        // sets a rate must refuse more than two decimals itself.
+        model.Entity<AssignmentRate>().Property(r => r.Rate).HasPrecision(12, 2);
     }
 }

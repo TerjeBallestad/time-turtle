@@ -140,6 +140,24 @@ public class ProjectTableTests(TurtleFactory factory) : IClassFixture<TurtleFact
     }
 
     [Fact]
+    public async Task A_rate_is_stored_in_whole_ore_and_a_third_decimal_is_rounded()
+    {
+        var project = NewProject("ORE");
+        var assignment = Assign(project, await Ada());
+        var rate = NewRate(assignment, new DateOnly(2026, 10, 1));
+        rate.Rate = 1250.125m;
+        await Save(project, assignment, rate);
+
+        var stored = await factory.WithDb(db =>
+            db.AssignmentRates.IgnoreQueryFilters()
+                .Where(r => r.Id == rate.Id)
+                .Select(r => r.Rate)
+                .SingleAsync()
+        );
+        Assert.Equal(1250.13m, stored);
+    }
+
+    [Fact]
     public async Task The_company_filter_hides_another_companys_assignments_and_rates()
     {
         var mine = NewProject("FILTERME");
