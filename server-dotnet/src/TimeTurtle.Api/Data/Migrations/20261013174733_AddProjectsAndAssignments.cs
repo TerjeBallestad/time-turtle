@@ -11,6 +11,16 @@ namespace TimeTurtle.Api.Data.Migrations
         /// <inheritdoc />
         protected override void Up(MigrationBuilder migrationBuilder)
         {
+            migrationBuilder.AddUniqueConstraint(
+                name: "ak_memberships_id_company_id",
+                table: "memberships",
+                columns: new[] { "id", "company_id" });
+
+            migrationBuilder.AddUniqueConstraint(
+                name: "ak_clients_id_company_id",
+                table: "clients",
+                columns: new[] { "id", "company_id" });
+
             migrationBuilder.CreateTable(
                 name: "projects",
                 columns: table => new
@@ -25,11 +35,12 @@ namespace TimeTurtle.Api.Data.Migrations
                 constraints: table =>
                 {
                     table.PrimaryKey("pk_projects", x => x.id);
+                    table.UniqueConstraint("ak_projects_id_company_id", x => new { x.id, x.company_id });
                     table.ForeignKey(
-                        name: "fk_projects_clients_client_id",
-                        column: x => x.client_id,
+                        name: "fk_projects_clients_client_id_company_id",
+                        columns: x => new { x.client_id, x.company_id },
                         principalTable: "clients",
-                        principalColumn: "id",
+                        principalColumns: new[] { "id", "company_id" },
                         onDelete: ReferentialAction.Restrict);
                     table.ForeignKey(
                         name: "fk_projects_companies_company_id",
@@ -44,6 +55,7 @@ namespace TimeTurtle.Api.Data.Migrations
                 columns: table => new
                 {
                     id = table.Column<Guid>(type: "uuid", nullable: false),
+                    company_id = table.Column<Guid>(type: "uuid", nullable: false),
                     membership_id = table.Column<Guid>(type: "uuid", nullable: false),
                     project_id = table.Column<Guid>(type: "uuid", nullable: false),
                     ended_at = table.Column<DateTimeOffset>(type: "timestamp with time zone", nullable: true)
@@ -51,17 +63,18 @@ namespace TimeTurtle.Api.Data.Migrations
                 constraints: table =>
                 {
                     table.PrimaryKey("pk_assignments", x => x.id);
+                    table.UniqueConstraint("ak_assignments_id_membership_id", x => new { x.id, x.membership_id });
                     table.ForeignKey(
-                        name: "fk_assignments_memberships_membership_id",
-                        column: x => x.membership_id,
+                        name: "fk_assignments_memberships_membership_id_company_id",
+                        columns: x => new { x.membership_id, x.company_id },
                         principalTable: "memberships",
-                        principalColumn: "id",
+                        principalColumns: new[] { "id", "company_id" },
                         onDelete: ReferentialAction.Restrict);
                     table.ForeignKey(
-                        name: "fk_assignments_projects_project_id",
-                        column: x => x.project_id,
+                        name: "fk_assignments_projects_project_id_company_id",
+                        columns: x => new { x.project_id, x.company_id },
                         principalTable: "projects",
-                        principalColumn: "id",
+                        principalColumns: new[] { "id", "company_id" },
                         onDelete: ReferentialAction.Restrict);
                 });
 
@@ -92,6 +105,11 @@ namespace TimeTurtle.Api.Data.Migrations
                 unique: true);
 
             migrationBuilder.CreateIndex(
+                name: "ix_assignments_membership_id_company_id",
+                table: "assignments",
+                columns: new[] { "membership_id", "company_id" });
+
+            migrationBuilder.CreateIndex(
                 name: "ix_assignments_membership_id_project_id",
                 table: "assignments",
                 columns: new[] { "membership_id", "project_id" },
@@ -99,14 +117,14 @@ namespace TimeTurtle.Api.Data.Migrations
                 filter: "ended_at IS NULL");
 
             migrationBuilder.CreateIndex(
-                name: "ix_assignments_project_id",
+                name: "ix_assignments_project_id_company_id",
                 table: "assignments",
-                column: "project_id");
+                columns: new[] { "project_id", "company_id" });
 
             migrationBuilder.CreateIndex(
-                name: "ix_projects_client_id",
+                name: "ix_projects_client_id_company_id",
                 table: "projects",
-                column: "client_id");
+                columns: new[] { "client_id", "company_id" });
 
             migrationBuilder.CreateIndex(
                 name: "ix_projects_company_id_code",
@@ -127,6 +145,14 @@ namespace TimeTurtle.Api.Data.Migrations
 
             migrationBuilder.DropTable(
                 name: "projects");
+
+            migrationBuilder.DropUniqueConstraint(
+                name: "ak_memberships_id_company_id",
+                table: "memberships");
+
+            migrationBuilder.DropUniqueConstraint(
+                name: "ak_clients_id_company_id",
+                table: "clients");
         }
     }
 }

@@ -48,6 +48,7 @@ public class Project
 public class Assignment
 {
     public Guid Id { get; set; }
+    public Guid CompanyId { get; set; }
     public Guid MembershipId { get; set; }
     public Guid ProjectId { get; set; }
     public DateTimeOffset? EndedAt { get; set; }
@@ -115,11 +116,15 @@ public class TurtleDb(DbContextOptions<TurtleDb> options, CurrentUser me)
             .WithMany()
             .HasForeignKey(p => p.CompanyId)
             .OnDelete(DeleteBehavior.Restrict);
+        // A project's client must belong to the project's company. The foreign key covers both
+        // columns, so Postgres refuses a client from another company. A null client is not checked.
+        model.Entity<Client>().HasAlternateKey(c => new { c.Id, c.CompanyId });
         model
             .Entity<Project>()
             .HasOne<Client>()
             .WithMany()
-            .HasForeignKey(p => p.ClientId)
+            .HasForeignKey(p => new { p.ClientId, p.CompanyId })
+            .HasPrincipalKey(c => new { c.Id, c.CompanyId })
             .OnDelete(DeleteBehavior.Restrict);
         model
             .Entity<Project>()
@@ -127,20 +132,29 @@ public class TurtleDb(DbContextOptions<TurtleDb> options, CurrentUser me)
             .IsUnique()
             .HasFilter("NOT archived");
 
-        // An assignment has no company column. It belongs to the company of its project.
-        model.Entity<Assignment>().HasQueryFilter(a => Projects.Any(p => p.Id == a.ProjectId));
+        // The membership and the project of an assignment are in the assignment's company. Both
+        // foreign keys share company_id, so Postgres refuses a membership in one company on a
+        // project in another.
+        model.Entity<Assignment>().HasQueryFilter(a => a.CompanyId == _companyId);
+        model.Entity<Membership>().HasAlternateKey(m => new { m.Id, m.CompanyId });
+        model.Entity<Project>().HasAlternateKey(p => new { p.Id, p.CompanyId });
         model
             .Entity<Assignment>()
             .HasOne<Membership>()
             .WithMany()
-            .HasForeignKey(a => a.MembershipId)
+            .HasForeignKey(a => new { a.MembershipId, a.CompanyId })
+            .HasPrincipalKey(m => new { m.Id, m.CompanyId })
             .OnDelete(DeleteBehavior.Restrict);
         model
             .Entity<Assignment>()
             .HasOne<Project>()
             .WithMany()
-            .HasForeignKey(a => a.ProjectId)
+            .HasForeignKey(a => new { a.ProjectId, a.CompanyId })
+            .HasPrincipalKey(p => new { p.Id, p.CompanyId })
             .OnDelete(DeleteBehavior.Restrict);
+        // For the entries to come: an entry's membership must match its assignment's, and that
+        // composite foreign key needs this key to point at.
+        model.Entity<Assignment>().HasAlternateKey(a => new { a.Id, a.MembershipId });
         model
             .Entity<Assignment>()
             .HasIndex(a => new { a.MembershipId, a.ProjectId })
@@ -160,6 +174,5 @@ public class TurtleDb(DbContextOptions<TurtleDb> options, CurrentUser me)
             .Entity<AssignmentRate>()
             .HasIndex(r => new { r.AssignmentId, r.ValidFrom })
             .IsUnique();
-        model.Entity<AssignmentRate>().Property(r => r.Rate).HasColumnType("numeric");
     }
 }

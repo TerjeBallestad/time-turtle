@@ -12,7 +12,7 @@ using TimeTurtle.Api.Data;
 namespace TimeTurtle.Api.Data.Migrations
 {
     [DbContext(typeof(TurtleDb))]
-    [Migration("20261013171815_AddProjectsAndAssignments")]
+    [Migration("20261013174733_AddProjectsAndAssignments")]
     partial class AddProjectsAndAssignments
     {
         /// <inheritdoc />
@@ -55,6 +55,10 @@ namespace TimeTurtle.Api.Data.Migrations
                         .HasColumnType("uuid")
                         .HasColumnName("id");
 
+                    b.Property<Guid>("CompanyId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("company_id");
+
                     b.Property<DateTimeOffset?>("EndedAt")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("ended_at");
@@ -70,13 +74,19 @@ namespace TimeTurtle.Api.Data.Migrations
                     b.HasKey("Id")
                         .HasName("pk_assignments");
 
-                    b.HasIndex("ProjectId")
-                        .HasDatabaseName("ix_assignments_project_id");
+                    b.HasAlternateKey("Id", "MembershipId")
+                        .HasName("ak_assignments_id_membership_id");
+
+                    b.HasIndex("MembershipId", "CompanyId")
+                        .HasDatabaseName("ix_assignments_membership_id_company_id");
 
                     b.HasIndex("MembershipId", "ProjectId")
                         .IsUnique()
                         .HasDatabaseName("ix_assignments_membership_id_project_id")
                         .HasFilter("ended_at IS NULL");
+
+                    b.HasIndex("ProjectId", "CompanyId")
+                        .HasDatabaseName("ix_assignments_project_id_company_id");
 
                     b.ToTable("assignments", (string)null);
                 });
@@ -133,6 +143,9 @@ namespace TimeTurtle.Api.Data.Migrations
                     b.HasKey("Id")
                         .HasName("pk_clients");
 
+                    b.HasAlternateKey("Id", "CompanyId")
+                        .HasName("ak_clients_id_company_id");
+
                     b.HasIndex("CompanyId", "Name")
                         .IsUnique()
                         .HasDatabaseName("ix_clients_company_id_name")
@@ -177,6 +190,9 @@ namespace TimeTurtle.Api.Data.Migrations
                     b.HasKey("Id")
                         .HasName("pk_memberships");
 
+                    b.HasAlternateKey("Id", "CompanyId")
+                        .HasName("ak_memberships_id_company_id");
+
                     b.HasIndex("UserId")
                         .HasDatabaseName("ix_memberships_user_id");
 
@@ -219,8 +235,11 @@ namespace TimeTurtle.Api.Data.Migrations
                     b.HasKey("Id")
                         .HasName("pk_projects");
 
-                    b.HasIndex("ClientId")
-                        .HasDatabaseName("ix_projects_client_id");
+                    b.HasAlternateKey("Id", "CompanyId")
+                        .HasName("ak_projects_id_company_id");
+
+                    b.HasIndex("ClientId", "CompanyId")
+                        .HasDatabaseName("ix_projects_client_id_company_id");
 
                     b.HasIndex("CompanyId", "Code")
                         .IsUnique()
@@ -270,17 +289,19 @@ namespace TimeTurtle.Api.Data.Migrations
                 {
                     b.HasOne("TimeTurtle.Api.Data.Membership", null)
                         .WithMany()
-                        .HasForeignKey("MembershipId")
+                        .HasForeignKey("MembershipId", "CompanyId")
+                        .HasPrincipalKey("Id", "CompanyId")
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired()
-                        .HasConstraintName("fk_assignments_memberships_membership_id");
+                        .HasConstraintName("fk_assignments_memberships_membership_id_company_id");
 
                     b.HasOne("TimeTurtle.Api.Data.Project", null)
                         .WithMany()
-                        .HasForeignKey("ProjectId")
+                        .HasForeignKey("ProjectId", "CompanyId")
+                        .HasPrincipalKey("Id", "CompanyId")
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired()
-                        .HasConstraintName("fk_assignments_projects_project_id");
+                        .HasConstraintName("fk_assignments_projects_project_id_company_id");
                 });
 
             modelBuilder.Entity("TimeTurtle.Api.Data.AssignmentRate", b =>
@@ -322,18 +343,19 @@ namespace TimeTurtle.Api.Data.Migrations
 
             modelBuilder.Entity("TimeTurtle.Api.Data.Project", b =>
                 {
-                    b.HasOne("TimeTurtle.Api.Data.Client", null)
-                        .WithMany()
-                        .HasForeignKey("ClientId")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .HasConstraintName("fk_projects_clients_client_id");
-
                     b.HasOne("TimeTurtle.Api.Data.Company", null)
                         .WithMany()
                         .HasForeignKey("CompanyId")
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired()
                         .HasConstraintName("fk_projects_companies_company_id");
+
+                    b.HasOne("TimeTurtle.Api.Data.Client", null)
+                        .WithMany()
+                        .HasForeignKey("ClientId", "CompanyId")
+                        .HasPrincipalKey("Id", "CompanyId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .HasConstraintName("fk_projects_clients_client_id_company_id");
                 });
 #pragma warning restore 612, 618
         }
