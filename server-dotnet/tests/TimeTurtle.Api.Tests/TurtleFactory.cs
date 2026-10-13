@@ -5,6 +5,7 @@ using System.Security.Cryptography.X509Certificates;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Testcontainers.PostgreSql;
 using TimeTurtle.Api.Data;
@@ -87,6 +88,24 @@ public class TurtleFactory : WebApplicationFactory<Program>, IAsyncLifetime
         Assert.Equal(HttpStatusCode.OK, res.StatusCode);
         return http;
     }
+
+    // A TurtleDb outside any request, so no company is chosen and the query filters hide
+    // every company's rows. Tests that read back use IgnoreQueryFilters().
+    public async Task<T> WithDb<T>(Func<TurtleDb, Task<T>> work)
+    {
+        using var scope = Services.CreateScope();
+        return await work(scope.ServiceProvider.GetRequiredService<TurtleDb>());
+    }
+
+    public Task<Guid> MembershipOf(string email, Company company) =>
+        WithDb(db =>
+            db.Memberships.Where(m =>
+                    m.CompanyId == company.Id
+                    && db.Users.Any(u => u.Id == m.UserId && u.Email == email)
+                )
+                .Select(m => m.Id)
+                .SingleAsync()
+        );
 
     public new async Task DisposeAsync()
     {

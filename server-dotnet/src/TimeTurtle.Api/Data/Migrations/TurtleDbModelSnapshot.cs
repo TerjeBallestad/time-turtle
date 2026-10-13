@@ -45,6 +45,68 @@ namespace TimeTurtle.Api.Data.Migrations
                     b.ToTable("data_protection_keys", (string)null);
                 });
 
+            modelBuilder.Entity("TimeTurtle.Api.Data.Assignment", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<DateTimeOffset?>("EndedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("ended_at");
+
+                    b.Property<Guid>("MembershipId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("membership_id");
+
+                    b.Property<Guid>("ProjectId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("project_id");
+
+                    b.HasKey("Id")
+                        .HasName("pk_assignments");
+
+                    b.HasIndex("ProjectId")
+                        .HasDatabaseName("ix_assignments_project_id");
+
+                    b.HasIndex("MembershipId", "ProjectId")
+                        .IsUnique()
+                        .HasDatabaseName("ix_assignments_membership_id_project_id")
+                        .HasFilter("ended_at IS NULL");
+
+                    b.ToTable("assignments", (string)null);
+                });
+
+            modelBuilder.Entity("TimeTurtle.Api.Data.AssignmentRate", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<Guid>("AssignmentId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("assignment_id");
+
+                    b.Property<decimal>("Rate")
+                        .HasColumnType("numeric")
+                        .HasColumnName("rate");
+
+                    b.Property<DateOnly>("ValidFrom")
+                        .HasColumnType("date")
+                        .HasColumnName("valid_from");
+
+                    b.HasKey("Id")
+                        .HasName("pk_assignment_rates");
+
+                    b.HasIndex("AssignmentId", "ValidFrom")
+                        .IsUnique()
+                        .HasDatabaseName("ix_assignment_rates_assignment_id_valid_from");
+
+                    b.ToTable("assignment_rates", (string)null);
+                });
+
             modelBuilder.Entity("TimeTurtle.Api.Data.Client", b =>
                 {
                     b.Property<Guid>("Id")
@@ -122,6 +184,49 @@ namespace TimeTurtle.Api.Data.Migrations
                     b.ToTable("memberships", (string)null);
                 });
 
+            modelBuilder.Entity("TimeTurtle.Api.Data.Project", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<bool>("Archived")
+                        .HasColumnType("boolean")
+                        .HasColumnName("archived");
+
+                    b.Property<Guid?>("ClientId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("client_id");
+
+                    b.Property<string>("Code")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("code");
+
+                    b.Property<Guid>("CompanyId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("company_id");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("name");
+
+                    b.HasKey("Id")
+                        .HasName("pk_projects");
+
+                    b.HasIndex("ClientId")
+                        .HasDatabaseName("ix_projects_client_id");
+
+                    b.HasIndex("CompanyId", "Code")
+                        .IsUnique()
+                        .HasDatabaseName("ix_projects_company_id_code")
+                        .HasFilter("NOT archived");
+
+                    b.ToTable("projects", (string)null);
+                });
+
             modelBuilder.Entity("TimeTurtle.Api.Data.User", b =>
                 {
                     b.Property<Guid>("Id")
@@ -158,6 +263,33 @@ namespace TimeTurtle.Api.Data.Migrations
                     b.ToTable("users", (string)null);
                 });
 
+            modelBuilder.Entity("TimeTurtle.Api.Data.Assignment", b =>
+                {
+                    b.HasOne("TimeTurtle.Api.Data.Membership", null)
+                        .WithMany()
+                        .HasForeignKey("MembershipId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired()
+                        .HasConstraintName("fk_assignments_memberships_membership_id");
+
+                    b.HasOne("TimeTurtle.Api.Data.Project", null)
+                        .WithMany()
+                        .HasForeignKey("ProjectId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired()
+                        .HasConstraintName("fk_assignments_projects_project_id");
+                });
+
+            modelBuilder.Entity("TimeTurtle.Api.Data.AssignmentRate", b =>
+                {
+                    b.HasOne("TimeTurtle.Api.Data.Assignment", null)
+                        .WithMany()
+                        .HasForeignKey("AssignmentId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired()
+                        .HasConstraintName("fk_assignment_rates_assignments_assignment_id");
+                });
+
             modelBuilder.Entity("TimeTurtle.Api.Data.Client", b =>
                 {
                     b.HasOne("TimeTurtle.Api.Data.Company", null)
@@ -183,6 +315,22 @@ namespace TimeTurtle.Api.Data.Migrations
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired()
                         .HasConstraintName("fk_memberships_users_user_id");
+                });
+
+            modelBuilder.Entity("TimeTurtle.Api.Data.Project", b =>
+                {
+                    b.HasOne("TimeTurtle.Api.Data.Client", null)
+                        .WithMany()
+                        .HasForeignKey("ClientId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .HasConstraintName("fk_projects_clients_client_id");
+
+                    b.HasOne("TimeTurtle.Api.Data.Company", null)
+                        .WithMany()
+                        .HasForeignKey("CompanyId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired()
+                        .HasConstraintName("fk_projects_companies_company_id");
                 });
 #pragma warning restore 612, 618
         }
