@@ -12,7 +12,7 @@ using TimeTurtle.Api.Data;
 namespace TimeTurtle.Api.Data.Migrations
 {
     [DbContext(typeof(TurtleDb))]
-    [Migration("20261013174733_AddProjectsAndAssignments")]
+    [Migration("20261013191512_AddProjectsAndAssignments")]
     partial class AddProjectsAndAssignments
     {
         /// <inheritdoc />
@@ -103,7 +103,8 @@ namespace TimeTurtle.Api.Data.Migrations
                         .HasColumnName("assignment_id");
 
                     b.Property<decimal>("Rate")
-                        .HasColumnType("numeric")
+                        .HasPrecision(12, 2)
+                        .HasColumnType("numeric(12,2)")
                         .HasColumnName("rate");
 
                     b.Property<DateOnly>("ValidFrom")

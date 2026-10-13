@@ -100,7 +100,8 @@ namespace TimeTurtle.Api.Data.Migrations
                         .HasColumnName("assignment_id");
 
                     b.Property<decimal>("Rate")
-                        .HasColumnType("numeric")
+                        .HasPrecision(12, 2)
+                        .HasColumnType("numeric(12,2)")
                         .HasColumnName("rate");
 
                     b.Property<DateOnly>("ValidFrom")
