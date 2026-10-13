@@ -11,6 +11,7 @@ using Npgsql;
 using TimeTurtle.Api.Auth;
 using TimeTurtle.Api.Clients;
 using TimeTurtle.Api.Data;
+using TimeTurtle.Api.Projects;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -260,6 +261,34 @@ app.MapPost(
             {
                 return Results.Conflict();
             }
+        }
+    )
+    .RequireAuthorization(p => p.RequireClaim("company"));
+
+// The caller's projects: the ones they have an active assignment on (DD-032).
+// The query filter keeps it to the chosen company.
+app.MapGet(
+        "/api/projects",
+        async (TurtleDb db, CurrentUser me) =>
+        {
+            return await db
+                .Projects.Where(p =>
+                    !p.Archived
+                    && db.Assignments.Any(a =>
+                        a.ProjectId == p.Id
+                        && a.EndedAt == null
+                        && db.Memberships.Any(m => m.Id == a.MembershipId && m.UserId == me.UserId)
+                    )
+                )
+                .OrderBy(p => p.Code)
+                .Select(p => new ProjectDto(
+                    p.Id,
+                    p.Code,
+                    p.Name,
+                    p.ClientId,
+                    db.Clients.Where(c => c.Id == p.ClientId).Select(c => c.Name).FirstOrDefault()
+                ))
+                .ToListAsync();
         }
     )
     .RequireAuthorization(p => p.RequireClaim("company"));
